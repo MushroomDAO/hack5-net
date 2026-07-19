@@ -4,6 +4,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-18",
   "observability": { "enabled": true },
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "hack5.net", "custom_domain": true }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -18,7 +22,7 @@
     }
   ],
   "vars": {
-    "APP_NAME": "HackVideo",
+    "APP_NAME": "hack5",
     "EVENT_NAME": "Hackathon",
     "VIDEO_UPLOAD": "off",
     "MAX_VIDEO_BYTES": "83886080",

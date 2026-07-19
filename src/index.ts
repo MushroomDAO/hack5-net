@@ -1028,7 +1028,15 @@ const APP_HTML = String.raw`<!doctype html>
 </head>
 <body>
   <header>
-    <div class="brand" onclick="go('/')"><div class="mark">HV</div><span id="brandName">HackVideo</span></div>
+    <div class="brand" onclick="go('/')">
+      <svg width="32" height="32" viewBox="0 0 40 40" aria-hidden="true" style="flex:0 0 auto">
+        <defs><linearGradient id="hklg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6a5cf0"/><stop offset="1" stop-color="#4536c9"/></linearGradient></defs>
+        <rect width="40" height="40" rx="11" fill="url(#hklg)"/>
+        <path d="M12 13 6.5 20 12 27" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" opacity=".8"/>
+        <path d="M28 13 33.5 20 28 27" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" opacity=".8"/>
+        <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#fff">5</text>
+      </svg>
+      <span id="brandName">hack5</span></div>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>

@@ -35,7 +35,7 @@ export CLOUDFLARE_ACCOUNT_ID=7bf23342f21baa5ebfc7bc7b74f5a1f2
 npx wrangler deploy   # d1/kv commands too
 ```
 
-This OAuth token has `workers`/`d1`/`kv`/`pages` write but **no `r2` and no email** scope — which is why the R2 video-upload path is off and auth is passcode-based, not email-OTP. Live deploy: `https://hackvideo.jhfnetboy.workers.dev`.
+This OAuth token has `workers`/`d1`/`kv`/`pages` write but **no `r2` and no email** scope — which is why the R2 video-upload path is off and auth is passcode-based, not email-OTP. Live deploy: `https://hack5.net`.
 
 ## Architecture / things you can't see from one function
 

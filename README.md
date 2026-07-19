@@ -1,10 +1,12 @@
-# HackVideo
+<p align="center"><img src="docs/logo.png" width="360" alt="hack5 — built for hackathons"></p>
 
-黑客松作品提交与展示平台。选手提交一个 **GitHub 仓库 + 演示视频链接 + 产品截图**,官网自动抓取 GitHub 信息生成作品卡,评委在线打分。
+<h1 align="center">hack5</h1>
 
-A hackathon submission & showcase portal. Each team submits a **GitHub repo + a demo-video link + product screenshots**; the site auto-fetches GitHub info into a work card and judges score online.
+<p align="center">黑客松作品提交与展示平台 · A hackathon submission & showcase portal</p>
 
-**Live / 线上:** <https://hackvideo.jhfnetboy.workers.dev>
+选手提交一个 **GitHub 仓库 + 演示视频链接 + 产品截图**,官网自动抓取 GitHub 信息生成作品卡,评委在线打分。Each team submits a **GitHub repo + a demo-video link + product screenshots**; the site auto-fetches GitHub info into a card and judges score online.
+
+**Live / 线上:** <https://hack5.net>
 
 ![HackVideo 作品详情页 / project detail page](docs/screenshot-detail.jpg)
 

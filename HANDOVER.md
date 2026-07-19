@@ -4,7 +4,7 @@
 
 ## 线上地址
 
-<https://hackvideo.jhfnetboy.workers.dev>
+<https://hack5.net>
 
 Cloudflare Worker + D1 + KV,部署在账号 `jhfnetboy@gmail.com`(account `7bf2…a1f2`)。
 
