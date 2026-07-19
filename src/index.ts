@@ -1652,7 +1652,7 @@ const APP_HTML = String.raw`<!doctype html>
       ['🏡', t('活动首页 + 地图','Event homepage + map'), t('介绍、时间地点、周期,内嵌地图(自动适配国内外)。','Intro, time, place, duration, embedded map (China-aware).')],
       ['📸', t('照片墙','Photo wall'), t('现场花絮瀑布流,上传自动压缩。','A masonry gallery of event moments; uploads auto-compress.')],
       ['⚖️', t('在线评审','Online judging'), t('评委登录码、四维打分、排行榜、CSV 导出、锁定评审版本。','Judge codes, 4-axis scoring, leaderboard, CSV export, commit lock.')],
-      ['🆓', t('永久免费','Free forever'), t('邮箱登录、中英文,所有记录永久保留。','Email login, bilingual, all records kept forever.')],
+      ['🆓', t('首场免费','First event free'), t('第一场黑客松免费,记录永久保留;更多场次与高级功能可订阅。','Your first hackathon is free with records kept forever; more events and premium features are a subscription.')],
     ];
     const launchSteps = [
       ['1','📧', t('邮箱登录(无需注册)','Log in with email (no signup)'), t('输入邮箱,收验证码即登录。','Enter your email, get a code, you are in.')],
@@ -1686,6 +1686,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="guide-steps">'+orgFeats.map(f=>'<div class="step"><div class="num" style="background:#0a0e0a;font-size:19px">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')+'</div>'
       + '<h2 style="text-align:center;margin-top:30px">'+t('三步启动你的黑客松','Three steps to launch')+'</h2>'
       + '<div class="guide-steps">'+launchSteps.map(s=>'<div class="step"><div class="num">'+s[0]+'</div><div><h3>'+s[1]+' '+esc(s[2])+'</h3><p>'+esc(s[3])+'</p></div></div>').join('')+'</div>'
+      + '<p style="text-align:center;margin-top:26px;color:var(--muted);font-size:13px">'+t('延伸阅读:','Further reading: ')+'<a href="https://blog.mushroom.cv/blog/how-to-host-hackathon-free-tools-complete-guide/" target="_blank" rel="noopener">'+t('如何用免费工具办一场黑客松 · 完整指南','How to host a hackathon with free tools — the complete guide')+'</a></p>'
       + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><a href="https://hack5.net/start"><button>'+t('🚀 现在就发起 →','🚀 Start now →')+'</button></a ></div>'
       + '</div>';
   }
@@ -1694,15 +1695,15 @@ const APP_HTML = String.raw`<!doctype html>
   function renderAbout(){
     const feats = [
       ['⚡', t('10 分钟发起','Live in 10 minutes'), t('三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。','Three steps: log in → name it → deploy your own hackathon site on its own domain.')],
-      ['🆓', t('永久免费','Free forever'), t('发起、组织、展示全免费,你的所有作品与记录永久保留。','Launching, organizing and showcasing are free; all your projects and records are kept forever.')],
+      ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
       ['🌱', t('数字公共物品','A digital public good'), t('hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
     ];
     app.innerHTML = '<div class="guide">'
       + '<div class="guide-hero"><h1>'+t('关于 hack5','About hack5')+'</h1>'
       + '<p class="guide-sub">'+t('人人可办的黑客松平台','a hackathon platform anyone can run')+'</p></div>'
       + '<div class="panel" style="font-size:16px;line-height:1.8;color:#3c4250">'
-      + t('<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它是一个<b>免费</b>的黑客松发起与组织工具:任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点,组织自己的黑客松,并<b>永久免费保留</b>所有记录。',
-          '<b>hack5.net</b> is part of <b>Mycelium</b> — a Digital Public Goods organization. It is a <b>free</b> tool for launching and organizing hackathons: anyone can spin up their own hackathon site in <b>10 minutes</b>, run their own event, and keep every record <b>free, forever</b>.')
+      + t('<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它让任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点:<b>第一场免费</b>、记录永久保留;想办更多场次、或用上动态海报、一键转发、开发者社区 Bot 等高级功能,可订阅付费。',
+          '<b>hack5.net</b> is part of <b>Mycelium</b> — a Digital Public Goods organization. Anyone can spin up their own hackathon site in <b>10 minutes</b>: your <b>first event is free</b> with records kept forever; hosting more events or unlocking premium features (dynamic posters, one-click sharing, a developer-community bot) comes with a subscription.')
       + '</div>'
       + '<div class="guide-steps" style="margin-top:20px">'
       + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
@@ -1724,13 +1725,13 @@ const APP_HTML = String.raw`<!doctype html>
   function renderPlatformLanding(){
     const feats = [
       ['⚡', t('三步 · 10 分钟','3 steps · 10 min'), t('登录 → 取名 → 一键部署你专属的黑客松站点。','Log in → name it → deploy your own hackathon site.')],
-      ['🆓', t('永久免费','Free forever'), t('发起、组织、展示全免费,记录永久保留。','Launch, run and showcase for free; records kept forever.')],
+      ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
       ['🌱', t('数字公共物品','Digital public good'), t('hack5 隶属于 Mycelium,为开放的创造者社区而建。','hack5 is part of Mycelium, built for open makers.')],
     ];
     app.innerHTML = '<div class="guide">'
       + '<div class="guide-hero" style="padding:44px 0 8px">'
       + '<h1 style="font-size:clamp(30px,6vw,54px)">'+t('人人可办的黑客松平台','The hackathon platform anyone can run')+'</h1>'
-      + '<p class="guide-sub">'+t('10 分钟发起 · 独立域名 · 永久免费','Live in 10 minutes · your own domain · free forever')+'</p>'
+      + '<p class="guide-sub">'+t('10 分钟发起 · 独立域名 · 首场免费','Live in 10 minutes · your own domain · first event free')+'</p>'
       + '<div class="row" style="justify-content:center;margin-top:22px">'
       + '<button onclick="go(\'/start\')" style="font-size:16px;padding:12px 24px">'+t('🚀 发起你的黑客松','🚀 Start your hackathon')+'</button>'
       + '<button class="ghost" onclick="go(\'/about\')" style="font-size:16px;padding:12px 24px">'+t('了解 hack5','About hack5')+'</button></div>'
@@ -1800,8 +1801,19 @@ const APP_HTML = String.raw`<!doctype html>
         $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
         try {
           const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain}});
-          setMsg('hMsg', t('创建成功!','Created! ')+'<br>'+t('站点','Site')+': <a href="'+r.url+'" target="_blank" rel="noopener">'+r.url+'</a ><br>'+t('管理员密码(请立即保存)','Admin password (save it now)')+': <code>'+esc(r.adminPassword)+'</code>', false, true);
+          const pw = r.adminPassword;
+          const masked = pw.length>7 ? (pw.slice(0,-5)+'****'+pw.slice(-2)) : pw;
+          window.__hpw = pw;
+          setMsg('hMsg', t('创建成功!','Created! ')
+            + '<div style="margin-top:10px">'+t('站点','Site')+': <a href="'+r.url+'" target="_blank" rel="noopener">'+esc(r.url)+'</a ></div>'
+            + '<div style="margin-top:8px">'+t('管理员密码','Admin password')+': <code id="pwMask">'+esc(masked)+'</code> <button class="ghost" id="pwCopy" style="padding:3px 10px;font-size:13px">📋 '+t('复制','Copy')+'</button></div>'
+            + '<div class="muted" style="margin-top:6px;font-size:12px">⚠️ '+t('只显示这一次,请立即复制保存。','Shown only once — copy and save it now.')+'</div>'
+            + '<div class="muted" style="margin-top:4px;font-size:12px" id="pwGo"></div>', false, true);
+          const cp = document.getElementById('pwCopy');
+          cp.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(window.__hpw); cp.textContent='✓ '+t('已复制','Copied'); }catch{ prompt(t('复制这个密码','Copy this password'), window.__hpw); } });
           ME_USER = await api('/api/platform/me'); renderNav();
+          let n=5; const go=document.getElementById('pwGo');
+          const timer=setInterval(()=>{ n--; if(n<=0){ clearInterval(timer); location.href=r.url; } else if(go){ go.textContent=n+t(' 秒后自动进入你的黑客松站点…',' s — taking you to your hackathon site…'); } },1000);
         } catch(e){ setMsg('hMsg', e.message, true); $('#hCreate').disabled=false; }
       });
     } else {
