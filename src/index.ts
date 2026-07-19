@@ -41,7 +41,7 @@ export default {
       if (method === "OPTIONS") return noContent();
 
       // ---- config & auth ----
-      if (path === "/api/config" && method === "GET") return getConfig(env);
+      if (path === "/api/config" && method === "GET") return getConfig(request, env);
       if (path === "/api/auth/login" && method === "POST") return login(request, env);
       if (path === "/api/auth/logout" && method === "POST") return logout(request);
       if (path === "/api/auth/me" && method === "GET") return me(request, env);
@@ -101,9 +101,56 @@ export default {
 
 // ============================ config & auth ============================
 
-function getConfig(env: Env): Response {
+type Tenant = {
+  id: string;
+  subdomain: string;
+  name: string;
+  admin_pass_hash: string;
+  intro?: string;
+  event_time?: string;
+  location?: string;
+  duration?: string;
+  address?: string;
+  map_query?: string;
+};
+
+// Resolve which hackathon (tenant) a request is for, from the Host.
+// hack5.net / www -> platform landing; <sub>.hack5.net -> that tenant; workers.dev / localhost -> demo tenant.
+async function resolveTenant(request: Request, env: Env): Promise<{ platform: boolean; tenant: Tenant | null; notFound?: string }> {
+  const host = new URL(request.url).hostname.toLowerCase();
+  if (host === "hack5.net" || host === "www.hack5.net") return { platform: true, tenant: null };
+  let sub: string | null = null;
+  const m = host.match(/^([a-z0-9-]+)\.hack5\.net$/);
+  if (m) sub = m[1];
+  else if (host.endsWith(".workers.dev") || host === "localhost" || host === "127.0.0.1") sub = "demo";
+  if (!sub || sub === "www") return { platform: true, tenant: null };
+  const tenant = await env.DB.prepare(
+    "SELECT id, subdomain, name, admin_pass_hash, intro, event_time, location, duration, address, map_query FROM tenants WHERE subdomain = ? AND status = 'active'",
+  )
+    .bind(sub)
+    .first<Tenant>();
+  if (!tenant) return { platform: false, tenant: null, notFound: sub };
+  return { platform: false, tenant };
+}
+
+async function getConfig(request: Request, env: Env): Promise<Response> {
+  const tctx = await resolveTenant(request, env);
   return json({
-    appName: env.APP_NAME || "HackVideo",
+    appName: env.APP_NAME || "hack5",
+    platform: tctx.platform,
+    tenantNotFound: tctx.notFound ?? null,
+    tenant: tctx.tenant
+      ? {
+          subdomain: tctx.tenant.subdomain,
+          name: tctx.tenant.name,
+          intro: tctx.tenant.intro ?? "",
+          eventTime: tctx.tenant.event_time ?? "",
+          location: tctx.tenant.location ?? "",
+          duration: tctx.tenant.duration ?? "",
+          address: tctx.tenant.address ?? "",
+          mapQuery: tctx.tenant.map_query ?? "",
+        }
+      : null,
     eventName: env.EVENT_NAME || "Hackathon",
     videoUpload: env.VIDEO_UPLOAD === "on",
     minShots: numberEnv(env.MIN_SHOTS, DEFAULT_MIN_SHOTS),
@@ -1059,9 +1106,10 @@ const APP_HTML = String.raw`<!doctype html>
 
   boot();
   async function boot(){
-    CONFIG = await api('/api/config').catch(()=>({appName:'HackVideo',eventName:'Hackathon',maxShots:4,dims:['innovation','technical','completeness','presentation'],maxVideoSeconds:180}));
-    document.getElementById('brandName').textContent = CONFIG.appName;
-    document.title = CONFIG.appName;
+    CONFIG = await api('/api/config').catch(()=>({appName:'hack5',platform:false,tenant:null,eventName:'Hackathon',minShots:2,maxShots:4,maxShotBytes:1048576,dims:['innovation','technical','completeness','presentation'],maxVideoSeconds:180}));
+    const brand = CONFIG.tenant ? CONFIG.tenant.name : CONFIG.appName;
+    document.getElementById('brandName').textContent = brand;
+    document.title = brand;
     document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
     ME = await api('/api/auth/me').catch(()=>({role:null}));
     renderNav();
@@ -1070,6 +1118,12 @@ const APP_HTML = String.raw`<!doctype html>
 
   function renderNav(){
     const n = document.getElementById('nav');
+    if(CONFIG.platform){
+      let hp = '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>'
+             + '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>'
+             + '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
+      n.innerHTML = hp; return;
+    }
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
           + '<button class="ghost" onclick="go(\'/guide\')">'+t('如何成为创新者','Become a builder')+'</button>'
           + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
@@ -1092,6 +1146,12 @@ const APP_HTML = String.raw`<!doctype html>
   function route(){
     const p = location.pathname;
     let m;
+    if(CONFIG.tenantNotFound) return renderTenantNotFound();
+    if(CONFIG.platform){
+      if(p === '/start') return renderStart();
+      if(p === '/about') return renderAbout();
+      return renderPlatformLanding();
+    }
     if(p === '/' || p === '') return renderWall();
     if(p === '/submit') return renderSubmit();
     if(p === '/judge') return renderJudge();
@@ -1189,6 +1249,33 @@ const APP_HTML = String.raw`<!doctype html>
       + '<p style="font-size:16px">'+t('一键发起功能正在上线中 —— 你将能在 10 分钟内拥有一个独立域名的黑客松站点。','One-click launch is coming soon — you will get your own hackathon site, on its own domain, in 10 minutes.')+'</p>'
       + '<div class="row" style="justify-content:center;margin-top:16px"><button class="ghost" onclick="go(\'/about\')">'+t('← 了解 hack5','← About hack5')+'</button></div>'
       + '</div></div>';
+  }
+
+  // ---------------- platform landing (hack5.net apex) ----------------
+  function renderPlatformLanding(){
+    const feats = [
+      ['⚡', t('三步 · 10 分钟','3 steps · 10 min'), t('登录 → 取名 → 一键部署你专属的黑客松站点。','Log in → name it → deploy your own hackathon site.')],
+      ['🆓', t('永久免费','Free forever'), t('发起、组织、展示全免费,记录永久保留。','Launch, run and showcase for free; records kept forever.')],
+      ['🌱', t('数字公共物品','Digital public good'), t('hack5 隶属于 Mycelium,为开放的创造者社区而建。','hack5 is part of Mycelium, built for open makers.')],
+    ];
+    app.innerHTML = '<div class="guide">'
+      + '<div class="guide-hero" style="padding:44px 0 8px">'
+      + '<h1 style="font-size:clamp(30px,6vw,54px)">'+t('人人可办的黑客松平台','The hackathon platform anyone can run')+'</h1>'
+      + '<p class="guide-sub">'+t('10 分钟发起 · 独立域名 · 永久免费','Live in 10 minutes · your own domain · free forever')+'</p>'
+      + '<div class="row" style="justify-content:center;margin-top:22px">'
+      + '<button onclick="go(\'/start\')" style="font-size:16px;padding:12px 24px">'+t('🚀 发起你的黑客松','🚀 Start your hackathon')+'</button>'
+      + '<button class="ghost" onclick="go(\'/about\')" style="font-size:16px;padding:12px 24px">'+t('了解 hack5','About hack5')+'</button></div>'
+      + '</div>'
+      + '<div class="guide-steps" style="margin-top:38px">'
+      + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
+      + '</div></div>';
+  }
+
+  function renderTenantNotFound(){
+    app.innerHTML = '<div class="guide"><div class="guide-hero" style="padding:60px 0">'
+      + '<h1>'+t('黑客松不存在','Hackathon not found')+'</h1>'
+      + '<p class="guide-sub">'+t('这个地址还没有对应的黑客松。','No hackathon lives at this address yet.')+'</p>'
+      + '<div class="row" style="justify-content:center;margin-top:20px"><a href="https://hack5.net"><button>'+t('去 hack5.net 发起一个 →','Start one at hack5.net →')+'</button></a ></div></div></div>';
   }
 
   function card(s){
