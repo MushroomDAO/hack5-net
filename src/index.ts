@@ -1910,6 +1910,9 @@ const APP_HTML = String.raw`<!doctype html>
     .ag-t{flex:0 0 140px;color:var(--brand);font-weight:650;font-family:ui-monospace,Menlo,monospace;font-size:13px}
     .ag-x{color:#3c4250}
     @media(max-width:560px){.ag-item{flex-direction:column;gap:2px}.ag-t{flex:none}}
+    .share-grid{display:grid;grid-template-columns:340px 1fr;gap:22px;align-items:start}
+    .share-poster{border-radius:14px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow)}
+    @media(max-width:720px){.share-grid{grid-template-columns:1fr}.share-poster{max-width:340px}}
     .teamgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
     .tcard{position:relative;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:#fff;box-shadow:var(--shadow)}
     .tcard .tname{font-weight:800;font-size:16px;margin-bottom:8px}
@@ -2286,7 +2289,7 @@ const APP_HTML = String.raw`<!doctype html>
     const canCreate = (ME_USER.used||0) < (ME_USER.quota||1);
     app.innerHTML = '<div class="guide"><h1>'+t('我的黑客松','My hackathons')+'</h1>'
       + '<p class="muted">'+t('已用','Used')+' '+(ME_USER.used||0)+' / '+(ME_USER.quota||1)+'</p>'
-      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
+      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
       + (canCreate
           ? '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
@@ -2468,28 +2471,36 @@ const APP_HTML = String.raw`<!doctype html>
     const nameLines = wrapText(name, name.length>16?14:10, 3);
     const nameFs = nameLines.length>=3?56:(name.length>14?66:84);
     const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,72), 30, 2);
-    const bits=[]; if(tn.eventTime)bits.push(['📅',tn.eventTime]); if(tn.location)bits.push(['📍',tn.location]); if(tn.address)bits.push(['📮',tn.address]);
+    const eyebrow = [tn.eventTime, tn.location].filter(Boolean).join('   ·   ');
+    const bits=[]; if(tn.location)bits.push(['📍',tn.location]); if(tn.address)bits.push(['🏛',tn.address]);
     const sub = tn.subdomain||'';
     let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 794 1123" width="100%" style="display:block">'
-      + '<defs><linearGradient id="scrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0a0e0a" stop-opacity="0.72"/><stop offset="0.42" stop-color="#0a0e0a" stop-opacity="0.26"/><stop offset="0.66" stop-color="#0a0e0a" stop-opacity="0.5"/><stop offset="1" stop-color="#0a0e0a" stop-opacity="0.92"/></linearGradient></defs>'
-      + '<rect width="794" height="1123" fill="#0a0e0a"/>'
+      + '<defs>'
+      + '<linearGradient id="pbg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#141a2e"/><stop offset="0.55" stop-color="#0c1020"/><stop offset="1" stop-color="#080a12"/></linearGradient>'
+      + '<radialGradient id="pglow" cx="0.82" cy="0.12" r="0.5"><stop offset="0" stop-color="#5b4be6" stop-opacity="0.55"/><stop offset="1" stop-color="#5b4be6" stop-opacity="0"/></radialGradient>'
+      + '<radialGradient id="pglow2" cx="0.1" cy="0.9" r="0.5"><stop offset="0" stop-color="#25ff86" stop-opacity="0.18"/><stop offset="1" stop-color="#25ff86" stop-opacity="0"/></radialGradient>'
+      + '<linearGradient id="pcta" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6d5cf0"/><stop offset="1" stop-color="#8b7bff"/></linearGradient>'
+      + '<linearGradient id="pscrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080a12" stop-opacity="0.7"/><stop offset="0.45" stop-color="#080a12" stop-opacity="0.25"/><stop offset="1" stop-color="#080a12" stop-opacity="0.92"/></linearGradient>'
+      + '</defs>'
       + (bg
-          ? '<image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#scrim)"/>'
-          : '<g fill="#25ff86" opacity="0.06" font-family="monospace" font-size="16">'+[0,60,120,680,740].map(x=>'<text x="'+x+'"><tspan x="'+x+'" dy="22">1010</tspan><tspan x="'+x+'" dy="22">0110</tspan><tspan x="'+x+'" dy="22">1101</tspan><tspan x="'+x+'" dy="22">0011</tspan></text>').join('')+'</g>')
-      + '<g transform="translate(60,72)"><rect width="56" height="56" rx="14" fill="#141a16"/><text x="28" y="38" text-anchor="middle" font-family="ui-monospace,monospace" font-size="24" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text></g>'
-      + '<text x="132" y="110" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">hack5</text>'
-      + '<text x="734" y="106" text-anchor="end" font-family="monospace" font-size="15" fill="#25ff86" letter-spacing="3">HACKATHON</text>'
-      + '<line x1="60" y1="150" x2="734" y2="150" stroke="#1c2620" stroke-width="2"/>';
-    let y=290;
-    nameLines.forEach((ln,i)=>{ svg+='<text x="60" y="'+(y+i*(nameFs+6))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="#ffffff">'+esc(ln)+'</text>'; });
-    y = 290 + nameLines.length*(nameFs+6) + 24;
-    introLines.forEach((ln,i)=>{ svg+='<text x="60" y="'+(y+i*34)+'" font-family="-apple-system,sans-serif" font-size="25" fill="#8fb3a0">'+esc(ln)+'</text>'; });
-    y += introLines.length*34 + 66;
-    bits.forEach((b,i)=>{ svg+='<text x="60" y="'+(y+i*56)+'" font-family="-apple-system,sans-serif" font-size="27" fill="#e3ece7">'+b[0]+'  '+esc(String(b[1]).slice(0,38))+'</text>'; });
-    svg += '<rect x="60" y="978" width="674" height="92" rx="16" fill="#25ff86"/>'
-      + '<text x="397" y="1018" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="24" font-weight="700" fill="#0a0e0a">'+t('提交作品 · 报名','Join &amp; submit at')+'</text>'
-      + '<text x="397" y="1050" text-anchor="middle" font-family="ui-monospace,monospace" font-size="26" font-weight="800" fill="#0a0e0a">'+esc(sub)+'.hack5.net</text>'
-      + '<text x="734" y="1102" text-anchor="end" font-family="monospace" font-size="13" fill="#3f8f63">Mycelium · Digital Public Goods · hack5.net</text>'
+          ? '<rect width="794" height="1123" fill="#080a12"/><image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#pscrim)"/>'
+          : '<rect width="794" height="1123" fill="url(#pbg)"/><rect width="794" height="1123" fill="url(#pglow)"/><rect width="794" height="1123" fill="url(#pglow2)"/><text x="470" y="1050" font-family="ui-monospace,monospace" font-size="520" font-weight="800" fill="#ffffff" opacity="0.03">5</text>')
+      + '<g transform="translate(64,74)"><rect width="52" height="52" rx="14" fill="#ffffff" opacity="0.08"/><rect width="52" height="52" rx="14" fill="none" stroke="#ffffff" stroke-opacity="0.14"/><text x="26" y="35" text-anchor="middle" font-family="ui-monospace,monospace" font-size="23" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text></g>'
+      + '<text x="130" y="108" font-family="ui-monospace,monospace" font-size="27" font-weight="800" fill="#ffffff" letter-spacing="0.5">hack5</text>'
+      + '<text x="730" y="105" text-anchor="end" font-family="-apple-system,sans-serif" font-size="13" fill="#8b93b5" letter-spacing="4">HACKATHON</text>';
+    let y=300;
+    if(eyebrow){ svg+='<text x="64" y="'+y+'" font-family="-apple-system,sans-serif" font-size="19" font-weight="600" fill="#8b7bff" letter-spacing="1.5">'+esc(eyebrow.slice(0,60))+'</text>'; y+=20; }
+    y+=48;
+    nameLines.forEach((ln,i)=>{ svg+='<text x="62" y="'+(y+i*(nameFs+4))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="#ffffff" letter-spacing="-1">'+esc(ln)+'</text>'; });
+    y = y + nameLines.length*(nameFs+4) + 18;
+    svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#25ff86"/>'; y+=44;
+    introLines.forEach((ln,i)=>{ svg+='<text x="64" y="'+(y+i*36)+'" font-family="-apple-system,sans-serif" font-size="24" fill="#aeb6cc">'+esc(ln)+'</text>'; });
+    y += introLines.length*36 + 40;
+    bits.forEach((b,i)=>{ svg+='<text x="64" y="'+(y+i*46)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#dbe0ee">'+b[0]+'  '+esc(String(b[1]).slice(0,40))+'</text>'; });
+    svg += '<g transform="translate(64,968)"><rect width="666" height="96" rx="20" fill="url(#pcta)"/><rect width="666" height="96" rx="20" fill="none" stroke="#ffffff" stroke-opacity="0.15"/>'
+      + '<text x="34" y="42" font-family="-apple-system,sans-serif" font-size="16" font-weight="600" fill="#ffffff" opacity="0.85" letter-spacing="0.5">'+t('报名 · 提交作品','Join &amp; submit')+'</text>'
+      + '<text x="34" y="74" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">'+esc(sub)+'.hack5.net</text></g>'
+      + '<text x="730" y="1100" text-anchor="end" font-family="-apple-system,sans-serif" font-size="12" fill="#5a6285" letter-spacing="0.5">Mycelium · Digital Public Goods</text>'
       + '</svg>';
     return svg;
   }
@@ -2511,9 +2522,12 @@ const APP_HTML = String.raw`<!doctype html>
       +'👉 '+t('报名 / 提交作品:','Join / submit: ')+url+'\n#hackathon #hack5';
     const hasNative = !!(navigator.share);
     app.innerHTML='<h1>'+t('一键转发','Share')+'</h1>'
-      +'<p class="muted">'+t('复制文案 + 下载海报,发到公众号 / 小红书 / 微信群 / Telegram 群;手机可直接用系统分享。','Copy the caption and poster, then post to your channels. On mobile you can use the native share sheet.')+'</p>'
-      +'<div class="panel" style="max-width:560px">'
-      +'<label>'+t('分享文案','Caption')+'</label><textarea id="shCap" rows="6">'+esc(caption)+'</textarea>'
+      +'<p class="muted">'+t('下面是自动生成的海报和文案。复制文案 + 下载海报,发到公众号 / 小红书 / 微信群 / Telegram 群;手机可直接用系统分享。','Here are your auto-generated poster and caption. Copy the caption, download the poster, and post to your channels.')+'</p>'
+      +'<div class="share-grid">'
+      +'<div><div id="shPosterBox" class="share-poster"></div>'
+      +'<a target="_blank" rel="noopener" href="'+url+'/poster" style="display:inline-block;margin-top:8px;font-size:13px;font-weight:600">'+t('🎨 换成 AI 定制海报(付费)→','🎨 Make an AI poster (premium) →')+'</a></div>'
+      +'<div class="panel">'
+      +'<label>'+t('分享文案','Caption')+'</label><textarea id="shCap" rows="7">'+esc(caption)+'</textarea>'
       +'<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:12px">'
       +'<button id="shCopyCap">'+t('复制文案','Copy caption')+'</button>'
       +'<button class="ghost" id="shCopyUrl">'+t('复制链接','Copy link')+'</button>'
@@ -2521,7 +2535,9 @@ const APP_HTML = String.raw`<!doctype html>
       +(hasNative?'<button class="ghost" id="shNative">'+t('系统分享(含海报)','Share sheet')+'</button>':'')
       +'<a target="_blank" rel="noopener" href="https://t.me/share/url?url='+encodeURIComponent(url)+'&text='+encodeURIComponent(caption)+'"><button class="ghost">Telegram</button></a>'
       +'<a target="_blank" rel="noopener" href="https://twitter.com/intent/tweet?text='+encodeURIComponent(caption)+'"><button class="ghost">X / Twitter</button></a>'
-      +'</div><div id="shMsg" class="muted" style="margin-top:8px"></div></div>';
+      +'</div><div id="shMsg" class="muted" style="margin-top:8px"></div></div>'
+      +'</div>';
+    $('#shPosterBox').innerHTML = posterSvg('');
     $('#shCopyCap').addEventListener('click',()=>copyText($('#shCap').value,'shMsg'));
     $('#shCopyUrl').addEventListener('click',()=>copyText(url,'shMsg'));
     $('#shPoster').addEventListener('click',async()=>{
