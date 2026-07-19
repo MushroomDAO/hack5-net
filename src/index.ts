@@ -458,12 +458,30 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
 }
 
 async function sendEmailCode(env: Env, email: string, code: string): Promise<boolean> {
-  const text = `你的 hack5 登录验证码是 ${code},10 分钟内有效。\n\nYour hack5 login code is ${code}. It expires in 10 minutes.`;
+  const text = `hack5 登录验证码:${code}(10 分钟内有效)\nYour hack5 login code: ${code} (expires in 10 minutes)\n\n🚀 10 分钟发起你的黑客松 · Launch your hackathon in 10 minutes — https://hack5.net`;
+  const html =
+    `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
+    `<table role="presentation" width="440" cellpadding="0" cellspacing="0" style="max-width:440px;width:100%">` +
+    `<tr><td align="center" style="padding-bottom:22px">` +
+    `<span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#0a0e0a;border-radius:11px;color:#25ff86;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span>` +
+    `<span style="font-size:22px;font-weight:800;color:#14161c;vertical-align:middle;padding-left:10px">hack5</span>` +
+    `</td></tr>` +
+    `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
+    `<p style="color:#5f6675;font-size:15px;margin:0 0 10px">你的 hack5 登录验证码 · Your login code</p>` +
+    `<div style="font-size:38px;font-weight:800;letter-spacing:10px;color:#14161c;background:#f2f0fe;border-radius:10px;padding:18px 0;text-align:center;margin:6px 0 14px">${code}</div>` +
+    `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:0">10 分钟内有效。若非本人操作,请忽略此邮件。<br>Expires in 10 minutes. Ignore this email if it was not you.</p>` +
+    `</td></tr>` +
+    `<tr><td align="center" style="padding:22px 0 8px">` +
+    `<a href="https://hack5.net" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 20px;border-radius:9px">🚀 10 分钟发起你的黑客松 → hack5.net</a>` +
+    `</td></tr>` +
+    `<tr><td align="center" style="color:#9aa1ac;font-size:12px;line-height:1.7;padding-top:16px">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks</td></tr>` +
+    `</table></td></tr></table></div>`;
   if (env.RESEND_API_KEY) {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: "hack5 登录验证码 / login code", text }),
+      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: "‹5› hack5 登录验证码 · 10 分钟发起你的黑客松", text, html }),
     });
     if (!res.ok) throw new Error(`email send failed: ${res.status}`);
     return true;
