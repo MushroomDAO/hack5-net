@@ -99,6 +99,7 @@ export default {
 
       // ---- premium: AI text-to-image poster background (admin, metered) ----
       if (path === "/api/tenant/poster/ai" && method === "POST") return generateAiPoster(request, env, tenant, tid);
+      if (path === "/api/tenant/poster/quota" && method === "GET") return getPosterQuota(request, env, tid);
 
       // ---- homepage banner ----
       if (path === "/api/tenant/banner" && method === "POST") return updateBanner(request, env, tenant);
@@ -888,37 +889,68 @@ async function deleteTeamPost(request: Request, env: Env, tenant: Tenant | null,
 
 // Premium: generate an AI poster BACKGROUND from a text prompt (gpt-image-1), overlaid with crisp
 // event text on the client. Admin-only (it costs money) and metered per tenant per day.
-const AI_POSTER_DAILY_CAP = 10;
+// Free = fixed curated style (we absorb the cost, a few rolls per event); custom = organizer's own
+// prompt (the paid tier). Both capped per event for lifetime (KV counter, no expiry).
+const AI_POSTER_FREE_CAP = 3;
+const AI_POSTER_CUSTOM_CAP = 3;
+const freeCapKey = (tid: string) => `aiposter:free:${tid}`;
+const customCapKey = (tid: string) => `aiposter:custom:${tid}`;
+
+async function getPosterQuota(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth || !tid) return json({ error: "Admin only" }, 403);
+  const usedFree = Number((await env.SHOTS.get(freeCapKey(tid))) ?? "0");
+  const usedCustom = Number((await env.SHOTS.get(customCapKey(tid))) ?? "0");
+  return json({
+    aiEnabled: Boolean(env.OPENAI_API_KEY),
+    free: Math.max(0, AI_POSTER_FREE_CAP - usedFree),
+    custom: Math.max(0, AI_POSTER_CUSTOM_CAP - usedCustom),
+    freeCap: AI_POSTER_FREE_CAP,
+    customCap: AI_POSTER_CUSTOM_CAP,
+  });
+}
+
 async function generateAiPoster(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth || !tenant) return json({ error: "Admin only" }, 403);
   if (!env.OPENAI_API_KEY) return json({ error: "AI 海报未开通 / AI poster not enabled" }, 503);
 
-  const body = await request.json<{ prompt?: string }>().catch(() => null);
+  const body = await request.json<{ prompt?: string; mode?: string }>().catch(() => null);
+  const mode = body?.mode === "free" ? "free" : "custom";
   const style = String(body?.prompt ?? "").trim().slice(0, 500);
-  if (!style) return json({ error: "请描述画风 / Describe the style" }, 400);
+  if (mode === "custom" && !style) return json({ error: "请描述画风 / Describe the style" }, 400);
 
-  // Daily cost cap per tenant. Reserve the credit BEFORE calling OpenAI so a rapid burst of
-  // requests can't all read used<cap and slip past (KV has no atomic increment; this at least
-  // closes the sequential-repeat window). Refunded below only when OpenAI never generated —
-  // a non-2xx / network error is not billed on their side, but a success is, so we keep the charge.
-  const CAP_TTL = 2 * 86400;
-  const day = Math.floor(unixNow() / 86400);
-  const capKey = `aiposter:${tenant.id}:${day}`;
+  // Per-mode lifetime cap per event. Reserve the credit BEFORE calling OpenAI so a rapid burst
+  // can't all read used<cap and slip past (KV has no atomic increment). Refunded only when OpenAI
+  // never generated (non-2xx / network error = not billed; a success keeps the charge).
+  const cap = mode === "free" ? AI_POSTER_FREE_CAP : AI_POSTER_CUSTOM_CAP;
+  const capKey = mode === "free" ? freeCapKey(tenant.id) : customCapKey(tenant.id);
   const used = Number((await env.SHOTS.get(capKey)) ?? "0");
-  if (used >= AI_POSTER_DAILY_CAP) return json({ error: "今日 AI 海报额度已用完 / Daily AI quota reached" }, 429);
-  await env.SHOTS.put(capKey, String(used + 1), { expirationTtl: CAP_TTL });
-  const refund = () => env.SHOTS.put(capKey, String(used), { expirationTtl: CAP_TTL });
+  if (used >= cap) {
+    return json(
+      { error: mode === "free" ? "免费额度已用完 / Free quota used up" : "自定义额度已用完(每场 3 次)/ Custom quota used up" },
+      429,
+    );
+  }
+  await env.SHOTS.put(capKey, String(used + 1));
+  const refund = () => env.SHOTS.put(capKey, String(used));
 
   const name = (tenant.name ?? "Hackathon").slice(0, 80);
   const intro = (tenant.intro ?? "").replace(/\s+/g, " ").slice(0, 160);
   const prompt =
-    `Poster BACKGROUND artwork for a hackathon called "${name}".` +
-    (intro ? ` Event theme: ${intro}.` : "") +
-    ` Art direction from the organizer: ${style}.` +
-    ` Vertical A4 portrait composition, cinematic, high detail, vivid, professional event-poster quality.` +
-    ` IMPORTANT: render NO text, NO letters, NO words, NO numbers and NO logos anywhere in the image;` +
-    ` keep the lower third calmer and slightly darker so text can be overlaid on top.`;
+    mode === "free"
+      ? `Abstract poster BACKGROUND for a hackathon called "${name}".` +
+        (intro ? ` Theme: ${intro}.` : "") +
+        ` Style: deep indigo-to-black vertical gradient with luminous violet and emerald-green glows,` +
+        ` subtle glowing mycelium / network filaments, clean modern, cinematic, high detail, professional.` +
+        ` Vertical A4 portrait. IMPORTANT: NO text, letters, numbers or logos anywhere;` +
+        ` keep the lower third calmer and darker for text overlay.`
+      : `Poster BACKGROUND artwork for a hackathon called "${name}".` +
+        (intro ? ` Event theme: ${intro}.` : "") +
+        ` Art direction from the organizer: ${style}.` +
+        ` Vertical A4 portrait composition, cinematic, high detail, vivid, professional event-poster quality.` +
+        ` IMPORTANT: render NO text, NO letters, NO words, NO numbers and NO logos anywhere in the image;` +
+        ` keep the lower third calmer and slightly darker so text can be overlaid on top.`;
 
   let resp: Response;
   try {
@@ -948,7 +980,7 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
   const b64 = rawB64.replace(/[^A-Za-z0-9+/=]/g, "");
 
   // Credit already reserved up-front; success keeps the charge.
-  return json({ image: `data:image/png;base64,${b64}`, remaining: AI_POSTER_DAILY_CAP - used - 1 });
+  return json({ image: `data:image/png;base64,${b64}`, mode, remaining: cap - used - 1 });
 }
 
 // ============================ photo wall ============================
@@ -1955,6 +1987,13 @@ const APP_HTML = String.raw`<!doctype html>
     .ag-t{flex:0 0 140px;color:var(--brand);font-weight:650;font-family:ui-monospace,Menlo,monospace;font-size:13px}
     .ag-x{color:var(--ink2)}
     @media(max-width:560px){.ag-item{flex-direction:column;gap:2px}.ag-t{flex:none}}
+    .share-grid{display:grid;grid-template-columns:340px 1fr;gap:22px;align-items:start}
+    .share-poster{border-radius:14px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow)}
+    .share-plats{display:flex;flex-wrap:wrap;gap:8px}
+    .splat{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border:1px solid var(--line);border-radius:999px;font-size:13px;font-weight:600;color:var(--ink)}
+    .splat:hover{background:var(--ghost-hover)}
+    .sdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+    @media(max-width:720px){.share-grid{grid-template-columns:1fr}.share-poster{max-width:340px}}
     .teamgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
     .tcard{position:relative;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--card);box-shadow:var(--shadow)}
     .tcard .tname{font-weight:800;font-size:16px;margin-bottom:8px}
@@ -2341,7 +2380,7 @@ const APP_HTML = String.raw`<!doctype html>
     const canCreate = (ME_USER.used||0) < (ME_USER.quota||1);
     app.innerHTML = '<div class="guide"><h1>'+t('我的黑客松','My hackathons')+'</h1>'
       + '<p class="muted">'+t('已用','Used')+' '+(ME_USER.used||0)+' / '+(ME_USER.quota||1)+'</p>'
-      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
+      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
       + (canCreate
           ? '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
@@ -2523,28 +2562,36 @@ const APP_HTML = String.raw`<!doctype html>
     const nameLines = wrapText(name, name.length>16?14:10, 3);
     const nameFs = nameLines.length>=3?56:(name.length>14?66:84);
     const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,72), 30, 2);
-    const bits=[]; if(tn.eventTime)bits.push(['📅',tn.eventTime]); if(tn.location)bits.push(['📍',tn.location]); if(tn.address)bits.push(['📮',tn.address]);
+    const eyebrow = [tn.eventTime, tn.location].filter(Boolean).join('   ·   ');
+    const bits=[]; if(tn.location)bits.push(['📍',tn.location]); if(tn.address)bits.push(['🏛',tn.address]);
     const sub = tn.subdomain||'';
     let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 794 1123" width="100%" style="display:block">'
-      + '<defs><linearGradient id="scrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0a0e0a" stop-opacity="0.72"/><stop offset="0.42" stop-color="#0a0e0a" stop-opacity="0.26"/><stop offset="0.66" stop-color="#0a0e0a" stop-opacity="0.5"/><stop offset="1" stop-color="#0a0e0a" stop-opacity="0.92"/></linearGradient></defs>'
-      + '<rect width="794" height="1123" fill="#0a0e0a"/>'
+      + '<defs>'
+      + '<linearGradient id="pbg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#141a2e"/><stop offset="0.55" stop-color="#0c1020"/><stop offset="1" stop-color="#080a12"/></linearGradient>'
+      + '<radialGradient id="pglow" cx="0.82" cy="0.12" r="0.5"><stop offset="0" stop-color="#5b4be6" stop-opacity="0.55"/><stop offset="1" stop-color="#5b4be6" stop-opacity="0"/></radialGradient>'
+      + '<radialGradient id="pglow2" cx="0.1" cy="0.9" r="0.5"><stop offset="0" stop-color="#25ff86" stop-opacity="0.18"/><stop offset="1" stop-color="#25ff86" stop-opacity="0"/></radialGradient>'
+      + '<linearGradient id="pcta" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6d5cf0"/><stop offset="1" stop-color="#8b7bff"/></linearGradient>'
+      + '<linearGradient id="pscrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080a12" stop-opacity="0.7"/><stop offset="0.45" stop-color="#080a12" stop-opacity="0.25"/><stop offset="1" stop-color="#080a12" stop-opacity="0.92"/></linearGradient>'
+      + '</defs>'
       + (bg
-          ? '<image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#scrim)"/>'
-          : '<g fill="#25ff86" opacity="0.06" font-family="monospace" font-size="16">'+[0,60,120,680,740].map(x=>'<text x="'+x+'"><tspan x="'+x+'" dy="22">1010</tspan><tspan x="'+x+'" dy="22">0110</tspan><tspan x="'+x+'" dy="22">1101</tspan><tspan x="'+x+'" dy="22">0011</tspan></text>').join('')+'</g>')
-      + '<g transform="translate(60,72)"><rect width="56" height="56" rx="14" fill="#141a16"/><text x="28" y="38" text-anchor="middle" font-family="ui-monospace,monospace" font-size="24" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text></g>'
-      + '<text x="132" y="110" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">hack5</text>'
-      + '<text x="734" y="106" text-anchor="end" font-family="monospace" font-size="15" fill="#25ff86" letter-spacing="3">HACKATHON</text>'
-      + '<line x1="60" y1="150" x2="734" y2="150" stroke="#1c2620" stroke-width="2"/>';
-    let y=290;
-    nameLines.forEach((ln,i)=>{ svg+='<text x="60" y="'+(y+i*(nameFs+6))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="#ffffff">'+esc(ln)+'</text>'; });
-    y = 290 + nameLines.length*(nameFs+6) + 24;
-    introLines.forEach((ln,i)=>{ svg+='<text x="60" y="'+(y+i*34)+'" font-family="-apple-system,sans-serif" font-size="25" fill="#8fb3a0">'+esc(ln)+'</text>'; });
-    y += introLines.length*34 + 66;
-    bits.forEach((b,i)=>{ svg+='<text x="60" y="'+(y+i*56)+'" font-family="-apple-system,sans-serif" font-size="27" fill="#e3ece7">'+b[0]+'  '+esc(String(b[1]).slice(0,38))+'</text>'; });
-    svg += '<rect x="60" y="978" width="674" height="92" rx="16" fill="#25ff86"/>'
-      + '<text x="397" y="1018" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="24" font-weight="700" fill="#0a0e0a">'+t('提交作品 · 报名','Join &amp; submit at')+'</text>'
-      + '<text x="397" y="1050" text-anchor="middle" font-family="ui-monospace,monospace" font-size="26" font-weight="800" fill="#0a0e0a">'+esc(sub)+'.hack5.net</text>'
-      + '<text x="734" y="1102" text-anchor="end" font-family="monospace" font-size="13" fill="#3f8f63">Mycelium · Digital Public Goods · hack5.net</text>'
+          ? '<rect width="794" height="1123" fill="#080a12"/><image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#pscrim)"/>'
+          : '<rect width="794" height="1123" fill="url(#pbg)"/><rect width="794" height="1123" fill="url(#pglow)"/><rect width="794" height="1123" fill="url(#pglow2)"/><text x="470" y="1050" font-family="ui-monospace,monospace" font-size="520" font-weight="800" fill="#ffffff" opacity="0.03">5</text>')
+      + '<g transform="translate(64,74)"><rect width="52" height="52" rx="14" fill="#ffffff" opacity="0.08"/><rect width="52" height="52" rx="14" fill="none" stroke="#ffffff" stroke-opacity="0.14"/><text x="26" y="35" text-anchor="middle" font-family="ui-monospace,monospace" font-size="23" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text></g>'
+      + '<text x="130" y="108" font-family="ui-monospace,monospace" font-size="27" font-weight="800" fill="#ffffff" letter-spacing="0.5">hack5</text>'
+      + '<text x="730" y="105" text-anchor="end" font-family="-apple-system,sans-serif" font-size="13" fill="#8b93b5" letter-spacing="4">HACKATHON</text>';
+    let y=300;
+    if(eyebrow){ svg+='<text x="64" y="'+y+'" font-family="-apple-system,sans-serif" font-size="19" font-weight="600" fill="#8b7bff" letter-spacing="1.5">'+esc(eyebrow.slice(0,60))+'</text>'; y+=20; }
+    y+=48;
+    nameLines.forEach((ln,i)=>{ svg+='<text x="62" y="'+(y+i*(nameFs+4))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="#ffffff" letter-spacing="-1">'+esc(ln)+'</text>'; });
+    y = y + nameLines.length*(nameFs+4) + 18;
+    svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#25ff86"/>'; y+=44;
+    introLines.forEach((ln,i)=>{ svg+='<text x="64" y="'+(y+i*36)+'" font-family="-apple-system,sans-serif" font-size="24" fill="#aeb6cc">'+esc(ln)+'</text>'; });
+    y += introLines.length*36 + 40;
+    bits.forEach((b,i)=>{ svg+='<text x="64" y="'+(y+i*46)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#dbe0ee">'+b[0]+'  '+esc(String(b[1]).slice(0,40))+'</text>'; });
+    svg += '<g transform="translate(64,968)"><rect width="666" height="96" rx="20" fill="url(#pcta)"/><rect width="666" height="96" rx="20" fill="none" stroke="#ffffff" stroke-opacity="0.15"/>'
+      + '<text x="34" y="42" font-family="-apple-system,sans-serif" font-size="16" font-weight="600" fill="#ffffff" opacity="0.85" letter-spacing="0.5">'+t('报名 · 提交作品','Join &amp; submit')+'</text>'
+      + '<text x="34" y="74" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">'+esc(sub)+'.hack5.net</text></g>'
+      + '<text x="730" y="1100" text-anchor="end" font-family="-apple-system,sans-serif" font-size="12" fill="#5a6285" letter-spacing="0.5">Mycelium · Digital Public Goods</text>'
       + '</svg>';
     return svg;
   }
@@ -2557,6 +2604,7 @@ const APP_HTML = String.raw`<!doctype html>
     img.onerror=function(){ URL.revokeObjectURL(u); rej(new Error('fail')); }; img.src=u;
   }); }
   async function copyText(str,elId){ try{ await navigator.clipboard.writeText(str); setMsg(elId,t('已复制 ✓','Copied ✓')); }catch(e){ setMsg(elId,t('复制失败,请手动选择','Copy failed—select manually'),true); } }
+  function shareLink(href,label,color){ return '<a target="_blank" rel="noopener" href="'+href+'" class="splat"><span class="sdot" style="background:'+color+'"></span>'+esc(label)+'</a>'; }
   function renderShare(){
     if(!CONFIG.tenant){ go('/'); return; }
     const tn=CONFIG.tenant; const sub=tn.subdomain||'';
@@ -2566,17 +2614,31 @@ const APP_HTML = String.raw`<!doctype html>
       +'👉 '+t('报名 / 提交作品:','Join / submit: ')+url+'\n#hackathon #hack5';
     const hasNative = !!(navigator.share);
     app.innerHTML='<h1>'+t('一键转发','Share')+'</h1>'
-      +'<p class="muted">'+t('复制文案 + 下载海报,发到公众号 / 小红书 / 微信群 / Telegram 群;手机可直接用系统分享。','Copy the caption and poster, then post to your channels. On mobile you can use the native share sheet.')+'</p>'
-      +'<div class="panel" style="max-width:560px">'
+      +'<p class="muted">'+t('下面是自动生成的海报和文案。复制文案 + 下载海报,发到公众号 / 小红书 / 微信群 / Telegram 群;手机可直接用系统分享。','Here are your auto-generated poster and caption. Copy the caption, download the poster, and post to your channels.')+'</p>'
+      +'<div class="share-grid">'
+      +'<div><div id="shPosterBox" class="share-poster"></div>'
+      +'<a target="_blank" rel="noopener" href="'+url+'/poster" style="display:inline-block;margin-top:8px;font-size:13px;font-weight:600">'+t('🎨 换成 AI 定制海报(付费)→','🎨 Make an AI poster (premium) →')+'</a></div>'
+      +'<div class="panel">'
       +'<label>'+t('分享文案','Caption')+'</label><textarea id="shCap" rows="6">'+esc(caption)+'</textarea>'
-      +'<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:12px">'
-      +'<button id="shCopyCap">'+t('复制文案','Copy caption')+'</button>'
+      +(hasNative?'<button id="shNative" style="width:100%;margin-top:12px;font-size:15px;padding:12px">📲 '+t('分享到微信 / 更多(含海报)','Share to WeChat / more (with poster)')+'</button>':'')
+      +'<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:10px">'
+      +'<button class="ghost" id="shCopyCap">'+t('复制文案','Copy caption')+'</button>'
       +'<button class="ghost" id="shCopyUrl">'+t('复制链接','Copy link')+'</button>'
       +'<button class="ghost" id="shPoster">'+t('下载海报','Download poster')+'</button>'
-      +(hasNative?'<button class="ghost" id="shNative">'+t('系统分享(含海报)','Share sheet')+'</button>':'')
-      +'<a target="_blank" rel="noopener" href="https://t.me/share/url?url='+encodeURIComponent(url)+'&text='+encodeURIComponent(caption)+'"><button class="ghost">Telegram</button></a>'
-      +'<a target="_blank" rel="noopener" href="https://twitter.com/intent/tweet?text='+encodeURIComponent(caption)+'"><button class="ghost">X / Twitter</button></a>'
-      +'</div><div id="shMsg" class="muted" style="margin-top:8px"></div></div>';
+      +'</div>'
+      +'<div class="muted" style="margin:14px 0 6px;font-size:12px">'+t('分享到平台','Post to a platform')+'</div>'
+      +'<div class="share-plats">'
+      +shareLink('https://service.weibo.com/share/share.php?url='+encodeURIComponent(url)+'&title='+encodeURIComponent(caption),'微博','#e6162d')
+      +shareLink('https://sns.qzone.qq.com/cgi-bin/qzshare/cgi_qzshare_onekey?url='+encodeURIComponent(url)+'&title='+encodeURIComponent((tn.name||'hack5'))+'&summary='+encodeURIComponent(caption),'QQ空间','#f7b500')
+      +shareLink('https://t.me/share/url?url='+encodeURIComponent(url)+'&text='+encodeURIComponent(caption),'Telegram','#229ed9')
+      +shareLink('https://twitter.com/intent/tweet?text='+encodeURIComponent(caption),'X','#111')
+      +shareLink('https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(url),'Facebook','#1877f2')
+      +shareLink('https://www.linkedin.com/sharing/share-offsite/?url='+encodeURIComponent(url),'LinkedIn','#0a66c2')
+      +'</div>'
+      +'<div class="muted" style="margin-top:12px;font-size:12px">'+t('微信:点上面「分享到微信」用手机系统面板;电脑上复制链接粘到微信即可。二维码扫码分享即将上线。','WeChat: use the share button on mobile, or copy the link. A scannable QR is coming.')+'</div>'
+      +'<div id="shMsg" class="muted" style="margin-top:8px"></div></div>'
+      +'</div>';
+    $('#shPosterBox').innerHTML = posterSvg('');
     $('#shCopyCap').addEventListener('click',()=>copyText($('#shCap').value,'shMsg'));
     $('#shCopyUrl').addEventListener('click',()=>copyText(url,'shMsg'));
     $('#shPoster').addEventListener('click',async()=>{
@@ -2590,36 +2652,43 @@ const APP_HTML = String.raw`<!doctype html>
       try{ await navigator.share(data); }catch(e){}
     });
   }
+  async function loadAiPanel(){
+    const box=$('#aiPanel'); if(!box) return;
+    let q; try{ q=await api('/api/tenant/poster/quota'); }catch(e){ box.innerHTML='<span class="muted">'+t('AI 海报加载失败','AI panel failed')+'</span>'; return; }
+    if(!q.aiEnabled){ box.innerHTML='<b>'+t('AI 海报','AI poster')+'</b><p class="muted">'+t('暂未开通','Not enabled yet')+'</p>'; return; }
+    box.innerHTML =
+       '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报','AI poster')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">gpt-image-1</span></div>'
+      +'<div class="row" style="gap:10px;margin:12px 0 4px;align-items:center"><button id="aiFree">'+t('🎨 免费生成(固定风格)','🎨 Free (fixed style)')+'</button><span class="muted">'+t('剩','left')+' '+q.free+'/'+q.freeCap+'</span></div>'
+      +'<p class="muted" style="margin:0 0 4px;font-size:12px">'+t('免费:用你的活动名/简介 + 品牌固定画风生成背景。','Free: a fixed on-brand style built from your event name/intro.')+'</p>'
+      +'<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">'
+      +'<div class="row" style="justify-content:space-between;align-items:center"><b style="font-size:14px">'+t('自定义(付费)','Custom (premium)')+'</b><span class="muted">'+t('剩','left')+' '+q.custom+'/'+q.customCap+t(' · 每场'+q.customCap+'次',' · '+q.customCap+'/event')+'</span></div>'
+      +'<textarea id="aiPrompt" rows="2" maxlength="500" placeholder="'+t('例:赛博朋克夜景,霓虹紫青配色','e.g. cyberpunk night, neon purple-teal')+'" style="margin-top:8px"></textarea>'
+      +'<div class="row" style="margin-top:10px;gap:8px"><button id="aiCustom">'+t('✨ 生成自定义海报','✨ Generate custom')+'</button><button class="ghost" id="aiClear">'+t('恢复模板版','Reset to template')+'</button><span id="aiMsg" class="muted"></span></div>';
+    $('#aiFree').addEventListener('click', ()=>genAi('free'));
+    $('#aiCustom').addEventListener('click', ()=>genAi('custom'));
+    $('#aiClear').addEventListener('click', ()=>{ paint(''); });
+  }
+  async function genAi(mode){
+    const prompt = mode==='custom' ? $('#aiPrompt').value.trim() : '';
+    if(mode==='custom' && !prompt){ setMsg('aiMsg', t('先描述画风','Describe a style first'), true); return; }
+    const btn = mode==='free'?$('#aiFree'):$('#aiCustom');
+    if(btn) btn.disabled=true; setMsg('aiMsg', t('生成中,约 15-30 秒…','Generating, ~15-30s…'));
+    try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{mode,prompt}});
+      if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
+      paint(r.image);
+      await loadAiPanel(); setMsg('aiMsg', t('完成 ✓ 剩 ','Done ✓ left ')+r.remaining);
+    }catch(e){ setMsg('aiMsg', e.message, true); if(btn) btn.disabled=false; }
+  }
   function renderPoster(){
     if(!CONFIG.tenant){ go('/'); return; }
     const isAdmin = ME.role==='admin';
-    const aiPanel = isAdmin
-      ? '<div class="panel" style="max-width:640px;margin-bottom:16px">'
-        + '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报(付费)','AI poster (premium)')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">gpt-image-1</span></div>'
-        + '<p class="muted" style="margin:6px 0 10px">'+t('用一句话描述你想要的画风,AI 生成背景画面,活动信息文字仍清晰叠加在上面。','Describe the art style you want; AI paints the background and your event text stays crisply overlaid.')+'</p>'
-        + '<textarea id="aiPrompt" rows="2" maxlength="500" placeholder="'+t('例:赛博朋克夜景城市,霓虹紫青配色,未来感','e.g. cyberpunk night city, neon purple-teal, futuristic')+'"></textarea>'
-        + '<div class="row" style="margin-top:10px;gap:8px"><button id="aiGen">'+t('生成 AI 海报','Generate')+'</button><button class="ghost" id="aiClear">'+t('恢复免费版','Reset to free')+'</button><span id="aiMsg" class="muted"></span></div>'
-        + '</div>'
-      : '';
     app.innerHTML = '<div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap"><h1>'+t('宣传海报','Promo poster')+'</h1>'
       + '<div class="row"><button id="dlPng">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg">'+t('下载 SVG','Download SVG')+'</button></div></div>'
-      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。','A4 portrait, auto-built from your homepage info (name/time/place).')+'</p>'
-      + aiPanel
+      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。免费可换成 AI 固定画风背景。','A4 portrait, auto-built from your homepage info. Free AI (fixed style) background available.')+'</p>'
+      + (isAdmin ? '<div id="aiPanel" class="panel" style="max-width:640px;margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>' : '')
       + '<div id="posterBox" style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>';
     paint('');
-    if(isAdmin){
-      $('#aiGen').addEventListener('click', async ()=>{
-        const prompt=$('#aiPrompt').value.trim();
-        if(!prompt){ setMsg('aiMsg', t('先描述画风','Describe a style first'), true); return; }
-        $('#aiGen').disabled=true; setMsg('aiMsg', t('生成中,约 15-30 秒…','Generating, ~15-30s…'));
-        try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{prompt}});
-          if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
-          paint(r.image); setMsg('aiMsg', t('完成 ✓ 今日剩余 ','Done ✓ remaining today ')+r.remaining);
-        }catch(e){ setMsg('aiMsg', e.message, true); }
-        $('#aiGen').disabled=false;
-      });
-      $('#aiClear').addEventListener('click', ()=>{ paint(''); setMsg('aiMsg',''); });
-    }
+    if(isAdmin) loadAiPanel();
     $('#dlSvg').addEventListener('click', ()=>{ const b=new Blob([window.__posterSvg],{type:'image/svg+xml'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download='hack5-poster.svg'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); });
     $('#dlPng').addEventListener('click', ()=>{
       const img=new Image(); const url=URL.createObjectURL(new Blob([window.__posterSvg],{type:'image/svg+xml;charset=utf-8'}));
