@@ -23,7 +23,7 @@ interface Env {
   SIGNED_UPLOAD_EXPIRES_SECONDS?: string;
 }
 
-type Auth = { role: "judge" | "admin"; name: string; jid: string; exp: number };
+type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
 
 const AUTH_COOKIE = "hv_auth";
 const DIMS = ["innovation", "technical", "completeness", "presentation"] as const;
@@ -40,23 +40,28 @@ export default {
       const method = request.method;
       if (method === "OPTIONS") return noContent();
 
+      // Resolve the tenant (hackathon) for this request from the Host.
+      const tctx = await resolveTenant(request, env);
+      const tenant = tctx.tenant;
+      const tid = tenant ? tenant.id : null;
+
       // ---- config & auth ----
       if (path === "/api/config" && method === "GET") return getConfig(request, env);
-      if (path === "/api/auth/login" && method === "POST") return login(request, env);
+      if (path === "/api/auth/login" && method === "POST") return login(request, env, tenant);
       if (path === "/api/auth/logout" && method === "POST") return logout(request);
-      if (path === "/api/auth/me" && method === "GET") return me(request, env);
+      if (path === "/api/auth/me" && method === "GET") return me(request, env, tid);
 
-      // ---- submissions ----
-      if (path === "/api/submissions" && method === "GET") return listSubmissions(env);
-      if (path === "/api/submissions" && method === "POST") return createSubmission(request, env);
+      // ---- submissions (tenant-scoped) ----
+      if (path === "/api/submissions" && method === "GET") return listSubmissions(env, tid);
+      if (path === "/api/submissions" && method === "POST") return createSubmission(request, env, tid);
       const subMatch = path.match(/^\/api\/submissions\/([^/]+)$/);
-      if (subMatch && method === "GET") return getSubmission(request, env, subMatch[1]);
+      if (subMatch && method === "GET") return getSubmission(request, env, tid, subMatch[1]);
       const lockMatch = path.match(/^\/api\/submissions\/([^/]+)\/lock$/);
-      if (lockMatch && method === "POST") return lockSubmission(request, env, lockMatch[1]);
+      if (lockMatch && method === "POST") return lockSubmission(request, env, tid, lockMatch[1]);
       const hideMatch = path.match(/^\/api\/submissions\/([^/]+)\/hide$/);
-      if (hideMatch && method === "POST") return hideSubmission(request, env, hideMatch[1]);
+      if (hideMatch && method === "POST") return hideSubmission(request, env, tid, hideMatch[1]);
 
-      // ---- screenshots (served from KV) ----
+      // ---- screenshots (KV, content-addressed by submission uuid) ----
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
       if (shotMatch && method === "GET") return serveShot(env, shotMatch[1], Number(shotMatch[2]));
 
@@ -64,25 +69,25 @@ export default {
       const assetMatch = path.match(/^\/asset\/([a-z0-9-]+)$/);
       if (assetMatch && method === "GET") return serveAsset(env, assetMatch[1]);
 
-      // ---- GitHub proxy ----
+      // ---- GitHub proxy (public data, not tenant-scoped) ----
       const readmeMatch = path.match(/^\/api\/gh\/([^/]+)\/([^/]+)\/readme$/);
       if (readmeMatch && method === "GET") return ghReadme(env, readmeMatch[1], readmeMatch[2]);
       const repoMatch = path.match(/^\/api\/gh\/([^/]+)\/([^/]+)$/);
       if (repoMatch && method === "GET") return ghRepo(env, repoMatch[1], repoMatch[2]);
 
-      // ---- scoring ----
-      if (path === "/api/scores" && method === "GET") return listMyScores(request, env);
-      if (path === "/api/scores" && method === "POST") return upsertScore(request, env);
-      if (path === "/api/leaderboard" && method === "GET") return leaderboard(request, env);
-      if (path === "/api/scores/export" && method === "GET") return exportScores(request, env);
+      // ---- scoring (tenant-scoped) ----
+      if (path === "/api/scores" && method === "GET") return listMyScores(request, env, tid);
+      if (path === "/api/scores" && method === "POST") return upsertScore(request, env, tid);
+      if (path === "/api/leaderboard" && method === "GET") return leaderboard(request, env, tid);
+      if (path === "/api/scores/export" && method === "GET") return exportScores(request, env, tid);
 
-      // ---- invite codes (admin) ----
-      if (path === "/api/invites" && method === "GET") return listInvites(request, env);
-      if (path === "/api/invites" && method === "POST") return generateInvites(request, env);
+      // ---- invite codes (admin, tenant-scoped) ----
+      if (path === "/api/invites" && method === "GET") return listInvites(request, env, tid);
+      if (path === "/api/invites" && method === "POST") return generateInvites(request, env, tid);
 
-      // ---- judge codes (admin) ----
-      if (path === "/api/judges" && method === "GET") return listJudges(request, env);
-      if (path === "/api/judges" && method === "POST") return createJudges(request, env);
+      // ---- judge codes (admin, tenant-scoped) ----
+      if (path === "/api/judges" && method === "GET") return listJudges(request, env, tid);
+      if (path === "/api/judges" && method === "POST") return createJudges(request, env, tid);
 
       // ---- reserved R2 upload (gated) ----
       if (path === "/api/uploads/start" && method === "POST") return startUpload(request, env);
@@ -122,7 +127,10 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   let sub: string | null = null;
   const m = host.match(/^([a-z0-9-]+)\.hack5\.net$/);
   if (m) sub = m[1];
-  else if (host.endsWith(".workers.dev") || host === "localhost" || host === "127.0.0.1") sub = "demo";
+  // dev / preview hosts have no real subdomain: allow ?tenant= override, default to demo.
+  else if (host.endsWith(".workers.dev") || host === "localhost" || host === "127.0.0.1") {
+    sub = new URL(request.url).searchParams.get("tenant") || "demo";
+  }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
     "SELECT id, subdomain, name, admin_pass_hash, intro, event_time, location, duration, address, map_query FROM tenants WHERE subdomain = ? AND status = 'active'",
@@ -162,21 +170,28 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
   });
 }
 
-async function login(request: Request, env: Env): Promise<Response> {
+async function login(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
   const body = await request.json<{ code?: string; passcode?: string; name?: string }>().catch(() => null);
   const code = String(body?.code ?? body?.passcode ?? "").trim();
   if (!code) return json({ error: "请填写登录码 / Code required" }, 400);
 
-  let payload: Auth | null = null;
-  if (env.ADMIN_PASSCODE && code === env.ADMIN_PASSCODE) {
-    // Admin: passcode-based. Fixed stable identity so admin scores never collide with judges.
+  const exp = unixNow() + 7 * 24 * 60 * 60;
+  let payload: Auth;
+  // Admin: per-tenant password (hashed). The demo tenant has an empty hash → falls back to the global ADMIN_PASSCODE.
+  const isAdmin = tenant.admin_pass_hash
+    ? timingSafeEqual(await hashSecret(env, code), tenant.admin_pass_hash)
+    : Boolean(env.ADMIN_PASSCODE) && code === env.ADMIN_PASSCODE;
+  if (isAdmin) {
     const name = String(body?.name ?? "").trim().slice(0, 40) || "管理员";
-    payload = { role: "admin", name, jid: "admin", exp: unixNow() + 7 * 24 * 60 * 60 };
+    payload = { role: "admin", name, jid: "admin", tenant: tenant.id, exp };
   } else {
-    // Judge: per-judge login code bound to a fixed name (stable scoring identity).
-    const judge = await env.DB.prepare("SELECT name FROM judges WHERE code = ?").bind(code).first<{ name: string }>();
+    // Judge: per-judge login code, scoped to this tenant.
+    const judge = await env.DB.prepare("SELECT name FROM judges WHERE code = ? AND tenant_id = ?")
+      .bind(code, tenant.id)
+      .first<{ name: string }>();
     if (!judge) return json({ error: "登录码无效 / Invalid code" }, 401);
-    payload = { role: "judge", name: judge.name, jid: `j:${code}`, exp: unixNow() + 7 * 24 * 60 * 60 };
+    payload = { role: "judge", name: judge.name, jid: `j:${code}`, tenant: tenant.id, exp };
   }
 
   const token = await signAuth(env, payload);
@@ -195,8 +210,8 @@ function sessionCookie(request: Request, token: string, maxAge: number): string 
   return `${AUTH_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
 }
 
-async function me(request: Request, env: Env): Promise<Response> {
-  const auth = await getAuth(request, env);
+async function me(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await getAuth(request, env, tid);
   if (!auth) return json({ role: null });
   return json({ role: auth.role, name: auth.name });
 }
@@ -207,7 +222,7 @@ async function signAuth(env: Env, payload: Auth): Promise<string> {
   return `${body}.${sig}`;
 }
 
-async function getAuth(request: Request, env: Env): Promise<Auth | null> {
+async function getAuth(request: Request, env: Env, tid: string | null): Promise<Auth | null> {
   const raw = parseCookies(request.headers.get("cookie"))[AUTH_COOKIE];
   if (!raw) return null;
   const dot = raw.lastIndexOf(".");
@@ -219,14 +234,16 @@ async function getAuth(request: Request, env: Env): Promise<Auth | null> {
   try {
     const payload = JSON.parse(b64urlDecode(body)) as Auth;
     if (!payload || typeof payload.exp !== "number" || payload.exp < unixNow()) return null;
+    // A cookie is only valid on the tenant it was issued for.
+    if (!tid || payload.tenant !== tid) return null;
     return payload;
   } catch {
     return null;
   }
 }
 
-async function requireRole(request: Request, env: Env, need: "judge" | "admin"): Promise<Auth | null> {
-  const auth = await getAuth(request, env);
+async function requireRole(request: Request, env: Env, tid: string | null, need: "judge" | "admin"): Promise<Auth | null> {
+  const auth = await getAuth(request, env, tid);
   if (!auth) return null;
   if (need === "admin") return auth.role === "admin" ? auth : null;
   return auth; // judge or admin
@@ -234,22 +251,26 @@ async function requireRole(request: Request, env: Env, need: "judge" | "admin"):
 
 // ============================ submissions ============================
 
-async function listSubmissions(env: Env): Promise<Response> {
+async function listSubmissions(env: Env, tid: string | null): Promise<Response> {
+  if (!tid) return json({ submissions: [] });
   const rows = await env.DB.prepare(
-    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE status = 'ready' ORDER BY created_at DESC LIMIT 300",
-  ).all<Record<string, unknown>>();
+    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE tenant_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 300",
+  )
+    .bind(tid)
+    .all<Record<string, unknown>>();
   return json({ submissions: rows.results.map((r) => publicSubmission(r, false)) });
 }
 
-async function getSubmission(request: Request, env: Env, id: string): Promise<Response> {
+async function getSubmission(request: Request, env: Env, tid: string | null, id: string): Promise<Response> {
+  if (!tid) return json({ error: "Not found" }, 404);
   const row = await env.DB.prepare(
-    "SELECT id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE id = ? AND status = 'ready'",
+    "SELECT id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
   )
-    .bind(id)
+    .bind(id, tid)
     .first<Record<string, unknown>>();
   if (!row) return json({ error: "Not found" }, 404);
   // Contact info (email/wechat) is for judges only — never expose it to anonymous viewers.
-  const auth = await getAuth(request, env);
+  const auth = await getAuth(request, env, tid);
   return json({ submission: publicSubmission(row, Boolean(auth)) });
 }
 
@@ -273,7 +294,8 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean)
   };
 }
 
-async function createSubmission(request: Request, env: Env): Promise<Response> {
+async function createSubmission(request: Request, env: Env, tid: string | null): Promise<Response> {
+  if (!tid) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
   const body = await request
     .json<{
       passcode?: string;
@@ -333,9 +355,9 @@ async function createSubmission(request: Request, env: Env): Promise<Response> {
   }
 
   const existing = await env.DB.prepare(
-    "SELECT id, edit_token, shot_count FROM submissions WHERE repo_owner = ? AND repo_name = ?",
+    "SELECT id, edit_token, shot_count FROM submissions WHERE tenant_id = ? AND repo_owner = ? AND repo_name = ?",
   )
-    .bind(repo.owner, repo.repo)
+    .bind(tid, repo.owner, repo.repo)
     .first<{ id: string; edit_token: string; shot_count: number }>();
 
   const now = unixNow();
@@ -362,9 +384,9 @@ async function createSubmission(request: Request, env: Env): Promise<Response> {
   if (!isMaster) {
     if (!inviteCode) return json({ error: "请填写邀请码 / Invite code required" }, 400);
     const consumed = await env.DB.prepare(
-      "UPDATE invite_codes SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL",
+      "UPDATE invite_codes SET used_by = ?, used_at = ? WHERE code = ? AND tenant_id = ? AND used_by IS NULL",
     )
-      .bind(id, unixNow(), inviteCode)
+      .bind(id, unixNow(), inviteCode, tid)
       .run();
     if (consumed.meta.changes !== 1) {
       return json({ error: "邀请码无效或已被使用 / Invite code invalid or already used" }, 403);
@@ -376,16 +398,16 @@ async function createSubmission(request: Request, env: Env): Promise<Response> {
   try {
     await putShots(env, id, decoded);
     await env.DB.prepare(
-      "INSERT INTO submissions (id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
+      "INSERT INTO submissions (id, tenant_id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
     )
-      .bind(id, projectName, teamName, contact, repo.owner, repo.repo, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, shareToken, editToken, now, now)
+      .bind(id, tid, projectName, teamName, contact, repo.owner, repo.repo, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, shareToken, editToken, now, now)
       .run();
   } catch (error) {
     // Roll back so a failed create (e.g. a repo-uniqueness race) doesn't burn the
     // team's invite code or leave orphaned screenshots in KV.
     if (!isMaster) {
-      await env.DB.prepare("UPDATE invite_codes SET used_by = NULL, used_at = NULL WHERE code = ? AND used_by = ?")
-        .bind(inviteCode, id)
+      await env.DB.prepare("UPDATE invite_codes SET used_by = NULL, used_at = NULL WHERE code = ? AND tenant_id = ? AND used_by = ?")
+        .bind(inviteCode, tid, id)
         .run()
         .catch(() => {});
     }
@@ -434,11 +456,11 @@ async function serveAsset(env: Env, name: string): Promise<Response> {
   });
 }
 
-async function lockSubmission(request: Request, env: Env, id: string): Promise<Response> {
-  const auth = await requireRole(request, env, "admin");
+async function lockSubmission(request: Request, env: Env, tid: string | null, id: string): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
-  const row = await env.DB.prepare("SELECT repo_owner, repo_name FROM submissions WHERE id = ?")
-    .bind(id)
+  const row = await env.DB.prepare("SELECT repo_owner, repo_name FROM submissions WHERE id = ? AND tenant_id = ?")
+    .bind(id, tid)
     .first<{ repo_owner: string; repo_name: string }>();
   if (!row) return json({ error: "Not found" }, 404);
   const res = await ghGet(env, `/repos/${row.repo_owner}/${row.repo_name}/commits?per_page=1`);
@@ -450,17 +472,17 @@ async function lockSubmission(request: Request, env: Env, id: string): Promise<R
     /* ignore */
   }
   if (!sha) return json({ error: "无法解析提交 SHA" }, 502);
-  await env.DB.prepare("UPDATE submissions SET locked_sha = ?, updated_at = ? WHERE id = ?")
-    .bind(sha, unixNow(), id)
+  await env.DB.prepare("UPDATE submissions SET locked_sha = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+    .bind(sha, unixNow(), id, tid)
     .run();
   return json({ ok: true, lockedSha: sha });
 }
 
-async function hideSubmission(request: Request, env: Env, id: string): Promise<Response> {
-  const auth = await requireRole(request, env, "admin");
+async function hideSubmission(request: Request, env: Env, tid: string | null, id: string): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
-  await env.DB.prepare("UPDATE submissions SET status = 'hidden', updated_at = ? WHERE id = ?")
-    .bind(unixNow(), id)
+  await env.DB.prepare("UPDATE submissions SET status = 'hidden', updated_at = ? WHERE id = ? AND tenant_id = ?")
+    .bind(unixNow(), id, tid)
     .run();
   return json({ ok: true });
 }
@@ -524,28 +546,28 @@ async function ghReadme(env: Env, owner: string, repo: string): Promise<Response
 
 // ============================ scoring ============================
 
-async function listMyScores(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "judge");
+async function listMyScores(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "judge");
   if (!auth) return json({ error: "Login required" }, 401);
   const rows = await env.DB.prepare(
-    "SELECT submission_id, innovation, technical, completeness, presentation, comment FROM scores WHERE judge_id = ?",
+    "SELECT submission_id, innovation, technical, completeness, presentation, comment FROM scores WHERE tenant_id = ? AND judge_id = ?",
   )
-    .bind(auth.jid)
+    .bind(tid, auth.jid)
     .all<Record<string, unknown>>();
   const byId: Record<string, unknown> = {};
   for (const r of rows.results) byId[String(r.submission_id)] = r;
   return json({ scores: byId });
 }
 
-async function upsertScore(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "judge");
+async function upsertScore(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "judge");
   if (!auth) return json({ error: "Login required" }, 401);
   const body = await request.json<Record<string, unknown>>().catch(() => null);
   if (!body) return json({ error: "Invalid JSON" }, 400);
   const submissionId = String(body.submissionId ?? "");
   if (!submissionId) return json({ error: "Missing submissionId" }, 400);
-  const exists = await env.DB.prepare("SELECT id FROM submissions WHERE id = ? AND status = 'ready'")
-    .bind(submissionId)
+  const exists = await env.DB.prepare("SELECT id FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'")
+    .bind(submissionId, tid)
     .first();
   if (!exists) return json({ error: "Submission not found" }, 404);
 
@@ -558,31 +580,33 @@ async function upsertScore(request: Request, env: Env): Promise<Response> {
   const comment = String(body.comment ?? "").trim().slice(0, 500) || null;
   const now = unixNow();
   await env.DB.prepare(
-    `INSERT INTO scores (id, submission_id, judge_id, judge_name, innovation, technical, completeness, presentation, comment, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO scores (id, tenant_id, submission_id, judge_id, judge_name, innovation, technical, completeness, presentation, comment, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(submission_id, judge_id) DO UPDATE SET
        judge_name = excluded.judge_name,
        innovation = excluded.innovation, technical = excluded.technical,
        completeness = excluded.completeness, presentation = excluded.presentation,
        comment = excluded.comment, updated_at = excluded.updated_at`,
   )
-    .bind(crypto.randomUUID(), submissionId, auth.jid, auth.name, values.innovation, values.technical, values.completeness, values.presentation, comment, now, now)
+    .bind(crypto.randomUUID(), tid, submissionId, auth.jid, auth.name, values.innovation, values.technical, values.completeness, values.presentation, comment, now, now)
     .run();
   return json({ ok: true });
 }
 
-async function leaderboard(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "judge");
+async function leaderboard(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "judge");
   if (!auth) return json({ error: "Login required" }, 401);
   const rows = await env.DB.prepare(
     `SELECT s.id, s.project_name, s.team_name, s.repo_owner, s.repo_name,
        COUNT(sc.id) AS judges,
        AVG(sc.innovation + sc.technical + sc.completeness + sc.presentation) AS avg_total
      FROM submissions s LEFT JOIN scores sc ON sc.submission_id = s.id
-     WHERE s.status = 'ready'
+     WHERE s.tenant_id = ? AND s.status = 'ready'
      GROUP BY s.id
      ORDER BY (avg_total IS NULL), avg_total DESC, s.created_at ASC`,
-  ).all<Record<string, unknown>>();
+  )
+    .bind(tid)
+    .all<Record<string, unknown>>();
   return json({
     rows: rows.results.map((r) => ({
       id: r.id,
@@ -595,16 +619,19 @@ async function leaderboard(request: Request, env: Env): Promise<Response> {
   });
 }
 
-async function exportScores(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "admin");
+async function exportScores(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const rows = await env.DB.prepare(
     `SELECT s.project_name, s.team_name, s.repo_owner, s.repo_name, sc.judge_name,
        sc.innovation, sc.technical, sc.completeness, sc.presentation,
        (sc.innovation + sc.technical + sc.completeness + sc.presentation) AS total, sc.comment
      FROM scores sc JOIN submissions s ON s.id = sc.submission_id
+     WHERE s.tenant_id = ?
      ORDER BY s.project_name, sc.judge_name`,
-  ).all<Record<string, unknown>>();
+  )
+    .bind(tid)
+    .all<Record<string, unknown>>();
   const header = ["product", "team", "repo", "judge", "innovation", "technical", "completeness", "presentation", "total", "comment"];
   const lines = [header.join(",")];
   for (const r of rows.results) {
@@ -641,8 +668,8 @@ function csvCell(value: unknown): string {
 
 // ============================ invite codes ============================
 
-async function generateInvites(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "admin");
+async function generateInvites(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const body = await request.json<{ count?: number; prefix?: string }>().catch(() => null);
   const count = Math.max(1, Math.min(500, Math.round(Number(body?.count) || 0)));
@@ -652,22 +679,24 @@ async function generateInvites(request: Request, env: Env): Promise<Response> {
   const now = unixNow();
   const codes: string[] = [];
   const stmts: D1PreparedStatement[] = [];
-  const insert = env.DB.prepare("INSERT OR IGNORE INTO invite_codes (code, created_at) VALUES (?, ?)");
+  const insert = env.DB.prepare("INSERT OR IGNORE INTO invite_codes (code, tenant_id, created_at) VALUES (?, ?, ?)");
   for (let i = 0; i < count; i += 1) {
     const code = `${prefix}-${randomCodeBody(6)}`;
     codes.push(code);
-    stmts.push(insert.bind(code, now));
+    stmts.push(insert.bind(code, tid, now));
   }
   await env.DB.batch(stmts);
   return json({ ok: true, count: codes.length, codes });
 }
 
-async function listInvites(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "admin");
+async function listInvites(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const rows = await env.DB.prepare(
-    "SELECT code, used_by, created_at, used_at FROM invite_codes ORDER BY (used_by IS NOT NULL), created_at DESC LIMIT 1000",
-  ).all<{ code: string; used_by: string | null; created_at: number; used_at: number | null }>();
+    "SELECT code, used_by, created_at, used_at FROM invite_codes WHERE tenant_id = ? ORDER BY (used_by IS NOT NULL), created_at DESC LIMIT 1000",
+  )
+    .bind(tid)
+    .all<{ code: string; used_by: string | null; created_at: number; used_at: number | null }>();
   const codes = rows.results.map((r) => ({ code: r.code, used: r.used_by != null }));
   return json({
     total: codes.length,
@@ -676,8 +705,8 @@ async function listInvites(request: Request, env: Env): Promise<Response> {
   });
 }
 
-async function createJudges(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "admin");
+async function createJudges(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const body = await request.json<{ names?: string[]; prefix?: string }>().catch(() => null);
   const names = (Array.isArray(body?.names) ? body!.names : [])
@@ -690,23 +719,22 @@ async function createJudges(request: Request, env: Env): Promise<Response> {
   const now = unixNow();
   const created: { name: string; code: string }[] = [];
   const stmts: D1PreparedStatement[] = [];
-  const insert = env.DB.prepare("INSERT OR IGNORE INTO judges (code, name, created_at) VALUES (?, ?, ?)");
+  const insert = env.DB.prepare("INSERT OR IGNORE INTO judges (code, tenant_id, name, created_at) VALUES (?, ?, ?, ?)");
   for (const name of names) {
     const code = `${prefix}-${randomCodeBody(6)}`;
     created.push({ name, code });
-    stmts.push(insert.bind(code, name, now));
+    stmts.push(insert.bind(code, tid, name, now));
   }
   await env.DB.batch(stmts);
   return json({ ok: true, count: created.length, judges: created });
 }
 
-async function listJudges(request: Request, env: Env): Promise<Response> {
-  const auth = await requireRole(request, env, "admin");
+async function listJudges(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
-  const rows = await env.DB.prepare("SELECT code, name FROM judges ORDER BY created_at DESC LIMIT 500").all<{
-    code: string;
-    name: string;
-  }>();
+  const rows = await env.DB.prepare("SELECT code, name FROM judges WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 500")
+    .bind(tid)
+    .all<{ code: string; name: string }>();
   return json({ judges: rows.results });
 }
 
@@ -901,6 +929,11 @@ async function hmacHex(key: ArrayBuffer | Uint8Array, data: string): Promise<str
 
 async function sha256Hex(data: string): Promise<string> {
   return hex(await crypto.subtle.digest("SHA-256", utf8(data)));
+}
+
+// Peppered hash for per-tenant admin passwords (AUTH_SECRET is the pepper).
+async function hashSecret(env: Env, value: string): Promise<string> {
+  return sha256Hex(`${env.AUTH_SECRET}:${value}`);
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
