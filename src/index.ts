@@ -1782,6 +1782,7 @@ const APP_HTML = String.raw`<!doctype html>
           + '<button class="ghost" onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
           + '<button class="ghost" onclick="go(\'/photos\')">'+t('照片墙','Photos')+'</button>'
           + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
+          + '<button class="ghost" onclick="go(\'/share\')">'+t('分享','Share')+'</button>'
           + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
@@ -1821,6 +1822,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/photos') return renderPhotos();
     if(p === '/poster') return renderPoster();
     if(p === '/register') return renderRegister();
+    if(p === '/share') return renderShare();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
     app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
@@ -2225,6 +2227,47 @@ const APP_HTML = String.raw`<!doctype html>
     return svg;
   }
   function paint(bg){ const svg=posterSvg(bg); window.__posterSvg=svg; window.__posterBg=bg||''; $('#posterBox').innerHTML=svg; }
+  // Rasterize the free A4 poster to a PNG blob (for share/download).
+  function posterBlob(){ return new Promise(function(res,rej){
+    const svg=posterSvg(''); const img=new Image();
+    const u=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
+    img.onload=function(){ const c=document.createElement('canvas'); c.width=794; c.height=1123; c.getContext('2d').drawImage(img,0,0,794,1123); URL.revokeObjectURL(u); c.toBlob(function(b){ b?res(b):rej(new Error('fail')); },'image/png'); };
+    img.onerror=function(){ URL.revokeObjectURL(u); rej(new Error('fail')); }; img.src=u;
+  }); }
+  async function copyText(str,elId){ try{ await navigator.clipboard.writeText(str); setMsg(elId,t('已复制 ✓','Copied ✓')); }catch(e){ setMsg(elId,t('复制失败,请手动选择','Copy failed—select manually'),true); } }
+  function renderShare(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    const tn=CONFIG.tenant; const sub=tn.subdomain||'';
+    const url='https://'+sub+'.hack5.net';
+    const meta=[]; if(tn.eventTime)meta.push('📅 '+tn.eventTime); if(tn.location)meta.push('📍 '+tn.location);
+    const caption=(tn.name||'Hackathon')+'\n'+(tn.intro?tn.intro+'\n':'')+(meta.length?meta.join('   ')+'\n':'')
+      +'👉 '+t('报名 / 提交作品:','Join / submit: ')+url+'\n#hackathon #hack5';
+    const hasNative = !!(navigator.share);
+    app.innerHTML='<h1>'+t('一键转发','Share')+'</h1>'
+      +'<p class="muted">'+t('复制文案 + 下载海报,发到公众号 / 小红书 / 微信群 / Telegram 群;手机可直接用系统分享。','Copy the caption and poster, then post to your channels. On mobile you can use the native share sheet.')+'</p>'
+      +'<div class="panel" style="max-width:560px">'
+      +'<label>'+t('分享文案','Caption')+'</label><textarea id="shCap" rows="6">'+esc(caption)+'</textarea>'
+      +'<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:12px">'
+      +'<button id="shCopyCap">'+t('复制文案','Copy caption')+'</button>'
+      +'<button class="ghost" id="shCopyUrl">'+t('复制链接','Copy link')+'</button>'
+      +'<button class="ghost" id="shPoster">'+t('下载海报','Download poster')+'</button>'
+      +(hasNative?'<button class="ghost" id="shNative">'+t('系统分享(含海报)','Share sheet')+'</button>':'')
+      +'<a target="_blank" rel="noopener" href="https://t.me/share/url?url='+encodeURIComponent(url)+'&text='+encodeURIComponent(caption)+'"><button class="ghost">Telegram</button></a>'
+      +'<a target="_blank" rel="noopener" href="https://twitter.com/intent/tweet?text='+encodeURIComponent(caption)+'"><button class="ghost">X / Twitter</button></a>'
+      +'</div><div id="shMsg" class="muted" style="margin-top:8px"></div></div>';
+    $('#shCopyCap').addEventListener('click',()=>copyText($('#shCap').value,'shMsg'));
+    $('#shCopyUrl').addEventListener('click',()=>copyText(url,'shMsg'));
+    $('#shPoster').addEventListener('click',async()=>{
+      setMsg('shMsg',t('生成海报中…','Rendering poster…'));
+      try{ const b=await posterBlob(); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download='hack5-poster.png'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); setMsg('shMsg',t('海报已下载 ✓','Poster downloaded ✓')); }
+      catch(e){ setMsg('shMsg',t('海报生成失败','Poster failed'),true); }
+    });
+    if(hasNative) $('#shNative').addEventListener('click',async()=>{
+      const data={ title:tn.name||'hack5', text:$('#shCap').value, url:url };
+      try{ const b=await posterBlob(); const f=new File([b],'hack5-poster.png',{type:'image/png'}); if(navigator.canShare && navigator.canShare({files:[f]})) data.files=[f]; }catch(e){}
+      try{ await navigator.share(data); }catch(e){}
+    });
+  }
   function renderPoster(){
     if(!CONFIG.tenant){ go('/'); return; }
     const isAdmin = ME.role==='admin';
