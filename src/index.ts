@@ -48,6 +48,11 @@ export default {
       const method = request.method;
       if (method === "OPTIONS") return noContent();
 
+      // Canonical host: www -> apex.
+      if (url.hostname.toLowerCase() === "www.hack5.net") {
+        return Response.redirect(`https://hack5.net${path}${url.search}`, 301);
+      }
+
       // Resolve the tenant (hackathon) for this request from the Host.
       const tctx = await resolveTenant(request, env);
       const tenant = tctx.tenant;
@@ -177,6 +182,7 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
   const tctx = await resolveTenant(request, env);
   return json({
     appName: env.APP_NAME || "hack5",
+    country: request.cf?.country ?? null,
     platform: tctx.platform,
     tenantNotFound: tctx.notFound ?? null,
     tenant: tctx.tenant
@@ -1485,6 +1491,8 @@ const APP_HTML = String.raw`<!doctype html>
     .tenant-hero{margin-bottom:18px}
     .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:#3c4250;font-size:14px;font-weight:600}
     .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
+    .map-links{margin-top:10px;font-size:13px;color:var(--muted)}
+    .map-links a{font-weight:650}
     .masonry{columns:3 240px;column-gap:14px}
     .mphoto{position:relative;break-inside:avoid;margin-bottom:14px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#fff;box-shadow:var(--shadow)}
     .mphoto img{width:100%;display:block;cursor:pointer}
@@ -1538,7 +1546,8 @@ const APP_HTML = String.raw`<!doctype html>
   function renderNav(){
     const n = document.getElementById('nav');
     if(CONFIG.platform){
-      let hp = '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
+      let hp = '<button class="ghost" onclick="go(\'/guide\')">'+t('指南','Guide')+'</button>'
+             + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
       if(ME_USER.email){
         hp += '<button onclick="go(\'/dashboard\')">'+t('我的黑客松','My hackathons')+'</button>'
             + '<span class="who">'+esc(ME_USER.email)+'</span>'
@@ -1574,6 +1583,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(CONFIG.tenantNotFound) return renderTenantNotFound();
     if(CONFIG.platform){
       if(p === '/about') return renderAbout();
+      if(p === '/guide') return renderGuide();
       if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
       return renderPlatformLanding();
     }
@@ -1630,6 +1640,25 @@ const APP_HTML = String.raw`<!doctype html>
       ['2','🤖', t('选一个免费的 AI 开发工具','Pick a free AI coding tool'), t('让 AI 帮你写代码、调试、部署;你负责想法和判断。','Let AI write, debug and deploy; you bring the idea and the judgment.')],
       ['3','🚀', t('说出想法,几小时做出来,push 上线','Say your idea, build it in hours, ship it'), t('别等完美,先让它跑起来 —— 这就是黑客精神。','Do not wait for perfect — get it running. That is the hacker way.')],
     ];
+    const artOrg = '<svg viewBox="0 0 440 210" width="100%" xmlns="http://www.w3.org/2000/svg">'
+      + '<g stroke="#c7cede" stroke-width="2.5" fill="none"><path d="M220 105 118 55M220 105 322 55M220 105 110 156M220 105 330 156"/></g>'
+      + '<circle cx="118" cy="55" r="17" fill="#b8adf5"/><circle cx="322" cy="55" r="17" fill="#8f7ff0"/>'
+      + '<circle cx="110" cy="156" r="17" fill="#8f7ff0"/><circle cx="330" cy="156" r="17" fill="#b8adf5"/>'
+      + '<circle cx="220" cy="105" r="32" fill="#5b4be6"/>'
+      + '<path d="M220 87l6 13 14 1-11 9 4 14-13-8-13 8 4-14-11-9 14-1z" fill="#fff"/></svg>';
+    const orgFeats = [
+      ['🌐', t('独立域名站点','Your own subdomain'), t('每场黑客松一个 name.hack5.net,专业又好记。','A name.hack5.net for each event — clean and memorable.')],
+      ['🖼️', t('作品墙','Work wall'), t('选手交 GitHub 链接,自动抓 star/语言/README 生成作品卡。','Teams submit a GitHub repo; cards auto-load stars, language, README.')],
+      ['🏡', t('活动首页 + 地图','Event homepage + map'), t('介绍、时间地点、周期,内嵌地图(自动适配国内外)。','Intro, time, place, duration, embedded map (China-aware).')],
+      ['📸', t('照片墙','Photo wall'), t('现场花絮瀑布流,上传自动压缩。','A masonry gallery of event moments; uploads auto-compress.')],
+      ['⚖️', t('在线评审','Online judging'), t('评委登录码、四维打分、排行榜、CSV 导出、锁定评审版本。','Judge codes, 4-axis scoring, leaderboard, CSV export, commit lock.')],
+      ['🆓', t('永久免费','Free forever'), t('邮箱登录、中英文,所有记录永久保留。','Email login, bilingual, all records kept forever.')],
+    ];
+    const launchSteps = [
+      ['1','📧', t('邮箱登录(无需注册)','Log in with email (no signup)'), t('输入邮箱,收验证码即登录。','Enter your email, get a code, you are in.')],
+      ['2','✏️', t('取名,拿到你的域名','Name it, get your subdomain'), t('给黑客松取个名字,自动分配 name.hack5.net。','Name your event; name.hack5.net is assigned automatically.')],
+      ['3','🚀', t('一键部署,开始招募','Deploy, start recruiting'), t('拿到管理员密码,发邀请码给选手、登录码给评委。','Get your admin password; hand invite codes to teams, login codes to judges.')],
+    ];
     app.innerHTML = '<div class="guide">'
       + '<div class="guide-hero"><h1>'+t('如何成为一名黑客','How to Become a Hacker')+'</h1>'
       + '<p class="guide-sub">'+t('—— 做 AI 时代的创新者','— an innovator in the AI era')+'</p></div>'
@@ -1645,7 +1674,19 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="guide-steps">'
       + steps.map(s=>'<div class="step"><div class="num">'+s[0]+'</div><div><h3>'+s[1]+' '+esc(s[2])+'</h3><p>'+esc(s[3])+'</p></div></div>').join('')
       + '</div>'
-      + '<div class="guide-cta"><h2>'+t('准备好了吗?','Ready?')+'</h2><button onclick="go(\'/submit\')">'+t('提交你的作品 →','Submit your project →')+'</button></div>'
+      + '<div class="guide-cta"><h2>'+t('准备好动手了吗?','Ready to build?')+'</h2><a href="https://demo.hack5.net" target="_blank" rel="noopener"><button>'+t('👀 看一个示例黑客松 →','👀 See a live hackathon →')+'</button></a ></div>'
+      // ===== 并列大章节:如何组织一个黑客松 =====
+      + '<div class="guide-hero" style="padding:46px 0 6px;border-top:1px solid var(--line);margin-top:18px"><h1>'+t('如何组织一个黑客松','How to Organize a Hackathon')+'</h1>'
+      + '<p class="guide-sub">'+t('用 hack5.net,10 分钟拥有你自己的黑客松站点','With hack5.net — own your hackathon site in 10 minutes')+'</p></div>'
+      + '<div class="guide-row"><div class="guide-art">'+artOrg+'</div><div><h2>'+t('为何要组织黑客松','Why organize one')+'</h2><p>'
+      + t('组织一场黑客松,是把你在意的主题变成行动的最好方式 —— 环保节能、开放协议、AI 安全,或任何你想推动的领域。你会聚起一群志同道合的人,放大相关社区与企业的影响力,也为新产品的发布与试用创造真实场景。对组织者来说,这是难得的契机:凝聚人、传播理念、发现人才与合作。',
+          'Organizing a hackathon is the best way to turn a theme you care about into action — climate & energy, open protocols, AI safety, or any field you want to push forward. You gather like-minded people, amplify the communities and companies around it, and create real settings to launch and trial new products. For an organizer it is a rare chance: to unite people, spread ideas, and find talent and partners.')
+      + '</p></div></div>'
+      + '<h2 style="text-align:center;margin-top:30px">'+t('hack5 帮你搞定这些','What hack5 handles for you')+'</h2>'
+      + '<div class="guide-steps">'+orgFeats.map(f=>'<div class="step"><div class="num" style="background:#0a0e0a;font-size:19px">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')+'</div>'
+      + '<h2 style="text-align:center;margin-top:30px">'+t('三步启动你的黑客松','Three steps to launch')+'</h2>'
+      + '<div class="guide-steps">'+launchSteps.map(s=>'<div class="step"><div class="num">'+s[0]+'</div><div><h3>'+s[1]+' '+esc(s[2])+'</h3><p>'+esc(s[3])+'</p></div></div>').join('')+'</div>'
+      + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><a href="https://hack5.net/start"><button>'+t('🚀 现在就发起 →','🚀 Start now →')+'</button></a ></div>'
       + '</div>';
   }
 
@@ -1693,6 +1734,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="row" style="justify-content:center;margin-top:22px">'
       + '<button onclick="go(\'/start\')" style="font-size:16px;padding:12px 24px">'+t('🚀 发起你的黑客松','🚀 Start your hackathon')+'</button>'
       + '<button class="ghost" onclick="go(\'/about\')" style="font-size:16px;padding:12px 24px">'+t('了解 hack5','About hack5')+'</button></div>'
+      + '<div style="text-align:center;margin-top:14px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 看一个示例黑客松站点 → demo.hack5.net','👀 See a live example → demo.hack5.net')+'</a></div>'
       + '</div>'
       + '<div class="guide-steps" style="margin-top:38px">'
       + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
@@ -1775,7 +1817,19 @@ const APP_HTML = String.raw`<!doctype html>
     if(tn.location) bits.push('📍 '+esc(tn.location));
     if(tn.duration) bits.push('⏱ '+esc(tn.duration));
     const q = tn.mapQuery || tn.address;
-    const map = q ? '<iframe class="map-embed" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="https://www.google.com/maps?q='+encodeURIComponent(q)+'&output=embed"></iframe>' : '';
+    let map = '';
+    if(q){
+      const eq = encodeURIComponent(q);
+      // In mainland China, Google Maps is blocked — skip the embed and offer open-links instead.
+      const embed = (CONFIG.country !== 'CN')
+        ? '<iframe class="map-embed" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="https://www.google.com/maps?q='+eq+'&output=embed"></iframe>'
+        : '';
+      const links = '<div class="map-links">🗺️ '+t('在地图打开','Open in maps')+':'
+        + ' <a href="https://www.amap.com/search?query='+eq+'" target="_blank" rel="noopener">'+t('高德','Amap')+'</a> ·'
+        + ' <a href="https://map.baidu.com/search/'+eq+'" target="_blank" rel="noopener">'+t('百度','Baidu')+'</a> ·'
+        + ' <a href="https://www.google.com/maps/search/?api=1&query='+eq+'" target="_blank" rel="noopener">Google</a></div>';
+      map = embed + links;
+    }
     if(!tn.intro && !bits.length && !tn.address && !map) return '';
     return '<div class="panel tenant-hero">'
       + (tn.intro?'<p style="font-size:16px;color:#3c4250;white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
