@@ -1,4 +1,5 @@
 import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
+import qrcode from "qrcode-generator";
 
 interface Env {
   DB: D1Database;
@@ -105,6 +106,8 @@ export default {
       if (path === "/api/tenant/banner" && method === "POST") return updateBanner(request, env, tenant);
       const bannerServe = path.match(/^\/banner\/([a-z0-9-]+)$/);
       if (bannerServe && method === "GET") return serveBanner(env, bannerServe[1]);
+      const qrServe = path.match(/^\/qr\/([a-z0-9-]+)$/);
+      if (qrServe && method === "GET") return serveQr(env, qrServe[1]);
 
       // ---- team formation board ----
       if (path === "/api/tenant/teams" && method === "POST") return createTeamPost(request, env, tenant);
@@ -1016,6 +1019,36 @@ async function servePhoto(env: Env, tid: string, id: string): Promise<Response> 
       "X-Robots-Tag": "noindex",
       ...UPLOAD_SERVE_HEADERS,
     },
+  });
+}
+
+// QR code as a crisp SVG (our own trusted markup — just black squares, no script).
+function qrSvg(text: string): string {
+  const qr = qrcode(0, "M");
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount();
+  const cell = 8;
+  const margin = 4 * cell;
+  const size = n * cell + margin * 2;
+  let rects = "";
+  for (let r = 0; r < n; r += 1) {
+    for (let c = 0; c < n; c += 1) {
+      if (qr.isDark(r, c)) rects += `<rect x="${margin + c * cell}" y="${margin + r * cell}" width="${cell}" height="${cell}"/>`;
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="#ffffff"/><g fill="#000000">${rects}</g></svg>`;
+}
+
+// Serve a QR of a tenant's URL (public, cached). Self-generated SVG, safe to serve.
+async function serveQr(env: Env, sub: string): Promise<Response> {
+  const row = await env.DB.prepare("SELECT subdomain FROM tenants WHERE subdomain = ? AND status = 'active'")
+    .bind(sub)
+    .first<{ subdomain: string }>();
+  if (!row) return json({ error: "Not found" }, 404);
+  const root = env.ROOT_DOMAIN || "hack5.net";
+  return new Response(qrSvg(`https://${row.subdomain}.${root}`), {
+    headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff" },
   });
 }
 
@@ -2018,6 +2051,8 @@ const APP_HTML = String.raw`<!doctype html>
     .share-grid{display:grid;grid-template-columns:340px 1fr;gap:22px;align-items:start}
     .share-poster{border-radius:14px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow)}
     .share-plats{display:flex;flex-wrap:wrap;gap:8px}
+    .share-qr{display:flex;align-items:center;gap:14px;margin-top:16px;padding:12px;border:1px solid var(--line);border-radius:12px}
+    .share-qr img{width:132px;height:132px;border-radius:8px;background:#fff;padding:6px;flex:0 0 auto}
     .splat{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border:1px solid var(--line);border-radius:999px;font-size:13px;font-weight:600;color:var(--ink)}
     .splat:hover{background:var(--ghost-hover)}
     .sdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
@@ -2686,7 +2721,7 @@ const APP_HTML = String.raw`<!doctype html>
       +shareLink('https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(url),'Facebook','#1877f2')
       +shareLink('https://www.linkedin.com/sharing/share-offsite/?url='+encodeURIComponent(url),'LinkedIn','#0a66c2')
       +'</div>'
-      +'<div class="muted" style="margin-top:12px;font-size:12px">'+t('微信:点上面「分享到微信」用手机系统面板;电脑上复制链接粘到微信即可。二维码扫码分享即将上线。','WeChat: use the share button on mobile, or copy the link. A scannable QR is coming.')+'</div>'
+      +'<div class="share-qr"><img src="/qr/'+esc(sub)+'" alt="'+t('报名二维码','Join QR')+'" width="132" height="132"><div><div style="font-weight:700;font-size:14px">'+t('微信 / 相机扫码打开','Scan to open')+'</div><div class="muted" style="font-size:12px;margin-top:2px">'+t('电脑上微信分享:扫这个码,或复制链接粘到微信。','On desktop WeChat: scan this, or copy the link.')+'</div><a href="/qr/'+esc(sub)+'" target="_blank" rel="noopener" style="font-size:13px;font-weight:600">'+t('下载二维码 →','Download QR →')+'</a></div></div>'
       +'<div id="shMsg" class="muted" style="margin-top:8px"></div></div>'
       +'</div>';
     $('#shPosterBox').innerHTML = posterSvg('');
