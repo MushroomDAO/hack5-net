@@ -1914,7 +1914,7 @@ const APP_HTML = String.raw`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>hack5 · 10 分钟发起你的黑客松</title>
+  <title>&#8249;5&#8250; hack5: Launch Your Hackathon!</title>
   <meta name="description" content="hack5 — 10 分钟发起并部署属于你自己的黑客松站点:报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -2133,7 +2133,7 @@ const APP_HTML = String.raw`<!doctype html>
     CONFIG = await api('/api/config').catch(()=>({appName:'hack5',platform:false,tenant:null,eventName:'Hackathon',minShots:2,maxShots:4,maxShotBytes:1048576,dims:['innovation','technical','completeness','presentation'],maxVideoSeconds:180}));
     const brand = CONFIG.tenant ? CONFIG.tenant.name : CONFIG.appName;
     document.getElementById('brandName').textContent = brand;
-    document.title = brand;
+    document.title = CONFIG.tenant ? (brand + ' · ‹5› hack5') : '‹5› hack5: Launch Your Hackathon!';
     document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
     if(CONFIG.platform) ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
     else ME = await api('/api/auth/me').catch(()=>({role:null}));
