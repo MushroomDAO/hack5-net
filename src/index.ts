@@ -66,6 +66,14 @@ export default {
       // ---- tenant homepage (admin) ----
       if (path === "/api/tenant/homepage" && method === "POST") return updateHomepage(request, env, tenant);
 
+      // ---- photo wall ----
+      if (path === "/api/tenant/photos" && method === "GET") return listPhotos(env, tid);
+      if (path === "/api/tenant/photos" && method === "POST") return uploadPhotos(request, env, tenant);
+      const photoDel = path.match(/^\/api\/tenant\/photos\/([^/]+)$/);
+      if (photoDel && method === "DELETE") return deletePhoto(request, env, tenant, photoDel[1]);
+      const photoServe = path.match(/^\/photo\/([^/]+)\/([^/]+)$/);
+      if (photoServe && method === "GET") return servePhoto(env, photoServe[1], photoServe[2]);
+
       // ---- submissions (tenant-scoped) ----
       if (path === "/api/submissions" && method === "GET") return listSubmissions(env, tid);
       if (path === "/api/submissions" && method === "POST") return createSubmission(request, env, tid);
@@ -456,6 +464,73 @@ async function updateHomepage(request: Request, env: Env, tenant: Tenant | null)
       tenant.id,
     )
     .run();
+  return json({ ok: true });
+}
+
+// ============================ photo wall ============================
+
+const MAX_PHOTO_BYTES = 128 * 1024; // ~120KB target, small slack
+
+async function listPhotos(env: Env, tid: string | null): Promise<Response> {
+  if (!tid) return json({ photos: [] });
+  const rows = await env.DB.prepare("SELECT id, caption FROM photos WHERE tenant_id = ? ORDER BY sort ASC, created_at ASC")
+    .bind(tid)
+    .all<{ id: string; caption: string | null }>();
+  return json({
+    photos: rows.results.map((p) => ({ id: p.id, url: `/photo/${tid}/${p.id}`, caption: p.caption ?? "" })),
+  });
+}
+
+async function servePhoto(env: Env, tid: string, id: string): Promise<Response> {
+  const { value, metadata } = await env.SHOTS.getWithMetadata<{ contentType?: string }>(`photo:${tid}:${id}`, {
+    type: "arrayBuffer",
+  });
+  if (!value) return json({ error: "Not found" }, 404);
+  return new Response(value, {
+    headers: {
+      "Content-Type": metadata?.contentType || "image/jpeg",
+      "Cache-Control": "public, max-age=3600",
+      "X-Robots-Tag": "noindex",
+    },
+  });
+}
+
+async function uploadPhotos(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  const auth = await requireRole(request, env, tenant.id, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const body = await request.json<{ photos?: { dataUrl?: string; caption?: string }[] }>().catch(() => null);
+  const items = Array.isArray(body?.photos) ? body!.photos : [];
+  if (!items.length) return json({ error: "没有照片 / No photos" }, 400);
+  if (items.length > 40) return json({ error: "一次最多 40 张 / Up to 40 at a time" }, 400);
+
+  const existing = await env.DB.prepare("SELECT COUNT(*) AS c FROM photos WHERE tenant_id = ?").bind(tenant.id).first<{ c: number }>();
+  let sort = Number(existing?.c ?? 0);
+  const now = unixNow();
+  let saved = 0;
+  for (const item of items) {
+    const parsed = dataUrlToBytes(item?.dataUrl);
+    if (!parsed || !parsed.contentType.startsWith("image/")) continue;
+    if (parsed.bytes.byteLength > MAX_PHOTO_BYTES) return json({ error: "单张需 ≤120KB / Each photo must be ≤120KB" }, 400);
+    const id = crypto.randomUUID();
+    await env.SHOTS.put(`photo:${tenant.id}:${id}`, parsed.bytes, { metadata: { contentType: parsed.contentType } });
+    await env.DB.prepare("INSERT INTO photos (id, tenant_id, content_type, caption, sort, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(id, tenant.id, parsed.contentType, String(item?.caption ?? "").trim().slice(0, 120) || null, sort, now)
+      .run();
+    sort += 1;
+    saved += 1;
+  }
+  return json({ ok: true, saved });
+}
+
+async function deletePhoto(request: Request, env: Env, tenant: Tenant | null, id: string): Promise<Response> {
+  if (!tenant) return json({ error: "Not found" }, 404);
+  const auth = await requireRole(request, env, tenant.id, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const row = await env.DB.prepare("SELECT id FROM photos WHERE id = ? AND tenant_id = ?").bind(id, tenant.id).first();
+  if (!row) return json({ error: "Not found" }, 404);
+  await env.SHOTS.delete(`photo:${tenant.id}:${id}`);
+  await env.DB.prepare("DELETE FROM photos WHERE id = ? AND tenant_id = ?").bind(id, tenant.id).run();
   return json({ ok: true });
 }
 
@@ -1318,6 +1393,11 @@ const APP_HTML = String.raw`<!doctype html>
     .tenant-hero{margin-bottom:18px}
     .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:#3c4250;font-size:14px;font-weight:600}
     .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
+    .masonry{columns:3 240px;column-gap:14px}
+    .mphoto{position:relative;break-inside:avoid;margin-bottom:14px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#fff;box-shadow:var(--shadow)}
+    .mphoto img{width:100%;display:block;cursor:pointer}
+    .mphoto .cap{padding:8px 10px;font-size:13px;color:#3c4250}
+    .mphoto .pdel{position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;background:rgba(192,57,43,.92);color:#fff;text-align:center;line-height:24px;cursor:pointer;font-size:15px}
   </style>
 </head>
 <body>
@@ -1378,7 +1458,7 @@ const APP_HTML = String.raw`<!doctype html>
       n.innerHTML = hp; return;
     }
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
-          + '<button class="ghost" onclick="go(\'/guide\')">'+t('如何成为创新者','Become a builder')+'</button>'
+          + '<button class="ghost" onclick="go(\'/photos\')">'+t('照片墙','Photos')+'</button>'
           + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
           + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
     if(ME.role){
@@ -1415,6 +1495,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/invites') return renderInvites();
     if(p === '/judges') return renderJudges();
     if(p === '/manage') return renderTenantEdit();
+    if(p === '/photos') return renderPhotos();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
     app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
@@ -1633,6 +1714,78 @@ const APP_HTML = String.raw`<!doctype html>
         setMsg('fMsg', t('已保存 ✓','Saved ✓'));
       } catch(e){ setMsg('fMsg', e.message, true); }
       finally { $('#fSave').disabled=false; }
+    });
+  }
+
+  // ---------------- photo wall ----------------
+  let PHOTOS = []; // pending uploads: {dataUrl}
+  async function renderPhotos(){
+    app.innerHTML = '<h1>'+t('照片墙','Photo wall')+'</h1><p class="muted">'+t('黑客松现场花絮','Moments from the event')+'</p>'
+      + (ME.role==='admin' ? '<div class="panel" style="margin-bottom:18px"><h2>'+t('上传照片','Upload photos')+'</h2>'
+          + '<p class="muted">'+t('建议至少 5 张,自动压缩到 120KB 以内','At least 5 recommended, auto-compressed to ≤120KB')+'</p>'
+          + '<input id="phFiles" type="file" accept="image/*" multiple>'
+          + '<div class="thumbs" id="phThumbs"></div>'
+          + '<div class="row" style="margin-top:10px"><button id="phUpload">'+t('上传','Upload')+'</button><span id="phMsg" class="muted"></span></div></div>' : '')
+      + '<div id="photoWall" class="masonry"><p class="muted">'+t('加载中…','Loading…')+'</p></div>';
+    if(ME.role==='admin'){
+      PHOTOS = [];
+      $('#phFiles').addEventListener('change', onPhotoPick);
+      $('#phUpload').addEventListener('click', doPhotoUpload);
+    }
+    loadPhotoWall();
+  }
+  async function onPhotoPick(ev){
+    const files=[...ev.target.files]; ev.target.value='';
+    for(const f of files){ if(PHOTOS.length>=40){ alert(t('一次最多 40 张','Max 40 at a time')); break; } try{ PHOTOS.push({dataUrl: await compressPhoto(f)}); }catch(e){ alert(e.message); } }
+    renderPhotoThumbs();
+  }
+  function renderPhotoThumbs(){
+    $('#phThumbs').innerHTML = PHOTOS.map((p,i)=>'<div class="t"><img src="'+p.dataUrl+'"><span class="x" data-i="'+i+'">×</span></div>').join('');
+    $('#phThumbs').querySelectorAll('.x').forEach(x=>x.addEventListener('click',()=>{ PHOTOS.splice(Number(x.dataset.i),1); renderPhotoThumbs(); }));
+  }
+  async function doPhotoUpload(){
+    if(!PHOTOS.length){ setMsg('phMsg', t('请先选择照片','Pick photos first'), true); return; }
+    $('#phUpload').disabled=true; setMsg('phMsg', t('上传中…','Uploading…'));
+    try{
+      const r = await api('/api/tenant/photos',{method:'POST',body:{photos:PHOTOS}});
+      PHOTOS=[]; $('#phThumbs').innerHTML=''; setMsg('phMsg', t('已上传 ','Uploaded ')+r.saved);
+      loadPhotoWall();
+    }catch(e){ setMsg('phMsg', e.message, true); }
+    finally{ $('#phUpload').disabled=false; }
+  }
+  async function loadPhotoWall(){
+    const box=$('#photoWall'); if(!box) return;
+    try{
+      const {photos}=await api('/api/tenant/photos');
+      if(!photos.length){ box.innerHTML='<p class="muted">'+t('还没有照片','No photos yet')+'</p>'; return; }
+      box.innerHTML = photos.map(p=>'<div class="mphoto"><img src="'+p.url+'" loading="lazy" alt="">'
+        + (p.caption?'<div class="cap">'+esc(p.caption)+'</div>':'')
+        + (ME.role==='admin'?'<span class="pdel" data-id="'+p.id+'">×</span>':'')+'</div>').join('');
+      box.querySelectorAll('.mphoto img').forEach(img=>img.addEventListener('click',()=>openLightbox(img.src)));
+      if(ME.role==='admin') box.querySelectorAll('.pdel').forEach(x=>x.addEventListener('click',async()=>{
+        if(!confirm(t('删除这张?','Delete this photo?'))) return;
+        try{ await api('/api/tenant/photos/'+x.dataset.id,{method:'DELETE'}); loadPhotoWall(); }catch(e){ alert(e.message); }
+      }));
+    }catch(e){ box.innerHTML='<p class="notice err">'+esc(e.message)+'</p>'; }
+  }
+  function compressPhoto(file){
+    return new Promise((resolve,reject)=>{
+      if(!file.type.startsWith('image/')) return reject(new Error(t('不是图片','Not an image')));
+      const img=new Image(); const url=URL.createObjectURL(file);
+      img.onload=()=>{
+        const max=1200; let w=img.width,h=img.height;
+        if(w>max||h>max){ const r=Math.min(max/w,max/h); w=Math.round(w*r); h=Math.round(h*r); }
+        const c=document.createElement('canvas'); const ctx=c.getContext('2d');
+        c.width=w; c.height=h; ctx.drawImage(img,0,0,w,h);
+        URL.revokeObjectURL(url);
+        let q=0.82, out=c.toDataURL('image/jpeg',q);
+        while(dataUrlBytes(out)>120000 && q>0.3){ q-=0.1; out=c.toDataURL('image/jpeg',q); }
+        while(dataUrlBytes(out)>120000 && c.width>420){ c.width=Math.round(c.width*0.85); c.height=Math.round(c.height*0.85); ctx.drawImage(img,0,0,c.width,c.height); out=c.toDataURL('image/jpeg',0.7); }
+        if(dataUrlBytes(out)>128000) return reject(new Error(t('图片太大,换一张','Photo too large')));
+        resolve(out);
+      };
+      img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error(t('无法读取','Cannot read'))); };
+      img.src=url;
     });
   }
 
