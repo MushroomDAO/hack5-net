@@ -85,6 +85,12 @@ export default {
       // ---- premium: AI text-to-image poster background (admin, metered) ----
       if (path === "/api/tenant/poster/ai" && method === "POST") return generateAiPoster(request, env, tenant, tid);
 
+      // ---- team formation board ----
+      if (path === "/api/tenant/teams" && method === "POST") return createTeamPost(request, env, tenant);
+      if (path === "/api/tenant/teams" && method === "GET") return listTeamPosts(env, tid);
+      const teamDel = path.match(/^\/api\/tenant\/teams\/([^/]+)$/);
+      if (teamDel && method === "DELETE") return deleteTeamPost(request, env, tenant, tid, teamDel[1]);
+
       // ---- photo wall ----
       if (path === "/api/tenant/photos" && method === "GET") return listPhotos(env, tid);
       if (path === "/api/tenant/photos" && method === "POST") return uploadPhotos(request, env, tenant);
@@ -704,6 +710,58 @@ async function exportRegistrations(request: Request, env: Env, tid: string | nul
       "Cache-Control": "no-store",
     },
   });
+}
+
+// ---- team formation: "looking for teammates" board ----
+async function createTeamPost(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  const body = await request
+    .json<{ name?: string; contact?: string; skills?: string; lookingFor?: string; idea?: string }>()
+    .catch(() => null);
+  const name = String(body?.name ?? "").trim().slice(0, 40);
+  const contact = String(body?.contact ?? "").trim().slice(0, 80);
+  const skills = String(body?.skills ?? "").trim().slice(0, 120) || null;
+  const lookingFor = String(body?.lookingFor ?? "").trim().slice(0, 120) || null;
+  const idea = String(body?.idea ?? "").trim().slice(0, 300) || null;
+  if (!name) return json({ error: "请填写昵称 / Name required" }, 400);
+  if (!contact) return json({ error: "请填写联系方式 / Contact required" }, 400);
+
+  const now = unixNow();
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const total = await env.DB.prepare("SELECT COUNT(*) AS c FROM team_posts WHERE tenant_id = ?")
+    .bind(tenant.id)
+    .first<{ c: number }>();
+  if ((total?.c ?? 0) >= 500) return json({ error: "组队墙已满 / Board full" }, 403);
+  const recent = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM team_posts WHERE tenant_id = ? AND request_ip = ? AND created_at > ?",
+  )
+    .bind(tenant.id, ip, now - 60 * 60)
+    .first<{ c: number }>();
+  if ((recent?.c ?? 0) >= 10) return json({ error: "发布过于频繁,请稍后再试 / Too many posts" }, 429);
+
+  await env.DB.prepare(
+    "INSERT INTO team_posts (id, tenant_id, name, contact, skills, looking_for, idea, created_at, request_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(crypto.randomUUID(), tenant.id, name, contact, skills, lookingFor, idea, now, ip)
+    .run();
+  return json({ ok: true });
+}
+
+async function listTeamPosts(env: Env, tid: string | null): Promise<Response> {
+  if (!tid) return json({ posts: [] });
+  const rows = await env.DB.prepare(
+    "SELECT id, name, contact, skills, looking_for, idea, created_at FROM team_posts WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 200",
+  )
+    .bind(tid)
+    .all<{ id: string; name: string; contact: string; skills: string | null; looking_for: string | null; idea: string | null; created_at: number }>();
+  return json({ posts: rows.results });
+}
+
+async function deleteTeamPost(request: Request, env: Env, tenant: Tenant | null, tid: string | null, id: string): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth || !tenant) return json({ error: "Admin only" }, 403);
+  await env.DB.prepare("DELETE FROM team_posts WHERE id = ? AND tenant_id = ?").bind(id, tenant.id).run();
+  return json({ ok: true });
 }
 
 // Premium: generate an AI poster BACKGROUND from a text prompt (gpt-image-1), overlaid with crisp
@@ -1713,6 +1771,14 @@ const APP_HTML = String.raw`<!doctype html>
     .ag-t{flex:0 0 140px;color:var(--brand);font-weight:650;font-family:ui-monospace,Menlo,monospace;font-size:13px}
     .ag-x{color:#3c4250}
     @media(max-width:560px){.ag-item{flex-direction:column;gap:2px}.ag-t{flex:none}}
+    .teamgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+    .tcard{position:relative;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:#fff;box-shadow:var(--shadow)}
+    .tcard .tname{font-weight:800;font-size:16px;margin-bottom:8px}
+    .tcard .trow{font-size:14px;color:#3c4250;margin:3px 0}
+    .tcard .tk{display:inline-block;min-width:30px;margin-right:8px;padding:1px 8px;border-radius:20px;background:#eef6f1;color:var(--brand);font-size:12px;font-weight:700}
+    .tcard .tidea{font-size:14px;color:#3c4250;margin:8px 0;white-space:pre-wrap}
+    .tcard .tcontact{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);font-size:13px;color:var(--brand);font-weight:650;word-break:break-all}
+    .tcard .tmdel{position:absolute;top:8px;right:10px;width:22px;height:22px;border-radius:50%;background:rgba(192,57,43,.9);color:#fff;text-align:center;line-height:22px;cursor:pointer;font-size:15px}
     .masonry{columns:3 240px;column-gap:14px}
     .mphoto{position:relative;break-inside:avoid;margin-bottom:14px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#fff;box-shadow:var(--shadow)}
     .mphoto img{width:100%;display:block;cursor:pointer}
@@ -1780,6 +1846,7 @@ const APP_HTML = String.raw`<!doctype html>
     }
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
           + '<button class="ghost" onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
+          + '<button class="ghost" onclick="go(\'/teams\')">'+t('组队','Teams')+'</button>'
           + '<button class="ghost" onclick="go(\'/photos\')">'+t('照片墙','Photos')+'</button>'
           + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
           + '<button class="ghost" onclick="go(\'/share\')">'+t('分享','Share')+'</button>'
@@ -1823,6 +1890,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/poster') return renderPoster();
     if(p === '/register') return renderRegister();
     if(p === '/share') return renderShare();
+    if(p === '/teams') return renderTeams();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
     app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
@@ -2330,6 +2398,52 @@ const APP_HTML = String.raw`<!doctype html>
         $('#regForm').innerHTML='<div class="notice ok">'+(r.already?t('你已经报名过了 ✓','You are already registered ✓'):t('报名成功!到时见 🎉','Registered! See you there 🎉'))+'</div>';
       }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; }
     });
+  }
+
+  // ---------------- team formation board ----------------
+  function teamCard(p){
+    const rows=[];
+    if(p.skills) rows.push('<div class="trow"><span class="tk">'+t('会','Can')+'</span>'+esc(p.skills)+'</div>');
+    if(p.looking_for) rows.push('<div class="trow"><span class="tk">'+t('找','Wants')+'</span>'+esc(p.looking_for)+'</div>');
+    if(p.idea) rows.push('<div class="tidea">'+esc(p.idea)+'</div>');
+    return '<div class="tcard">'
+      +(ME.role==='admin'?'<span class="tmdel" data-id="'+esc(p.id)+'" title="'+t('删除','Delete')+'">×</span>':'')
+      +'<div class="tname">'+esc(p.name)+'</div>'
+      +rows.join('')
+      +'<div class="tcontact">📇 '+esc(p.contact)+'</div></div>';
+  }
+  async function loadTeams(){
+    const board=$('#tmBoard'); if(!board) return;
+    try{ const d=await api('/api/tenant/teams'); const posts=d.posts||[];
+      if(!posts.length){ board.innerHTML='<p class="muted">'+t('还没有人发布,来当第一个 👋','No posts yet — be the first 👋')+'</p>'; return; }
+      board.innerHTML='<div class="teamgrid">'+posts.map(teamCard).join('')+'</div>';
+      if(ME.role==='admin') board.querySelectorAll('.tmdel').forEach(x=>x.addEventListener('click',async()=>{
+        if(!confirm(t('删除这张卡片?','Delete this card?'))) return;
+        try{ await api('/api/tenant/teams/'+x.dataset.id,{method:'DELETE'}); loadTeams(); }catch(e){ alert(e.message); }
+      }));
+    }catch(e){ board.innerHTML='<p class="muted">'+t('加载失败','Failed to load')+'</p>'; }
+  }
+  function renderTeams(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    app.innerHTML='<h1>'+t('组队 · 找队友','Find teammates')+'</h1>'
+      +'<p class="muted">'+t('发一张卡片:你会什么、想做什么、想找什么样的队友。联系方式会公开显示,方便别人直接找你。','Post a card: what you can do, what you want to build, who you are looking for. Your contact is shown publicly so others can reach you.')+'</p>'
+      +'<div class="panel" style="max-width:560px;margin-bottom:20px"><div id="tmForm">'
+      +'<label>'+t('昵称','Name')+' *</label><input id="tmName" maxlength="40">'
+      +'<label>'+t('联系方式','Contact')+' * (TG / '+t('微信','WeChat')+' / '+t('邮箱','Email')+')</label><input id="tmContact" maxlength="80" placeholder="TG @you / '+t('微信','WeChat')+' your-id">'
+      +'<label>'+t('我会什么 / 角色','Skills / role')+'</label><input id="tmSkills" maxlength="120" placeholder="'+t('前端 / 设计 / 合约 …','frontend / design / contracts …')+'">'
+      +'<label>'+t('想找什么队友','Looking for')+'</label><input id="tmLooking" maxlength="120">'
+      +'<label>'+t('想做的方向(可选)','Idea (optional)')+'</label><textarea id="tmIdea" maxlength="300"></textarea>'
+      +'<div class="row" style="margin-top:12px"><button id="tmBtn">'+t('发布','Post')+'</button></div><div id="tmMsg"></div>'
+      +'</div></div><div id="tmBoard" class="muted">'+t('加载中…','Loading…')+'</div>';
+    $('#tmBtn').addEventListener('click',async()=>{
+      const name=$('#tmName').value.trim(), contact=$('#tmContact').value.trim();
+      if(!name||!contact){ setMsg('tmMsg',t('请填写昵称和联系方式','Name and contact required'),true); return; }
+      $('#tmBtn').disabled=true;
+      try{ await api('/api/tenant/teams',{method:'POST',body:{name,contact,skills:$('#tmSkills').value.trim(),lookingFor:$('#tmLooking').value.trim(),idea:$('#tmIdea').value.trim()}});
+        $('#tmForm').innerHTML='<div class="notice ok">'+t('已发布,祝你早日找到队友 🎉','Posted — good luck! 🎉')+'</div>'; loadTeams();
+      }catch(e){ setMsg('tmMsg',e.message,true); $('#tmBtn').disabled=false; }
+    });
+    loadTeams();
   }
 
   function card(s){
