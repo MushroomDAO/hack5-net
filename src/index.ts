@@ -150,9 +150,12 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   let sub: string | null = null;
   const m = host.match(/^([a-z0-9-]+)\.hack5\.net$/);
   if (m) sub = m[1];
-  // dev / preview hosts have no real subdomain: allow ?tenant= override, default to demo.
+  // dev / preview hosts have no real subdomain. Default to the PLATFORM landing so the
+  // preview shows the headline (create-a-hackathon); ?tenant=<sub> reaches a tenant for testing.
   else if (host.endsWith(".workers.dev") || host === "localhost" || host === "127.0.0.1") {
-    sub = new URL(request.url).searchParams.get("tenant") || "demo";
+    const q = new URL(request.url).searchParams.get("tenant");
+    if (!q) return { platform: true, tenant: null };
+    sub = q;
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
