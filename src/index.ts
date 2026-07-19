@@ -1024,6 +1024,7 @@ const APP_HTML = String.raw`<!doctype html>
     .guide-cta h2{color:#fff;margin:0 0 14px}
     .guide-cta button{background:#fff;color:var(--brand)}
     @media(max-width:720px){.guide-row{grid-template-columns:1fr}.guide-row.rev .guide-art{order:0}}
+    .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
   </style>
 </head>
 <body>
@@ -1039,6 +1040,7 @@ const APP_HTML = String.raw`<!doctype html>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>
+  <footer class="site-footer">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.</footer>
   <div id="lightbox" class="lightbox hidden" onclick="this.classList.add('hidden')"></div>
 
   <script>
