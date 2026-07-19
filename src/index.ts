@@ -1992,6 +1992,14 @@ const APP_HTML = String.raw`<!doctype html>
     .guide-cta button{background:#fff;color:var(--brand)}
     @media(max-width:720px){.guide-row{grid-template-columns:1fr}.guide-row.rev .guide-art{order:0}}
     .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
+    .sponsor-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:14px;margin-bottom:12px;font-size:13px}
+    .sponsor-bar .muted{text-transform:uppercase;letter-spacing:.1em;font-size:11px;font-weight:700}
+    .sponsor-item{display:inline-flex;align-items:center;color:var(--ink);font-weight:650}
+    .sponsor-item img{height:26px;max-width:120px;object-fit:contain;vertical-align:middle}
+    .media-table{width:100%;border-collapse:collapse;font-size:14px;min-width:520px}
+    .media-table th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:0 14px 10px 0;border-bottom:1px solid var(--line)}
+    .media-table td{padding:14px 14px 14px 0;border-bottom:1px solid var(--line);vertical-align:top}
+    .media-table tr:last-child td{border-bottom:0}
     .org-foot{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:12px;font-size:14px;color:var(--ink2);font-weight:600}
     .org-foot-logo{width:28px;height:28px;object-fit:contain;border-radius:6px}
     .orglogo-prev{width:64px;height:64px;border:1px solid var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:repeating-conic-gradient(#f0f2f1 0% 25%,#fff 0% 50%) 50%/16px 16px}
@@ -2050,13 +2058,22 @@ const APP_HTML = String.raw`<!doctype html>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>
-  <footer class="site-footer"><div id="orgFooter"></div>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.</footer>
+  <footer class="site-footer"><div id="sponsorBar"></div><div id="orgFooter"></div>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.</footer>
   <div id="lightbox" class="lightbox hidden" onclick="this.classList.add('hidden')"></div>
 
   <script>
   const app = document.getElementById('app');
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
+  // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
+  const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
+  // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
+  const MEDIA = [
+    { platform: '微信公众号 / WeChat', handle: '', followers: '', topic: '开源 · 黑客松 · 数字公共物品', link: '' },
+    { platform: '小红书 / RED', handle: '', followers: '', topic: '开发者成长 · AI 工具 · 活动', link: '' },
+    { platform: '微信群 / WeChat groups', handle: '', followers: '', topic: '开发者社群 · 活动通知', link: '' },
+    { platform: 'Telegram 群', handle: '', followers: '', topic: 'Builders · hackathons · DPG', link: '' },
+  ];
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
   let LANG = lsGet('hv_lang') === 'en' ? 'en' : 'zh';
@@ -2086,8 +2103,16 @@ const APP_HTML = String.raw`<!doctype html>
     if(CONFIG.platform) ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
     else ME = await api('/api/auth/me').catch(()=>({role:null}));
     renderOrgFooter();
+    renderSponsorFooter();
     renderNav();
     route();
+  }
+  function renderSponsorFooter(){
+    const el = document.getElementById('sponsorBar'); if(!el) return;
+    if(!SPONSORS.length){ el.innerHTML=''; return; }
+    el.innerHTML = '<div class="sponsor-bar"><span class="muted">'+t('赞助商','Sponsors')+'</span>'
+      + SPONSORS.map(s=>{ const inner = s.logo?'<img src="'+esc(s.logo)+'" alt="'+esc(s.name)+'">':esc(s.name); return s.url?'<a href="'+esc(s.url)+'" target="_blank" rel="noopener" class="sponsor-item">'+inner+'</a >':'<span class="sponsor-item">'+inner+'</span>'; }).join('')
+      + '</div>';
   }
   function renderOrgFooter(){
     const el = document.getElementById('orgFooter'); if(!el) return;
@@ -2103,6 +2128,7 @@ const APP_HTML = String.raw`<!doctype html>
     const n = document.getElementById('nav');
     if(CONFIG.platform){
       let hp = '<button class="ghost" onclick="go(\'/guide\')">'+t('指南','Guide')+'</button>'
+             + '<button class="ghost" onclick="go(\'/media\')">'+t('媒体','Media')+'</button>'
              + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
       if(ME_USER.email){
         hp += '<button onclick="go(\'/dashboard\')">'+t('我的黑客松','My hackathons')+'</button>'
@@ -2144,6 +2170,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(CONFIG.platform){
       if(p === '/about') return renderAbout();
       if(p === '/guide') return renderGuide();
+      if(p === '/media') return renderMedia();
       if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
       if(p === '/settings') return ME_USER.email ? renderSettings() : renderPlatformLogin();
       return renderPlatformLanding();
@@ -2257,6 +2284,19 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   // ---------------- about ----------------
+  function renderMedia(){
+    const rows = MEDIA.map(m=>'<tr><td><b>'+esc(m.platform)+'</b>'+(m.handle?'<div class="muted" style="font-size:12px">'+esc(m.handle)+'</div>':'')+'</td>'
+      +'<td>'+(m.followers?esc(m.followers):'<span class="muted">'+t('更新中','TBA')+'</span>')+'</td>'
+      +'<td class="muted">'+esc(m.topic)+'</td>'
+      +'<td>'+(m.link?'<a href="'+esc(m.link)+'" target="_blank" rel="noopener">'+t('打开','open')+' ↗</a >':'<span class="muted">—</span>')+'</td></tr>').join('');
+    app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('媒体矩阵','Media matrix')+'</h1>'
+      +'<p class="guide-sub">'+t('hack5 · Mycelium 触达开源开发者社区的自有渠道','How hack5 · Mycelium reaches the open-source developer community')+'</p></div>'
+      +'<div class="panel" style="overflow-x:auto"><table class="media-table"><thead><tr><th>'+t('渠道','Channel')+'</th><th>'+t('触达','Reach')+'</th><th>'+t('主要话题','Topics')+'</th><th>'+t('链接','Link')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
+      +'<p class="muted" style="margin:12px 2px 0;font-size:12px">'+t('每个参加过黑客松的开发者都留下 email —— 这是我们随每场活动持续增长的社区基础。','Every hackathon participant leaves an email — a community base that grows with each event.')+'</p></div>'
+      +'<div class="panel guide-cta" style="margin-top:20px"><h2>'+t('成为赞助商','Become a sponsor')+'</h2>'
+      +'<p style="color:rgba(255,255,255,.88)">'+t('$1500 / 年 · 限 4 席。你的 logo 出现在所有 hack5 组织的黑客松页脚,并通过上面的渠道与订阅用户一起转发,触达开源开发者社区。所得用于覆盖平台成本、反哺更多数字公共物品。','$1500 / year · 4 seats. Your logo in the footer of every hack5 hackathon, amplified across the channels above.')+'</p>'
+      +'<a href="https://blog.mushroom.cv/" target="_blank" rel="noopener"><button>'+t('了解 Mycelium →','About Mycelium →')+'</button></a></div></div>';
+  }
   function renderAbout(){
     const feats = [
       ['⚡', t('10 分钟发起','Live in 10 minutes'), t('三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。','Three steps: log in → name it → deploy your own hackathon site on its own domain.')],
