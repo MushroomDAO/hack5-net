@@ -15,6 +15,9 @@ interface Env {
   JUDGE_PASSCODE: string;
   ADMIN_PASSCODE: string;
   GITHUB_TOKEN?: string;
+  RESEND_API_KEY?: string;
+  MAIL_FROM?: string;
+  DEV_MODE?: string;
   // R2 (only used when VIDEO_UPLOAD=on):
   R2_ACCOUNT_ID?: string;
   R2_BUCKET_NAME?: string;
@@ -26,6 +29,8 @@ interface Env {
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
 
 const AUTH_COOKIE = "hv_auth";
+const USER_COOKIE = "hv_user";
+const RESERVED_SUBDOMAINS = new Set(["www", "api", "app", "admin", "demo", "mail", "static", "assets", "cdn", "hack5", "mycelium"]);
 const DIMS = ["innovation", "technical", "completeness", "presentation"] as const;
 type Dim = (typeof DIMS)[number];
 const DEFAULT_MIN_SHOTS = 2;
@@ -50,6 +55,13 @@ export default {
       if (path === "/api/auth/login" && method === "POST") return login(request, env, tenant);
       if (path === "/api/auth/logout" && method === "POST") return logout(request);
       if (path === "/api/auth/me" && method === "GET") return me(request, env, tid);
+
+      // ---- platform user (email login) + hackathon creation (not tenant-scoped) ----
+      if (path === "/api/platform/me" && method === "GET") return platformMe(request, env);
+      if (path === "/api/platform/login/request" && method === "POST") return platformLoginRequest(request, env);
+      if (path === "/api/platform/login/verify" && method === "POST") return platformLoginVerify(request, env);
+      if (path === "/api/platform/logout" && method === "POST") return platformLogout(request);
+      if (path === "/api/platform/hackathons" && method === "POST") return createHackathon(request, env);
 
       // ---- submissions (tenant-scoped) ----
       if (path === "/api/submissions" && method === "GET") return listSubmissions(env, tid);
@@ -247,6 +259,173 @@ async function requireRole(request: Request, env: Env, tid: string | null, need:
   if (!auth) return null;
   if (need === "admin") return auth.role === "admin" ? auth : null;
   return auth; // judge or admin
+}
+
+// ============================ platform users (email login) ============================
+
+type UserAuth = { email: string; exp: number };
+
+async function signUser(env: Env, payload: UserAuth): Promise<string> {
+  const body = b64urlEncode(JSON.stringify(payload));
+  const sig = await hmacHex(utf8(env.AUTH_SECRET), body);
+  return `${body}.${sig}`;
+}
+
+async function getUser(request: Request, env: Env): Promise<UserAuth | null> {
+  const raw = parseCookies(request.headers.get("cookie"))[USER_COOKIE];
+  if (!raw) return null;
+  const dot = raw.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const body = raw.slice(0, dot);
+  const expected = await hmacHex(utf8(env.AUTH_SECRET), body);
+  if (!timingSafeEqual(raw.slice(dot + 1), expected)) return null;
+  try {
+    const payload = JSON.parse(b64urlDecode(body)) as UserAuth;
+    if (!payload?.email || typeof payload.exp !== "number" || payload.exp < unixNow()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function platformMe(request: Request, env: Env): Promise<Response> {
+  const user = await getUser(request, env);
+  if (!user) return json({ email: null });
+  const row = await env.DB.prepare("SELECT quota, plan FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string }>();
+  const quota = row?.quota ?? 1;
+  const list = await env.DB.prepare(
+    "SELECT subdomain, name, created_at FROM tenants WHERE owner_email = ? AND status = 'active' ORDER BY created_at ASC",
+  )
+    .bind(user.email)
+    .all<{ subdomain: string; name: string; created_at: number }>();
+  return json({
+    email: user.email,
+    quota,
+    plan: row?.plan ?? "free",
+    used: list.results.length,
+    hackathons: list.results.map((h) => ({ subdomain: h.subdomain, name: h.name, url: `https://${h.subdomain}.hack5.net` })),
+  });
+}
+
+async function platformLoginRequest(request: Request, env: Env): Promise<Response> {
+  const body = await request.json<{ email?: string }>().catch(() => null);
+  const email = normalizeEmail(body?.email);
+  if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
+  const now = unixNow();
+  const recent = await env.DB.prepare("SELECT COUNT(*) AS c FROM email_codes WHERE email = ? AND created_at > ?")
+    .bind(email, now - 15 * 60)
+    .first<{ c: number }>();
+  if ((recent?.c ?? 0) >= 5) return json({ error: "请求过于频繁,请稍后再试 / Too many requests" }, 429);
+  const code = generateCode();
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  await env.DB.prepare(
+    "INSERT INTO email_codes (id, email, code_hash, request_ip, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+  )
+    .bind(crypto.randomUUID(), email, await hashSecret(env, `${email}:${code}`), ip, now, now + 10 * 60)
+    .run();
+  const sent = await sendEmailCode(env, email, code);
+  const res: Record<string, unknown> = { ok: true };
+  if (!sent) res.debugCode = code; // no email provider configured (dev/test): surface the code
+  return json(res);
+}
+
+async function platformLoginVerify(request: Request, env: Env): Promise<Response> {
+  const body = await request.json<{ email?: string; code?: string }>().catch(() => null);
+  const email = normalizeEmail(body?.email);
+  const code = String(body?.code ?? "").replace(/\D/g, "");
+  if (!email || code.length !== 6) return json({ error: "邮箱或验证码无效 / Invalid email or code" }, 400);
+  const now = unixNow();
+  const rows = await env.DB.prepare(
+    "SELECT id, code_hash FROM email_codes WHERE email = ? AND used_at IS NULL AND expires_at >= ? ORDER BY created_at DESC LIMIT 5",
+  )
+    .bind(email, now)
+    .all<{ id: string; code_hash: string }>();
+  const expected = await hashSecret(env, `${email}:${code}`);
+  const match = rows.results.find((r) => timingSafeEqual(r.code_hash, expected));
+  if (!match) return json({ error: "验证码错误或已过期 / Invalid or expired code" }, 401);
+  await env.DB.prepare("UPDATE email_codes SET used_at = ? WHERE id = ?").bind(now, match.id).run();
+  await env.DB.prepare("INSERT OR IGNORE INTO users (email, quota, plan, created_at) VALUES (?, 1, 'free', ?)")
+    .bind(email, now)
+    .run();
+  const token = await signUser(env, { email, exp: now + 30 * 24 * 60 * 60 });
+  return json({ ok: true, email }, 200, { "Set-Cookie": userCookie(request, token, 30 * 24 * 60 * 60) });
+}
+
+function platformLogout(request: Request): Response {
+  return json({ ok: true }, 200, { "Set-Cookie": userCookie(request, "", 0) });
+}
+
+function userCookie(request: Request, token: string, maxAge: number): string {
+  const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
+  return `${USER_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+async function createHackathon(request: Request, env: Env): Promise<Response> {
+  const user = await getUser(request, env);
+  if (!user) return json({ error: "请先登录 / Please log in" }, 401);
+  const body = await request.json<{ name?: string; subdomain?: string }>().catch(() => null);
+  const name = String(body?.name ?? "").trim().slice(0, 60);
+  const subdomain = String(body?.subdomain ?? "").trim().toLowerCase();
+  if (!name) return json({ error: "请填写黑客松名称 / Name required" }, 400);
+  if (!/^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(subdomain)) {
+    return json({ error: "子域名需 3-30 位小写字母/数字/连字符 / Invalid subdomain" }, 400);
+  }
+  if (RESERVED_SUBDOMAINS.has(subdomain)) return json({ error: "该子域名被保留 / Reserved subdomain" }, 400);
+
+  const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(subdomain).first();
+  if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
+
+  const urow = await env.DB.prepare("SELECT quota FROM users WHERE email = ?").bind(user.email).first<{ quota: number }>();
+  const quota = urow?.quota ?? 1;
+  const used = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active'")
+    .bind(user.email)
+    .first<{ c: number }>();
+  if ((used?.c ?? 0) >= quota) {
+    return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached — upgrade for 100`, upgrade: true }, 402);
+  }
+
+  const adminPass = `hack5-${randomCodeBody(8).toLowerCase()}`;
+  const now = unixNow();
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+  )
+    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, now, now)
+    .run();
+  return json({
+    ok: true,
+    subdomain,
+    name,
+    url: `https://${subdomain}.hack5.net`,
+    adminPassword: adminPass,
+  });
+}
+
+async function sendEmailCode(env: Env, email: string, code: string): Promise<boolean> {
+  const text = `你的 hack5 登录验证码是 ${code},10 分钟内有效。\n\nYour hack5 login code is ${code}. It expires in 10 minutes.`;
+  if (env.RESEND_API_KEY) {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: "hack5 登录验证码 / login code", text }),
+    });
+    if (!res.ok) throw new Error(`email send failed: ${res.status}`);
+    return true;
+  }
+  if (env.DEV_MODE === "true") console.log(`hack5 login code for ${email}: ${code}`);
+  return false; // no provider -> caller returns debugCode
+}
+
+function normalizeEmail(input: unknown): string | null {
+  const email = String(input ?? "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return null;
+  return email;
+}
+
+function generateCode(): string {
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  return String(new DataView(bytes.buffer).getUint32(0) % 1_000_000).padStart(6, "0");
 }
 
 // ============================ submissions ============================
@@ -1126,7 +1305,7 @@ const APP_HTML = String.raw`<!doctype html>
   <script>
   const app = document.getElementById('app');
   const $ = (s, r=document) => r.querySelector(s);
-  let CONFIG = null, ME = { role: null };
+  let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
   let LANG = lsGet('hv_lang') === 'en' ? 'en' : 'zh';
@@ -1144,7 +1323,8 @@ const APP_HTML = String.raw`<!doctype html>
     document.getElementById('brandName').textContent = brand;
     document.title = brand;
     document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
-    ME = await api('/api/auth/me').catch(()=>({role:null}));
+    if(CONFIG.platform) ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
+    else ME = await api('/api/auth/me').catch(()=>({role:null}));
     renderNav();
     route();
   }
@@ -1152,9 +1332,15 @@ const APP_HTML = String.raw`<!doctype html>
   function renderNav(){
     const n = document.getElementById('nav');
     if(CONFIG.platform){
-      let hp = '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>'
-             + '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>'
-             + '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
+      let hp = '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
+      if(ME_USER.email){
+        hp += '<button onclick="go(\'/dashboard\')">'+t('我的黑客松','My hackathons')+'</button>'
+            + '<span class="who">'+esc(ME_USER.email)+'</span>'
+            + '<button class="ghost" onclick="userLogout()">'+t('退出','Logout')+'</button>';
+      } else {
+        hp += '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>';
+      }
+      hp += '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
       n.innerHTML = hp; return;
     }
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
@@ -1181,8 +1367,8 @@ const APP_HTML = String.raw`<!doctype html>
     let m;
     if(CONFIG.tenantNotFound) return renderTenantNotFound();
     if(CONFIG.platform){
-      if(p === '/start') return renderStart();
       if(p === '/about') return renderAbout();
+      if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
       return renderPlatformLanding();
     }
     if(p === '/' || p === '') return renderWall();
@@ -1309,6 +1495,67 @@ const APP_HTML = String.raw`<!doctype html>
       + '<h1>'+t('黑客松不存在','Hackathon not found')+'</h1>'
       + '<p class="guide-sub">'+t('这个地址还没有对应的黑客松。','No hackathon lives at this address yet.')+'</p>'
       + '<div class="row" style="justify-content:center;margin-top:20px"><a href="https://hack5.net"><button>'+t('去 hack5.net 发起一个 →','Start one at hack5.net →')+'</button></a ></div></div></div>';
+  }
+
+  // ---------------- platform: email login + dashboard ----------------
+  async function userLogout(){ await api('/api/platform/logout',{method:'POST',body:{}}).catch(()=>{}); ME_USER={email:null}; renderNav(); go('/'); }
+  window.userLogout = userLogout;
+
+  function renderPlatformLogin(){
+    app.innerHTML = '<div class="guide"><div class="guide-hero" style="padding:30px 0 8px"><h1>'+t('发起你的黑客松','Start your hackathon')+'</h1>'
+      + '<p class="guide-sub">'+t('输入邮箱,用验证码登录 —— 无需注册','Enter your email and log in with a code — no signup')+'</p></div>'
+      + '<div class="panel" style="max-width:420px;margin:0 auto">'
+      + '<label>'+t('邮箱','Email')+'</label><input id="plEmail" type="email" autocomplete="email" placeholder="you@example.com">'
+      + '<div id="plCodeArea" class="hidden"><label>'+t('验证码','Code')+'</label><input id="plCode" inputmode="numeric" maxlength="6" placeholder="'+t('6 位验证码','6-digit code')+'"></div>'
+      + '<div class="row" style="margin-top:14px"><button id="plSend">'+t('发送验证码','Send code')+'</button><button id="plVerify" class="hidden">'+t('登录','Log in')+'</button></div>'
+      + '<div id="plMsg"></div></div></div>';
+    $('#plSend').addEventListener('click', async ()=>{
+      const email = $('#plEmail').value.trim();
+      setMsg('plMsg', t('发送中…','Sending…'));
+      try {
+        const r = await api('/api/platform/login/request',{method:'POST',body:{email}});
+        $('#plCodeArea').classList.remove('hidden'); $('#plVerify').classList.remove('hidden');
+        setMsg('plMsg', t('验证码已发送,请查收邮箱。','Code sent — check your email.')+(r.debugCode?(' [dev: '+r.debugCode+']'):''));
+      } catch(e){ setMsg('plMsg', e.message, true); }
+    });
+    $('#plVerify').addEventListener('click', async ()=>{
+      try {
+        await api('/api/platform/login/verify',{method:'POST',body:{email:$('#plEmail').value.trim(), code:$('#plCode').value.trim()}});
+        ME_USER = await api('/api/platform/me');
+        renderNav(); go('/dashboard');
+      } catch(e){ setMsg('plMsg', e.message, true); }
+    });
+  }
+
+  async function renderDashboard(){
+    if(!ME_USER.email){ go('/start'); return; }
+    ME_USER = await api('/api/platform/me').catch(()=>ME_USER);
+    const hs = ME_USER.hackathons || [];
+    const canCreate = (ME_USER.used||0) < (ME_USER.quota||1);
+    app.innerHTML = '<div class="guide"><h1>'+t('我的黑客松','My hackathons')+'</h1>'
+      + '<p class="muted">'+t('已用','Used')+' '+(ME_USER.used||0)+' / '+(ME_USER.quota||1)+'</p>'
+      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
+      + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
+      + (canCreate
+          ? '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
+            + '<label>'+t('子域名','Subdomain')+' <span class="muted">.hack5.net</span></label><input id="hSub" maxlength="30" placeholder="shanghai2026">'
+            + '<div class="row" style="margin-top:14px"><button id="hCreate">'+t('创建并部署','Create & deploy')+'</button></div><div id="hMsg"></div>'
+          : '<div class="notice">'+t('已达免费额度。充值 ¥99 可举办 100 场。','Free quota reached. Upgrade (¥99) for 100 hackathons.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('充值 ¥99','Upgrade ¥99')+'</button></div>')
+      + '</div></div>';
+    if(canCreate){
+      $('#hCreate').addEventListener('click', async ()=>{
+        const name=$('#hName').value.trim(), subdomain=$('#hSub').value.trim().toLowerCase();
+        if(!name || !subdomain){ setMsg('hMsg', t('请填写名称和子域名','Fill in name and subdomain'), true); return; }
+        $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
+        try {
+          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain}});
+          setMsg('hMsg', t('创建成功!','Created! ')+'<br>'+t('站点','Site')+': <a href="'+r.url+'" target="_blank" rel="noopener">'+r.url+'</a ><br>'+t('管理员密码(请立即保存)','Admin password (save it now)')+': <code>'+esc(r.adminPassword)+'</code>', false, true);
+          ME_USER = await api('/api/platform/me'); renderNav();
+        } catch(e){ setMsg('hMsg', e.message, true); $('#hCreate').disabled=false; }
+      });
+    } else {
+      $('#hUpgrade').addEventListener('click', ()=>alert(t('支付功能即将上线,先联系主办方开通。','Payment coming soon — contact us to upgrade.')));
+    }
   }
 
   function card(s){
