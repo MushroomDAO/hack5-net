@@ -60,6 +60,10 @@ export default {
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
       if (shotMatch && method === "GET") return serveShot(env, shotMatch[1], Number(shotMatch[2]));
 
+      // ---- static illustration assets (served from KV) ----
+      const assetMatch = path.match(/^\/asset\/([a-z0-9-]+)$/);
+      if (assetMatch && method === "GET") return serveAsset(env, assetMatch[1]);
+
       // ---- GitHub proxy ----
       const readmeMatch = path.match(/^\/api\/gh\/([^/]+)\/([^/]+)\/readme$/);
       if (readmeMatch && method === "GET") return ghReadme(env, readmeMatch[1], readmeMatch[2]);
@@ -366,6 +370,19 @@ async function serveShot(env: Env, id: string, idx: number): Promise<Response> {
       "Content-Type": metadata?.contentType || "image/jpeg",
       "Cache-Control": "public, max-age=300",
       "X-Robots-Tag": "noindex",
+    },
+  });
+}
+
+async function serveAsset(env: Env, name: string): Promise<Response> {
+  const { value, metadata } = await env.SHOTS.getWithMetadata<{ contentType?: string }>(`asset:${name}`, {
+    type: "arrayBuffer",
+  });
+  if (!value) return json({ error: "Not found" }, 404);
+  return new Response(value, {
+    headers: {
+      "Content-Type": metadata?.contentType || "image/jpeg",
+      "Cache-Control": "public, max-age=86400",
     },
   });
 }
@@ -987,6 +1004,26 @@ const APP_HTML = String.raw`<!doctype html>
     .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
     .hidden{display:none!important}
     @media(max-width:820px){.detail-grid{grid-template-columns:1fr}}
+    .guide-banner{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:16px 0 22px;padding:14px 20px;background:linear-gradient(135deg,#efeafd,#eaf0ff);border:1px solid #ddd6f7;border-radius:12px;cursor:pointer;font-weight:650;color:var(--brand-dark)}
+    .guide-banner:hover{background:linear-gradient(135deg,#e7e0fb,#e0ebff)}
+    .guide-banner b{font-size:20px}
+    .guide{max-width:900px;margin:0 auto}
+    .guide-hero{text-align:center;padding:16px 0 6px}
+    .guide-sub{color:var(--muted);font-size:18px;margin-top:-4px}
+    .guide-row{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:center;margin:28px 0;padding:24px;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+    .guide-row .guide-art{background:linear-gradient(135deg,#f3f1fe,#eaf0ff);border-radius:12px;padding:16px}
+    .guide-row.rev .guide-art{order:2}
+    .guide-row h2{font-size:23px;margin:0 0 10px}
+    .guide-row p{font-size:15px;line-height:1.75;color:#3c4250;margin:0}
+    .guide-steps{display:grid;gap:14px;margin:22px 0}
+    .step{display:flex;gap:16px;align-items:flex-start;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+    .step .num{flex:0 0 auto;width:40px;height:40px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;font-weight:800;font-size:18px}
+    .step h3{margin:0 0 5px;font-size:17px}
+    .step p{margin:0;color:#3c4250;line-height:1.6;font-size:14px}
+    .guide-cta{text-align:center;margin:34px 0;padding:32px;background:linear-gradient(135deg,var(--brand),#7a6bf0);border-radius:16px;color:#fff}
+    .guide-cta h2{color:#fff;margin:0 0 14px}
+    .guide-cta button{background:#fff;color:var(--brand)}
+    @media(max-width:720px){.guide-row{grid-template-columns:1fr}.guide-row.rev .guide-art{order:0}}
   </style>
 </head>
 <body>
@@ -1025,6 +1062,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderNav(){
     const n = document.getElementById('nav');
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
+          + '<button class="ghost" onclick="go(\'/guide\')">'+t('如何成为创新者','Become a builder')+'</button>'
           + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
@@ -1047,6 +1085,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/' || p === '') return renderWall();
     if(p === '/submit') return renderSubmit();
     if(p === '/judge') return renderJudge();
+    if(p === '/guide') return renderGuide();
     if(p === '/leaderboard') return renderLeaderboard();
     if(p === '/invites') return renderInvites();
     if(p === '/judges') return renderJudges();
@@ -1057,7 +1096,9 @@ const APP_HTML = String.raw`<!doctype html>
 
   // ---------------- work wall ----------------
   async function renderWall(){
-    app.innerHTML = '<h1>'+esc(CONFIG.eventName)+' '+t('作品墙','Gallery')+'</h1><p>'+t('点开作品看演示视频、README 和代码。','Open a project to watch its demo, view its README and code.')+'</p><div id="wall" class="gallery"></div>';
+    app.innerHTML = '<h1>'+esc(CONFIG.eventName)+' '+t('作品墙','Gallery')+'</h1><p>'+t('点开作品看演示视频、README 和代码。','Open a project to watch its demo, view its README and code.')+'</p>'
+      + '<div class="guide-banner" onclick="go(\'/guide\')"><span>🚀 '+t('第一次参加黑客松?读《如何在 AI 时代成为创新者》','First hackathon? Read “How to become a builder in the AI era”')+'</span><b>→</b></div>'
+      + '<div id="wall" class="gallery"></div>';
     const wall = $('#wall');
     wall.innerHTML = '<p>'+t('加载中…','Loading…')+'</p>';
     try {
@@ -1066,6 +1107,46 @@ const APP_HTML = String.raw`<!doctype html>
       wall.innerHTML = '';
       submissions.forEach(s => wall.appendChild(card(s)));
     } catch(e){ wall.innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+  }
+
+  // ---------------- guide: how to become a builder ----------------
+  function renderGuide(){
+    const artEra = '<svg viewBox="0 0 440 210" width="100%" xmlns="http://www.w3.org/2000/svg">'
+      + '<circle cx="66" cy="86" r="34" fill="#eceafd" stroke="#5b4be6" stroke-width="3"/>'
+      + '<path d="M54 100h24M56 108h20" stroke="#5b4be6" stroke-width="3" stroke-linecap="round"/>'
+      + '<path d="M66 48V34M40 62l-9-8M92 62l9-8" stroke="#b8adf5" stroke-width="3" stroke-linecap="round"/>'
+      + '<path d="M118 92h175" stroke="#c7cede" stroke-width="3" stroke-dasharray="6 9" stroke-linecap="round"/>'
+      + '<path d="M289 84l12 8-12 8" fill="none" stroke="#c7cede" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<g transform="translate(330,44)"><path d="M40 0c24 16 24 60 0 92C16 60 16 16 40 0Z" fill="#5b4be6"/>'
+      + '<circle cx="40" cy="34" r="11" fill="#fff"/><path d="M22 70 8 92l22-8ZM58 70l14 22-22-8Z" fill="#b8adf5"/>'
+      + '<path d="M34 92h12l-2 18h-8z" fill="#ff8a3d"/></g></svg>';
+    const artTeam = '<svg viewBox="0 0 440 210" width="100%" xmlns="http://www.w3.org/2000/svg">'
+      + '<path d="M220 20l9 20 22 2-17 15 6 22-20-12-20 12 6-22-17-15 22-2z" fill="#ffce54" stroke="#f6b73c" stroke-width="2"/>'
+      + '<g><circle cx="140" cy="118" r="22" fill="#b8adf5"/><path d="M108 178a32 30 0 0 1 64 0z" fill="#b8adf5"/>'
+      + '<circle cx="300" cy="118" r="22" fill="#8f7ff0"/><path d="M268 178a32 30 0 0 1 64 0z" fill="#8f7ff0"/>'
+      + '<circle cx="220" cy="102" r="27" fill="#5b4be6"/><path d="M180 172a40 36 0 0 1 80 0z" fill="#5b4be6"/></g></svg>';
+    const steps = [
+      ['1','🐙', t('注册 GitHub,建一个仓库','Sign up for GitHub, create a repo'), t('这是你作品的家:代码、README、演示,全放这里。','The home of your project — code, README and demo all live here.')],
+      ['2','🤖', t('选一个免费的 AI 开发工具','Pick a free AI coding tool'), t('让 AI 帮你写代码、调试、部署;你负责想法和判断。','Let AI write, debug and deploy; you bring the idea and the judgment.')],
+      ['3','🚀', t('说出想法,几小时做出来,push 上线','Say your idea, build it in hours, ship it'), t('别等完美,先让它跑起来 —— 这就是黑客精神。','Do not wait for perfect — get it running. That is the hacker way.')],
+    ];
+    app.innerHTML = '<div class="guide">'
+      + '<div class="guide-hero"><h1>'+t('如何成为一名黑客','How to Become a Hacker')+'</h1>'
+      + '<p class="guide-sub">'+t('—— 做 AI 时代的创新者','— an innovator in the AI era')+'</p></div>'
+      + '<div class="guide-row"><div class="guide-art">'+artEra+'</div><div><h2>'+t('时代变了','The times have changed')+'</h2><p>'
+      + t('从一个想法到一个能用的产品,过去要几个月甚至几年;现在被压缩到几天、甚至几个小时。AI 帮你写代码、调试、部署,创造的门槛前所未有地低。问题不再是「你会不会写代码」,而是「你有没有想法,敢不敢现在就动手」。',
+          'Going from an idea to a working product used to take months, even years. Now it compresses into days — even hours. AI writes the code, debugs and deploys; the barrier to creating has never been lower. The question is no longer “can you code?” but “do you have an idea, and will you start now?”')
+      + '</p></div></div>'
+      + '<div class="guide-row rev"><div class="guide-art">'+artTeam+'</div><div><h2>'+t('为什么参加黑客松','Why join a hackathon')+'</h2><p>'
+      + t('黑客松是最好的练习场:在真实的时间压力下,逼自己把想法变成能跑的东西。它更是一个圈子 —— 你会遇到志同道合的伙伴,被高手推着学新技能,拿到真实反馈,甚至认识未来的合伙人和投资人。一个周末,可能就改变你的轨迹。',
+          'A hackathon is the best training ground: under real time pressure, you force an idea into something that actually runs. It is also a community — you meet like-minded builders, get pulled forward by sharper people, receive honest feedback, and may even find future co-founders and investors. One weekend can change your trajectory.')
+      + '</p></div></div>'
+      + '<h2 style="text-align:center;margin-top:36px">'+t('三步开始','Three steps to start')+'</h2>'
+      + '<div class="guide-steps">'
+      + steps.map(s=>'<div class="step"><div class="num">'+s[0]+'</div><div><h3>'+s[1]+' '+esc(s[2])+'</h3><p>'+esc(s[3])+'</p></div></div>').join('')
+      + '</div>'
+      + '<div class="guide-cta"><h2>'+t('准备好了吗?','Ready?')+'</h2><button onclick="go(\'/submit\')">'+t('提交你的作品 →','Submit your project →')+'</button></div>'
+      + '</div>';
   }
 
   function card(s){
