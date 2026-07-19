@@ -99,6 +99,7 @@ export default {
 
       // ---- premium: AI text-to-image poster background (admin, metered) ----
       if (path === "/api/tenant/poster/ai" && method === "POST") return generateAiPoster(request, env, tenant, tid);
+      if (path === "/api/tenant/poster/quota" && method === "GET") return getPosterQuota(request, env, tid);
 
       // ---- team formation board ----
       if (path === "/api/tenant/teams" && method === "POST") return createTeamPost(request, env, tenant);
@@ -871,37 +872,68 @@ async function deleteTeamPost(request: Request, env: Env, tenant: Tenant | null,
 
 // Premium: generate an AI poster BACKGROUND from a text prompt (gpt-image-1), overlaid with crisp
 // event text on the client. Admin-only (it costs money) and metered per tenant per day.
-const AI_POSTER_DAILY_CAP = 10;
+// Free = fixed curated style (we absorb the cost, a few rolls per event); custom = organizer's own
+// prompt (the paid tier). Both capped per event for lifetime (KV counter, no expiry).
+const AI_POSTER_FREE_CAP = 3;
+const AI_POSTER_CUSTOM_CAP = 3;
+const freeCapKey = (tid: string) => `aiposter:free:${tid}`;
+const customCapKey = (tid: string) => `aiposter:custom:${tid}`;
+
+async function getPosterQuota(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth || !tid) return json({ error: "Admin only" }, 403);
+  const usedFree = Number((await env.SHOTS.get(freeCapKey(tid))) ?? "0");
+  const usedCustom = Number((await env.SHOTS.get(customCapKey(tid))) ?? "0");
+  return json({
+    aiEnabled: Boolean(env.OPENAI_API_KEY),
+    free: Math.max(0, AI_POSTER_FREE_CAP - usedFree),
+    custom: Math.max(0, AI_POSTER_CUSTOM_CAP - usedCustom),
+    freeCap: AI_POSTER_FREE_CAP,
+    customCap: AI_POSTER_CUSTOM_CAP,
+  });
+}
+
 async function generateAiPoster(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth || !tenant) return json({ error: "Admin only" }, 403);
   if (!env.OPENAI_API_KEY) return json({ error: "AI 海报未开通 / AI poster not enabled" }, 503);
 
-  const body = await request.json<{ prompt?: string }>().catch(() => null);
+  const body = await request.json<{ prompt?: string; mode?: string }>().catch(() => null);
+  const mode = body?.mode === "free" ? "free" : "custom";
   const style = String(body?.prompt ?? "").trim().slice(0, 500);
-  if (!style) return json({ error: "请描述画风 / Describe the style" }, 400);
+  if (mode === "custom" && !style) return json({ error: "请描述画风 / Describe the style" }, 400);
 
-  // Daily cost cap per tenant. Reserve the credit BEFORE calling OpenAI so a rapid burst of
-  // requests can't all read used<cap and slip past (KV has no atomic increment; this at least
-  // closes the sequential-repeat window). Refunded below only when OpenAI never generated —
-  // a non-2xx / network error is not billed on their side, but a success is, so we keep the charge.
-  const CAP_TTL = 2 * 86400;
-  const day = Math.floor(unixNow() / 86400);
-  const capKey = `aiposter:${tenant.id}:${day}`;
+  // Per-mode lifetime cap per event. Reserve the credit BEFORE calling OpenAI so a rapid burst
+  // can't all read used<cap and slip past (KV has no atomic increment). Refunded only when OpenAI
+  // never generated (non-2xx / network error = not billed; a success keeps the charge).
+  const cap = mode === "free" ? AI_POSTER_FREE_CAP : AI_POSTER_CUSTOM_CAP;
+  const capKey = mode === "free" ? freeCapKey(tenant.id) : customCapKey(tenant.id);
   const used = Number((await env.SHOTS.get(capKey)) ?? "0");
-  if (used >= AI_POSTER_DAILY_CAP) return json({ error: "今日 AI 海报额度已用完 / Daily AI quota reached" }, 429);
-  await env.SHOTS.put(capKey, String(used + 1), { expirationTtl: CAP_TTL });
-  const refund = () => env.SHOTS.put(capKey, String(used), { expirationTtl: CAP_TTL });
+  if (used >= cap) {
+    return json(
+      { error: mode === "free" ? "免费额度已用完 / Free quota used up" : "自定义额度已用完(每场 3 次)/ Custom quota used up" },
+      429,
+    );
+  }
+  await env.SHOTS.put(capKey, String(used + 1));
+  const refund = () => env.SHOTS.put(capKey, String(used));
 
   const name = (tenant.name ?? "Hackathon").slice(0, 80);
   const intro = (tenant.intro ?? "").replace(/\s+/g, " ").slice(0, 160);
   const prompt =
-    `Poster BACKGROUND artwork for a hackathon called "${name}".` +
-    (intro ? ` Event theme: ${intro}.` : "") +
-    ` Art direction from the organizer: ${style}.` +
-    ` Vertical A4 portrait composition, cinematic, high detail, vivid, professional event-poster quality.` +
-    ` IMPORTANT: render NO text, NO letters, NO words, NO numbers and NO logos anywhere in the image;` +
-    ` keep the lower third calmer and slightly darker so text can be overlaid on top.`;
+    mode === "free"
+      ? `Abstract poster BACKGROUND for a hackathon called "${name}".` +
+        (intro ? ` Theme: ${intro}.` : "") +
+        ` Style: deep indigo-to-black vertical gradient with luminous violet and emerald-green glows,` +
+        ` subtle glowing mycelium / network filaments, clean modern, cinematic, high detail, professional.` +
+        ` Vertical A4 portrait. IMPORTANT: NO text, letters, numbers or logos anywhere;` +
+        ` keep the lower third calmer and darker for text overlay.`
+      : `Poster BACKGROUND artwork for a hackathon called "${name}".` +
+        (intro ? ` Event theme: ${intro}.` : "") +
+        ` Art direction from the organizer: ${style}.` +
+        ` Vertical A4 portrait composition, cinematic, high detail, vivid, professional event-poster quality.` +
+        ` IMPORTANT: render NO text, NO letters, NO words, NO numbers and NO logos anywhere in the image;` +
+        ` keep the lower third calmer and slightly darker so text can be overlaid on top.`;
 
   let resp: Response;
   try {
@@ -931,7 +963,7 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
   const b64 = rawB64.replace(/[^A-Za-z0-9+/=]/g, "");
 
   // Credit already reserved up-front; success keeps the charge.
-  return json({ image: `data:image/png;base64,${b64}`, remaining: AI_POSTER_DAILY_CAP - used - 1 });
+  return json({ image: `data:image/png;base64,${b64}`, mode, remaining: cap - used - 1 });
 }
 
 // ============================ photo wall ============================
@@ -2562,36 +2594,43 @@ const APP_HTML = String.raw`<!doctype html>
       try{ await navigator.share(data); }catch(e){}
     });
   }
+  async function loadAiPanel(){
+    const box=$('#aiPanel'); if(!box) return;
+    let q; try{ q=await api('/api/tenant/poster/quota'); }catch(e){ box.innerHTML='<span class="muted">'+t('AI 海报加载失败','AI panel failed')+'</span>'; return; }
+    if(!q.aiEnabled){ box.innerHTML='<b>'+t('AI 海报','AI poster')+'</b><p class="muted">'+t('暂未开通','Not enabled yet')+'</p>'; return; }
+    box.innerHTML =
+       '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报','AI poster')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">gpt-image-1</span></div>'
+      +'<div class="row" style="gap:10px;margin:12px 0 4px;align-items:center"><button id="aiFree">'+t('🎨 免费生成(固定风格)','🎨 Free (fixed style)')+'</button><span class="muted">'+t('剩','left')+' '+q.free+'/'+q.freeCap+'</span></div>'
+      +'<p class="muted" style="margin:0 0 4px;font-size:12px">'+t('免费:用你的活动名/简介 + 品牌固定画风生成背景。','Free: a fixed on-brand style built from your event name/intro.')+'</p>'
+      +'<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">'
+      +'<div class="row" style="justify-content:space-between;align-items:center"><b style="font-size:14px">'+t('自定义(付费)','Custom (premium)')+'</b><span class="muted">'+t('剩','left')+' '+q.custom+'/'+q.customCap+t(' · 每场'+q.customCap+'次',' · '+q.customCap+'/event')+'</span></div>'
+      +'<textarea id="aiPrompt" rows="2" maxlength="500" placeholder="'+t('例:赛博朋克夜景,霓虹紫青配色','e.g. cyberpunk night, neon purple-teal')+'" style="margin-top:8px"></textarea>'
+      +'<div class="row" style="margin-top:10px;gap:8px"><button id="aiCustom">'+t('✨ 生成自定义海报','✨ Generate custom')+'</button><button class="ghost" id="aiClear">'+t('恢复模板版','Reset to template')+'</button><span id="aiMsg" class="muted"></span></div>';
+    $('#aiFree').addEventListener('click', ()=>genAi('free'));
+    $('#aiCustom').addEventListener('click', ()=>genAi('custom'));
+    $('#aiClear').addEventListener('click', ()=>{ paint(''); });
+  }
+  async function genAi(mode){
+    const prompt = mode==='custom' ? $('#aiPrompt').value.trim() : '';
+    if(mode==='custom' && !prompt){ setMsg('aiMsg', t('先描述画风','Describe a style first'), true); return; }
+    const btn = mode==='free'?$('#aiFree'):$('#aiCustom');
+    if(btn) btn.disabled=true; setMsg('aiMsg', t('生成中,约 15-30 秒…','Generating, ~15-30s…'));
+    try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{mode,prompt}});
+      if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
+      paint(r.image);
+      await loadAiPanel(); setMsg('aiMsg', t('完成 ✓ 剩 ','Done ✓ left ')+r.remaining);
+    }catch(e){ setMsg('aiMsg', e.message, true); if(btn) btn.disabled=false; }
+  }
   function renderPoster(){
     if(!CONFIG.tenant){ go('/'); return; }
     const isAdmin = ME.role==='admin';
-    const aiPanel = isAdmin
-      ? '<div class="panel" style="max-width:640px;margin-bottom:16px">'
-        + '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报(付费)','AI poster (premium)')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">gpt-image-1</span></div>'
-        + '<p class="muted" style="margin:6px 0 10px">'+t('用一句话描述你想要的画风,AI 生成背景画面,活动信息文字仍清晰叠加在上面。','Describe the art style you want; AI paints the background and your event text stays crisply overlaid.')+'</p>'
-        + '<textarea id="aiPrompt" rows="2" maxlength="500" placeholder="'+t('例:赛博朋克夜景城市,霓虹紫青配色,未来感','e.g. cyberpunk night city, neon purple-teal, futuristic')+'"></textarea>'
-        + '<div class="row" style="margin-top:10px;gap:8px"><button id="aiGen">'+t('生成 AI 海报','Generate')+'</button><button class="ghost" id="aiClear">'+t('恢复免费版','Reset to free')+'</button><span id="aiMsg" class="muted"></span></div>'
-        + '</div>'
-      : '';
     app.innerHTML = '<div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap"><h1>'+t('宣传海报','Promo poster')+'</h1>'
       + '<div class="row"><button id="dlPng">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg">'+t('下载 SVG','Download SVG')+'</button></div></div>'
-      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。','A4 portrait, auto-built from your homepage info (name/time/place).')+'</p>'
-      + aiPanel
+      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。免费可换成 AI 固定画风背景。','A4 portrait, auto-built from your homepage info. Free AI (fixed style) background available.')+'</p>'
+      + (isAdmin ? '<div id="aiPanel" class="panel" style="max-width:640px;margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>' : '')
       + '<div id="posterBox" style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>';
     paint('');
-    if(isAdmin){
-      $('#aiGen').addEventListener('click', async ()=>{
-        const prompt=$('#aiPrompt').value.trim();
-        if(!prompt){ setMsg('aiMsg', t('先描述画风','Describe a style first'), true); return; }
-        $('#aiGen').disabled=true; setMsg('aiMsg', t('生成中,约 15-30 秒…','Generating, ~15-30s…'));
-        try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{prompt}});
-          if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
-          paint(r.image); setMsg('aiMsg', t('完成 ✓ 今日剩余 ','Done ✓ remaining today ')+r.remaining);
-        }catch(e){ setMsg('aiMsg', e.message, true); }
-        $('#aiGen').disabled=false;
-      });
-      $('#aiClear').addEventListener('click', ()=>{ paint(''); setMsg('aiMsg',''); });
-    }
+    if(isAdmin) loadAiPanel();
     $('#dlSvg').addEventListener('click', ()=>{ const b=new Blob([window.__posterSvg],{type:'image/svg+xml'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download='hack5-poster.svg'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); });
     $('#dlPng').addEventListener('click', ()=>{
       const img=new Image(); const url=URL.createObjectURL(new Blob([window.__posterSvg],{type:'image/svg+xml;charset=utf-8'}));
