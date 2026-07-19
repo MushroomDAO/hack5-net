@@ -8,6 +8,26 @@ A hackathon submission & showcase portal. Each team submits a **GitHub repo + a 
 
 ---
 
+## 三种角色与入口 / Roles & entry points
+
+顶部导航栏是所有入口。All entry points are in the top nav bar.
+
+| 角色 / Role | 入口 / Entry | 凭证 / Credential | 能做什么 / Can do |
+|---|---|---|---|
+| **选手 / Team** | 导航「提交作品」→ `/submit` | 每队专属**邀请码** / per-team **invite code** | 提交作品、用编辑令牌改稿 / submit & edit via edit token |
+| **评委 / Judge** | 导航「评审入口」→ `/judge` | 主办方发的**评委登录码** / **judge login code** | 打开作品打分(4 维度)、看排行榜 / score & view leaderboard |
+| **管理员 / Admin** | 同「评审入口」→ `/judge`,填**管理口令** / same page, **admin passcode** | `ADMIN_PASSCODE` | 生成邀请码 / 评委码、锁版本、隐藏作品、导出 CSV / manage codes, lock, hide, export |
+
+**评委登录后**:打开任一作品详情页,底部出现评分面板(创新 / 技术 / 完成度 / 展示,各 1–10)。
+After a judge logs in, each submission's detail page shows a scoring panel.
+
+**管理员登录后**:导航多出「邀请码」「评委」两页 —— 分别批量生成**每队邀请码**和**每评委登录码**(码绑定姓名,打分身份稳定,不会同名互相覆盖),生成后复制分发。
+After the admin logs in, two extra pages appear — **邀请码** (batch-generate per-team invite codes) and **评委** (per-judge login codes bound to a fixed name, so scores never collide). Copy and distribute them.
+
+主办方完整运维流程见 [HANDOVER.md](HANDOVER.md)。Full organizer runbook: [HANDOVER.md](HANDOVER.md).
+
+---
+
 ## 选手怎么交 / How teams submit
 
 一个作品 = **产品名称** + **GitHub 仓库(必须 Public)** + **演示视频链接** + **1–4 张产品截图** + 每队专属**邀请码**。
@@ -33,9 +53,9 @@ A submission = **product name** + **GitHub repo (must be Public)** + **demo-vide
 
 Teams do **not** share one passcode. Each team gets a **unique, single-use invite code**. The admin batch-generates them and hands one per team; a code is consumed on first submission. Editing later uses the returned **edit token**, not a code.
 
-评委共用一个评委口令(人少、可信),登录时各填姓名区分打分。
+评委侧同理:**每人一个专属登录码**,码绑定固定姓名,打分身份稳定,不会同名互相覆盖。管理员在「评委」页按名单批量生成后分发。
 
-Judges share one judge passcode (few, trusted) and type their name at login to attribute scores.
+Judges likewise get **one login code each**, bound to a fixed name, so scoring identity is stable and same-name overwrites are impossible. The admin generates them from a name list on the **评委** page.
 
 ---
 
