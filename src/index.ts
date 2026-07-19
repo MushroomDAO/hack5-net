@@ -74,6 +74,11 @@ export default {
       // ---- tenant homepage (admin) ----
       if (path === "/api/tenant/homepage" && method === "POST") return updateHomepage(request, env, tenant);
 
+      // ---- participant registration ----
+      if (path === "/api/tenant/register" && method === "POST") return registerParticipant(request, env, tenant);
+      if (path === "/api/tenant/registrations" && method === "GET") return listRegistrations(request, env, tid);
+      if (path === "/api/tenant/registrations/export" && method === "GET") return exportRegistrations(request, env, tid);
+
       // ---- photo wall ----
       if (path === "/api/tenant/photos" && method === "GET") return listPhotos(env, tid);
       if (path === "/api/tenant/photos" && method === "POST") return uploadPhotos(request, env, tenant);
@@ -148,6 +153,7 @@ type Tenant = {
   duration?: string;
   address?: string;
   map_query?: string;
+  agenda?: string;
 };
 
 // Resolve which hackathon (tenant) a request is for, from the Host.
@@ -170,7 +176,7 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
-    "SELECT id, subdomain, name, admin_pass_hash, intro, event_time, location, duration, address, map_query FROM tenants WHERE subdomain = ? AND status = 'active'",
+    "SELECT id, subdomain, name, admin_pass_hash, intro, event_time, location, duration, address, map_query, agenda FROM tenants WHERE subdomain = ? AND status = 'active'",
   )
     .bind(sub)
     .first<Tenant>();
@@ -195,6 +201,7 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
           duration: tctx.tenant.duration ?? "",
           address: tctx.tenant.address ?? "",
           mapQuery: tctx.tenant.map_query ?? "",
+          agenda: parseAgenda(tctx.tenant.agenda),
         }
       : null,
     eventName: env.EVENT_NAME || "Hackathon",
@@ -544,12 +551,12 @@ async function updateHomepage(request: Request, env: Env, tenant: Tenant | null)
   const auth = await requireRole(request, env, tenant.id, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const body = await request
-    .json<{ intro?: string; eventTime?: string; location?: string; duration?: string; address?: string; mapQuery?: string }>()
+    .json<{ intro?: string; eventTime?: string; location?: string; duration?: string; address?: string; mapQuery?: string; agenda?: string }>()
     .catch(() => null);
   if (!body) return json({ error: "Invalid JSON" }, 400);
   const clip = (v: unknown, n: number) => String(v ?? "").trim().slice(0, n) || null;
   await env.DB.prepare(
-    "UPDATE tenants SET intro = ?, event_time = ?, location = ?, duration = ?, address = ?, map_query = ?, updated_at = ? WHERE id = ?",
+    "UPDATE tenants SET intro = ?, event_time = ?, location = ?, duration = ?, address = ?, map_query = ?, agenda = ?, updated_at = ? WHERE id = ?",
   )
     .bind(
       clip(body.intro, 2000),
@@ -558,11 +565,76 @@ async function updateHomepage(request: Request, env: Env, tenant: Tenant | null)
       clip(body.duration, 120),
       clip(body.address, 200),
       clip(body.mapQuery, 200),
+      clip(body.agenda, 2000),
       unixNow(),
       tenant.id,
     )
     .run();
   return json({ ok: true });
+}
+
+// Agenda is stored as raw text, one "time | title" per line.
+function parseAgenda(raw: string | null | undefined): { time: string; title: string }[] {
+  if (!raw) return [];
+  return String(raw)
+    .split("\n")
+    .map((line) => {
+      const idx = line.indexOf("|");
+      // "time | title"; a line without a separator is treated as a title-only entry.
+      if (idx < 0) return { time: "", title: line.trim().slice(0, 120) };
+      return { time: line.slice(0, idx).trim().slice(0, 40), title: line.slice(idx + 1).trim().slice(0, 120) };
+    })
+    .filter((r) => r.time || r.title)
+    .slice(0, 40);
+}
+
+async function registerParticipant(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  const body = await request.json<{ name?: string; email?: string; note?: string }>().catch(() => null);
+  const name = String(body?.name ?? "").trim().slice(0, 60);
+  const email = normalizeEmail(body?.email);
+  const note = String(body?.note ?? "").trim().slice(0, 300) || null;
+  if (!name) return json({ error: "请填写姓名 / Name required" }, 400);
+  if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
+  const res = await env.DB.prepare(
+    "INSERT OR IGNORE INTO registrations (id, tenant_id, name, email, note, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+  )
+    .bind(crypto.randomUUID(), tenant.id, name, email, note, unixNow())
+    .run();
+  if (res.meta.changes !== 1) return json({ ok: true, already: true }); // idempotent: already registered
+  return json({ ok: true });
+}
+
+async function listRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const rows = await env.DB.prepare(
+    "SELECT name, email, note, created_at FROM registrations WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 2000",
+  )
+    .bind(tid)
+    .all<{ name: string; email: string; note: string | null; created_at: number }>();
+  return json({ count: rows.results.length, registrations: rows.results });
+}
+
+async function exportRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const rows = await env.DB.prepare(
+    "SELECT name, email, note, created_at FROM registrations WHERE tenant_id = ? ORDER BY created_at ASC",
+  )
+    .bind(tid)
+    .all<{ name: string; email: string; note: string | null; created_at: number }>();
+  const lines = ["name,email,note,registered_at"];
+  for (const r of rows.results) {
+    lines.push([r.name, r.email, r.note ?? "", new Date(r.created_at * 1000).toISOString()].map(csvCell).join(","));
+  }
+  return new Response(lines.join("\n"), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="hack5-registrations.csv"',
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 // ============================ photo wall ============================
@@ -1493,6 +1565,13 @@ const APP_HTML = String.raw`<!doctype html>
     .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
     .map-links{margin-top:10px;font-size:13px;color:var(--muted)}
     .map-links a{font-weight:650}
+    .agenda{margin-top:16px}
+    .agenda .ag-h{font-weight:700;font-size:14px;color:#3c4250;margin-bottom:8px}
+    .ag-item{display:flex;gap:14px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:14px}
+    .ag-item:last-child{border-bottom:0}
+    .ag-t{flex:0 0 140px;color:var(--brand);font-weight:650;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+    .ag-x{color:#3c4250}
+    @media(max-width:560px){.ag-item{flex-direction:column;gap:2px}.ag-t{flex:none}}
     .masonry{columns:3 240px;column-gap:14px}
     .mphoto{position:relative;break-inside:avoid;margin-bottom:14px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#fff;box-shadow:var(--shadow)}
     .mphoto img{width:100%;display:block;cursor:pointer}
@@ -1559,6 +1638,7 @@ const APP_HTML = String.raw`<!doctype html>
       n.innerHTML = hp; return;
     }
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
+          + '<button class="ghost" onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
           + '<button class="ghost" onclick="go(\'/photos\')">'+t('照片墙','Photos')+'</button>'
           + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
           + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
@@ -1598,6 +1678,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/judges') return renderJudges();
     if(p === '/manage') return renderTenantEdit();
     if(p === '/photos') return renderPhotos();
+    if(p === '/register') return renderRegister();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
     app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
@@ -1842,18 +1923,23 @@ const APP_HTML = String.raw`<!doctype html>
         + ' <a href="https://www.google.com/maps/search/?api=1&query='+eq+'" target="_blank" rel="noopener">Google</a></div>';
       map = embed + links;
     }
-    if(!tn.intro && !bits.length && !tn.address && !map) return '';
+    const ag = tn.agenda || [];
+    const agHtml = ag.length ? '<div class="agenda"><div class="ag-h">'+t('日程 · Agenda','Agenda')+'</div>'
+      + ag.map(a=>'<div class="ag-item"><span class="ag-t">'+esc(a.time||'')+'</span><span class="ag-x">'+esc(a.title||'')+'</span></div>').join('')+'</div>' : '';
+    if(!tn.intro && !bits.length && !tn.address && !map && !agHtml) return '';
     return '<div class="panel tenant-hero">'
       + (tn.intro?'<p style="font-size:16px;color:#3c4250;white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
       + (bits.length?'<div class="hero-meta">'+bits.join('')+'</div>':'')
       + (tn.address?'<div class="muted" style="margin-top:6px">📮 '+esc(tn.address)+'</div>':'')
       + map
+      + agHtml
       + '</div>';
   }
 
   function renderTenantEdit(){
     if(ME.role !== 'admin'){ go('/'); return; }
     const tn = CONFIG.tenant || {};
+    const agendaText = (tn.agenda||[]).map(a=>(a.time||'')+' | '+(a.title||'')).join('\n');
     app.innerHTML = '<h1>'+t('首页设置','Homepage settings')+'</h1>'
       + '<div class="panel" style="max-width:640px">'
       + '<label>'+t('介绍','Intro')+'</label><textarea id="fIntro" maxlength="2000" rows="4" placeholder="'+t('这个黑客松是关于…','What this hackathon is about…')+'">'+esc(tn.intro||'')+'</textarea>'
@@ -1862,12 +1948,13 @@ const APP_HTML = String.raw`<!doctype html>
       + '<label>'+t('持续周期','Duration')+'</label><input id="fDur" maxlength="120" value="'+esc(tn.duration||'')+'" placeholder="'+t('例:48 小时','e.g. 48 hours')+'">'
       + '<label>'+t('地址(用于地图)','Address (for the map)')+'</label><input id="fAddr" maxlength="200" value="'+esc(tn.address||'')+'" placeholder="'+t('街道地址','street address')+'">'
       + '<label>'+t('地图搜索词','Map query')+' <span class="muted">'+t('(留空则用地址)','(defaults to address)')+'</span></label><input id="fMap" maxlength="200" value="'+esc(tn.mapQuery||'')+'">'
+      + '<label>'+t('日程','Agenda')+' <span class="muted">'+t('(每行一项:时间 | 内容)','(one per line: time | item)')+'</span></label><textarea id="fAgenda" rows="5" maxlength="2000" placeholder="'+t('Day 1 09:00 | 开幕\\nDay 1 10:00 | 开始开发\\nDay 2 14:00 | Demo\\nDay 2 16:00 | 颁奖','Day 1 09:00 | Kickoff\\nDay 2 14:00 | Demos')+'">'+esc(agendaText)+'</textarea>'
       + '<div class="row" style="margin-top:14px"><button id="fSave">'+t('保存','Save')+'</button><button class="ghost" onclick="go(\'/\')">'+t('返回','Back')+'</button><span id="fMsg" class="muted"></span></div>'
       + '</div>';
     $('#fSave').addEventListener('click', async ()=>{
       $('#fSave').disabled=true;
       try {
-        await api('/api/tenant/homepage',{method:'POST',body:{intro:$('#fIntro').value, eventTime:$('#fTime').value, location:$('#fLoc').value, duration:$('#fDur').value, address:$('#fAddr').value, mapQuery:$('#fMap').value}});
+        await api('/api/tenant/homepage',{method:'POST',body:{intro:$('#fIntro').value, eventTime:$('#fTime').value, location:$('#fLoc').value, duration:$('#fDur').value, address:$('#fAddr').value, mapQuery:$('#fMap').value, agenda:$('#fAgenda').value}});
         CONFIG = await api('/api/config');
         setMsg('fMsg', t('已保存 ✓','Saved ✓'));
       } catch(e){ setMsg('fMsg', e.message, true); }
@@ -1944,6 +2031,32 @@ const APP_HTML = String.raw`<!doctype html>
       };
       img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error(t('无法读取','Cannot read'))); };
       img.src=url;
+    });
+  }
+
+  // ---------------- participant registration ----------------
+  async function renderRegister(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    let adminBlock = '';
+    if(ME.role==='admin'){
+      try{ const d=await api('/api/tenant/registrations'); adminBlock='<div class="panel" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;align-items:center"><b>'+t('已报名','Registered')+': '+d.count+'</b><a href="/api/tenant/registrations/export"><button class="ghost">'+t('导出 CSV','Export CSV')+'</button></a ></div></div>'; }catch(e){}
+    }
+    app.innerHTML = '<h1>'+t('报名参加','Register')+'</h1>'
+      + '<p class="muted">'+esc((CONFIG.tenant&&CONFIG.tenant.name)||'')+'</p>'
+      + adminBlock
+      + '<div class="panel" style="max-width:460px"><div id="regForm">'
+      + '<label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60">'
+      + '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
+      + '<label>'+t('想法 / 找队友(可选)','Idea / looking for a team (optional)')+'</label><textarea id="rgNote" maxlength="300"></textarea>'
+      + '<div class="row" style="margin-top:14px"><button id="rgBtn">'+t('提交报名','Register')+'</button></div>'
+      + '<div id="rgMsg"></div></div></div>';
+    $('#rgBtn').addEventListener('click', async ()=>{
+      const name=$('#rgName').value.trim(), email=$('#rgEmail').value.trim(), note=$('#rgNote').value.trim();
+      if(!name||!email){ setMsg('rgMsg', t('请填写姓名和邮箱','Name and email required'), true); return; }
+      $('#rgBtn').disabled=true;
+      try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note}});
+        $('#regForm').innerHTML='<div class="notice ok">'+(r.already?t('你已经报名过了 ✓','You are already registered ✓'):t('报名成功!到时见 🎉','Registered! See you there 🎉'))+'</div>';
+      }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; }
     });
   }
 
