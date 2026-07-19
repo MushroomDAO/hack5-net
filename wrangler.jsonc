@@ -23,8 +23,9 @@
     "VIDEO_UPLOAD": "off",
     "MAX_VIDEO_BYTES": "83886080",
     "MAX_VIDEO_SECONDS": "180",
+    "MIN_SHOTS": "2",
     "MAX_SHOTS": "4",
-    "MAX_SHOT_BYTES": "1500000"
+    "MAX_SHOT_BYTES": "1048576"
   }
   // R2 (direct video upload) and send_email (OTP) are intentionally omitted for now.
   // To enable R2 video upload later, add:

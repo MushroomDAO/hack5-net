@@ -7,6 +7,7 @@ interface Env {
   VIDEO_UPLOAD?: string; // "on" | "off"
   MAX_VIDEO_BYTES?: string;
   MAX_VIDEO_SECONDS?: string;
+  MIN_SHOTS?: string;
   MAX_SHOTS?: string;
   MAX_SHOT_BYTES?: string;
   AUTH_SECRET: string;
@@ -27,8 +28,9 @@ type Auth = { role: "judge" | "admin"; name: string; jid: string; exp: number };
 const AUTH_COOKIE = "hv_auth";
 const DIMS = ["innovation", "technical", "completeness", "presentation"] as const;
 type Dim = (typeof DIMS)[number];
+const DEFAULT_MIN_SHOTS = 2;
 const DEFAULT_MAX_SHOTS = 4;
-const DEFAULT_MAX_SHOT_BYTES = 1_500_000;
+const DEFAULT_MAX_SHOT_BYTES = 1_048_576;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -100,8 +102,10 @@ function getConfig(env: Env): Response {
     appName: env.APP_NAME || "HackVideo",
     eventName: env.EVENT_NAME || "Hackathon",
     videoUpload: env.VIDEO_UPLOAD === "on",
+    minShots: numberEnv(env.MIN_SHOTS, DEFAULT_MIN_SHOTS),
     maxShots: numberEnv(env.MAX_SHOTS, DEFAULT_MAX_SHOTS),
     maxShotBytes: numberEnv(env.MAX_SHOT_BYTES, DEFAULT_MAX_SHOT_BYTES),
+    shotRatio: "16:9",
     maxVideoSeconds: numberEnv(env.MAX_VIDEO_SECONDS, 180),
     dims: DIMS,
   });
@@ -249,8 +253,9 @@ async function createSubmission(request: Request, env: Env): Promise<Response> {
   if (!isHttpUrl(videoUrl) || videoUrl.length > 500) {
     return json({ error: "请填写有效的视频链接(B站/YouTube)/ Valid video link required" }, 400);
   }
+  const minShots = numberEnv(env.MIN_SHOTS, DEFAULT_MIN_SHOTS);
   const shots = Array.isArray(body.shots) ? body.shots : [];
-  if (shots.length < 1) return json({ error: "请至少上传 1 张截图 / At least 1 screenshot required" }, 400);
+  if (shots.length < minShots) return json({ error: `请至少上传 ${minShots} 张截图 / At least ${minShots} screenshots required` }, 400);
   if (shots.length > maxShots) return json({ error: `最多 ${maxShots} 张截图 / At most ${maxShots} screenshots` }, 400);
 
   const decoded: { contentType: string; bytes: Uint8Array }[] = [];
@@ -941,7 +946,7 @@ const APP_HTML = String.raw`<!doctype html>
     .notice.ok{background:#e9f8f1;color:var(--ok)}
     .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
     .card{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column}
-    .carousel{position:relative;aspect-ratio:16/10;background:#0b0d12;overflow:hidden}
+    .carousel{position:relative;aspect-ratio:16/9;background:#0b0d12;overflow:hidden;cursor:pointer}
     .carousel img{width:100%;height:100%;object-fit:cover;display:none}
     .carousel img.on{display:block}
     .carousel .nav-btn{position:absolute;top:50%;transform:translateY(-50%);width:30px;height:30px;border-radius:50%;background:rgba(15,17,24,.55);color:#fff;display:grid;place-items:center;cursor:pointer;font-size:16px;border:0;padding:0}
@@ -1074,18 +1079,8 @@ const APP_HTML = String.raw`<!doctype html>
       + (s.description?'<div class="card-desc">'+esc(s.description)+'</div>':'')
       + '<div class="card-meta" data-gh="'+esc(s.repoOwner)+'/'+esc(s.repoName)+'"><span class="chip">★ …</span></div>'
       + '</div>';
-    // carousel nav
-    const car = el.querySelector('.carousel');
-    el.querySelectorAll('.nav-btn').forEach(btn => btn.addEventListener('click', ev => {
-      ev.stopPropagation();
-      const imgsEl = car.querySelectorAll('img');
-      const dotsEl = car.querySelectorAll('.dot');
-      let i = Number(car.dataset.i);
-      imgsEl[i].classList.remove('on'); if(dotsEl[i]) dotsEl[i].classList.remove('on');
-      i = (i + Number(btn.dataset.d) + imgsEl.length) % imgsEl.length;
-      imgsEl[i].classList.add('on'); if(dotsEl[i]) dotsEl[i].classList.add('on');
-      car.dataset.i = i;
-    }));
+    // carousel nav + click image to open detail
+    wireCarousel(el.querySelector('.carousel'), ()=>go(s.viewUrl));
     el.querySelector('.card-body').addEventListener('click', ()=>go(s.viewUrl));
     // lazy GitHub stars/lang
     loadGhMeta(el.querySelector('.card-meta'));
@@ -1114,7 +1109,15 @@ const APP_HTML = String.raw`<!doctype html>
       : (s.videoUrl.match(/\.(mp4|webm|mov)(\?|$)/i) || s.videoUrl.startsWith('/media/')
           ? '<div class="videobox"><video controls playsinline src="'+esc(s.videoUrl)+'"></video></div>'
           : '<div class="panel"><a href="'+esc(s.videoUrl)+'" target="_blank" rel="noopener">▶ 打开演示视频</a ></div>');
-    const strip = s.shots.map((u,i)=>'<img src="'+u+'" data-full="'+u+'" alt="screenshot '+(i+1)+'">').join('');
+    const shotsCar = s.shots.length
+      ? '<div class="carousel detail-shots" data-i="0">'
+        + s.shots.map((u,i)=>'<img class="'+(i===0?'on':'')+'" src="'+u+'" alt="screenshot '+(i+1)+'">').join('')
+        + (s.shots.length>1
+            ? '<button class="nav-btn prev" data-d="-1">‹</button><button class="nav-btn next" data-d="1">›</button>'
+              + '<div class="dots">'+s.shots.map((_,i)=>'<span class="dot '+(i===0?'on':'')+'"></span>').join('')+'</div>'
+            : '')
+        + '</div>'
+      : '';
     app.innerHTML =
       '<div class="row" style="justify-content:space-between;margin-bottom:14px">'
       + '<button class="ghost" onclick="go(\'/\')">← 返回作品墙</button>'
@@ -1123,7 +1126,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="detail-grid">'
       + '<div>'
       + videoHtml
-      + '<div class="shot-strip">'+strip+'</div>'
+      + (shotsCar ? '<h2 style="margin-top:22px">产品截图 / Screenshots</h2>'+shotsCar+'<div class="muted" style="margin-top:6px;font-size:12px">点图看大图 / click to enlarge</div>' : '')
       + '<h2 style="margin-top:22px">README</h2>'
       + '<div id="readmeWrap"><button class="ghost" id="loadReadme">加载 README</button></div>'
       + '</div>'
@@ -1150,12 +1153,9 @@ const APP_HTML = String.raw`<!doctype html>
         + (d.homepage?'<div class="kv"><span>官网</span><b><a href="'+esc(d.homepage)+'" target="_blank" rel="noopener">链接 ↗</a ></b></div>':'');
     }).catch(()=>{});
 
-    // screenshots lightbox
-    app.querySelectorAll('.shot-strip img').forEach(img=>img.addEventListener('click',()=>{
-      const lb = document.getElementById('lightbox');
-      lb.innerHTML = '<img src="'+img.dataset.full+'" alt="">';
-      lb.classList.remove('hidden');
-    }));
+    // screenshots carousel + lightbox
+    const dcar = app.querySelector('.detail-shots');
+    if(dcar) wireCarousel(dcar, ()=>{ const cur = dcar.querySelector('img.on'); if(cur) openLightbox(cur.src); });
 
     // readme
     $('#loadReadme').addEventListener('click', async ()=>{
@@ -1233,7 +1233,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<label>一句话介绍 <span class="muted">(≤300 字)</span></label><textarea id="description" maxlength="300" placeholder="项目亮点 / 技术栈"></textarea>'
       + '<label>队伍名称 <span class="muted">(可选)</span></label><input id="teamName" maxlength="80" placeholder="队名">'
       + '<label>联系方式 <span class="muted">(可选,评委联系用)</span></label><input id="contact" maxlength="120" placeholder="微信 / 邮箱">'
-      + '<label>产品截图 * <span class="muted">(1–'+CONFIG.maxShots+' 张,自动压缩)</span></label>'
+      + '<label>产品截图 * <span class="muted">('+CONFIG.minShots+'–'+CONFIG.maxShots+' 张,自动裁切为 16:9,单张≤'+(Math.round(CONFIG.maxShotBytes/1048576*10)/10)+'MB)</span></label>'
       + '<input id="shotFiles" type="file" accept="image/*" multiple>'
       + '<div class="thumbs" id="thumbs"></div>'
       + '<label>邀请码 * <span class="muted">(主办方发给你队的专属码)</span></label><input id="passcode" placeholder="每队一个,如 HV-xxxxxx">'
@@ -1265,18 +1265,27 @@ const APP_HTML = String.raw`<!doctype html>
       const img = new Image();
       const url = URL.createObjectURL(file);
       img.onload = ()=>{
-        const max = 1600;
-        let { width:w, height:h } = img;
-        if(w > max || h > max){ const r = Math.min(max/w, max/h); w = Math.round(w*r); h = Math.round(h*r); }
-        const c = document.createElement('canvas'); c.width = w; c.height = h;
-        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        const ratio = 16/9;
+        // center-crop the source to 16:9
+        let cw = img.width, ch = Math.round(img.width / ratio);
+        if(ch > img.height){ ch = img.height; cw = Math.round(img.height * ratio); }
+        const sx = Math.round((img.width - cw) / 2), sy = Math.round((img.height - ch) / 2);
+        // output width capped at 1600
+        const outW = Math.min(cw, 1600), outH = Math.round(outW / ratio);
+        const c = document.createElement('canvas'); c.width = outW; c.height = outH;
+        c.getContext('2d').drawImage(img, sx, sy, cw, ch, 0, 0, outW, outH);
         URL.revokeObjectURL(url);
-        resolve(c.toDataURL('image/jpeg', 0.82));
+        const maxBytes = CONFIG.maxShotBytes || 1048576;
+        let q = 0.85, out = c.toDataURL('image/jpeg', q);
+        while(dataUrlBytes(out) > maxBytes && q > 0.4){ q -= 0.1; out = c.toDataURL('image/jpeg', q); }
+        if(dataUrlBytes(out) > maxBytes) return reject(new Error('图片太大,请换一张'));
+        resolve(out);
       };
       img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('无法读取')); };
       img.src = url;
     });
   }
+  function dataUrlBytes(d){ const i = d.indexOf(','); if(i<0) return 0; const n = d.length - i - 1; const pad = d.endsWith('==')?2:(d.endsWith('=')?1:0); return Math.floor(n*3/4) - pad; }
 
   async function doSubmit(){
     const body = {
@@ -1291,7 +1300,7 @@ const APP_HTML = String.raw`<!doctype html>
     };
     if(!body.projectName || !body.repoUrl || !body.videoUrl){ setMsg('submitMsg','请填齐产品名、仓库、视频链接',true); return; }
     if(!body.passcode){ setMsg('submitMsg','请填写邀请码',true); return; }
-    if(!SHOTS.length){ setMsg('submitMsg','请至少上传 1 张截图',true); return; }
+    if(SHOTS.length < CONFIG.minShots){ setMsg('submitMsg','请至少上传 '+CONFIG.minShots+' 张截图',true); return; }
     $('#submitBtn').disabled = true; setMsg('submitMsg','提交中…');
     try {
       const r = await api('/api/submissions',{method:'POST',body});
@@ -1428,6 +1437,24 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   // ---------------- utils ----------------
+  function wireCarousel(car, onImgClick){
+    if(!car) return;
+    car.querySelectorAll('.nav-btn').forEach(btn => btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const imgs = car.querySelectorAll('img'), dots = car.querySelectorAll('.dot');
+      let i = Number(car.dataset.i);
+      imgs[i].classList.remove('on'); if(dots[i]) dots[i].classList.remove('on');
+      i = (i + Number(btn.dataset.d) + imgs.length) % imgs.length;
+      imgs[i].classList.add('on'); if(dots[i]) dots[i].classList.add('on');
+      car.dataset.i = i;
+    }));
+    if(onImgClick) car.addEventListener('click', onImgClick);
+  }
+  function openLightbox(src){
+    const lb = document.getElementById('lightbox');
+    lb.innerHTML = '<img src="'+src+'" alt="">';
+    lb.classList.remove('hidden');
+  }
   function videoEmbed(url){
     let m = url.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]+)/i);
     if(m) return 'https://player.bilibili.com/player.html?bvid='+m[1]+'&page=1&high_quality=1&danmaku=0';
