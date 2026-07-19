@@ -718,11 +718,17 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
   const style = String(body?.prompt ?? "").trim().slice(0, 500);
   if (!style) return json({ error: "请描述画风 / Describe the style" }, 400);
 
-  // Daily cost cap per tenant.
+  // Daily cost cap per tenant. Reserve the credit BEFORE calling OpenAI so a rapid burst of
+  // requests can't all read used<cap and slip past (KV has no atomic increment; this at least
+  // closes the sequential-repeat window). Refunded below only when OpenAI never generated —
+  // a non-2xx / network error is not billed on their side, but a success is, so we keep the charge.
+  const CAP_TTL = 2 * 86400;
   const day = Math.floor(unixNow() / 86400);
   const capKey = `aiposter:${tenant.id}:${day}`;
   const used = Number((await env.SHOTS.get(capKey)) ?? "0");
   if (used >= AI_POSTER_DAILY_CAP) return json({ error: "今日 AI 海报额度已用完 / Daily AI quota reached" }, 429);
+  await env.SHOTS.put(capKey, String(used + 1), { expirationTtl: CAP_TTL });
+  const refund = () => env.SHOTS.put(capKey, String(used), { expirationTtl: CAP_TTL });
 
   const name = (tenant.name ?? "Hackathon").slice(0, 80);
   const intro = (tenant.intro ?? "").replace(/\s+/g, " ").slice(0, 160);
@@ -742,19 +748,26 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
       body: JSON.stringify({ model: "gpt-image-1", prompt, size: "1024x1536", quality: "medium", n: 1 }),
     });
   } catch {
+    await refund();
     return json({ error: "AI 服务暂不可用 / AI service unavailable" }, 502);
   }
   if (!resp.ok) {
     const detail = await resp.text().catch(() => "");
     console.log("gpt-image-1 error", resp.status, detail.slice(0, 300));
+    await refund();
     return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
   }
   const data = await resp.json<{ data?: { b64_json?: string }[] }>().catch(() => null);
-  const b64 = data?.data?.[0]?.b64_json;
-  if (!b64) return json({ error: "生成失败 / Generation failed" }, 502);
+  const rawB64 = data?.data?.[0]?.b64_json;
+  if (!rawB64) {
+    await refund();
+    return json({ error: "生成失败 / Generation failed" }, 502);
+  }
+  // Defensive: guarantee the value is pure base64 so it can't break out of the SVG <image href="...">
+  // attribute when the client concatenates it into markup.
+  const b64 = rawB64.replace(/[^A-Za-z0-9+/=]/g, "");
 
-  // Charge one credit only on success; TTL cleans up old day buckets.
-  await env.SHOTS.put(capKey, String(used + 1), { expirationTtl: 2 * 86400 });
+  // Credit already reserved up-front; success keeps the charge.
   return json({ image: `data:image/png;base64,${b64}`, remaining: AI_POSTER_DAILY_CAP - used - 1 });
 }
 
@@ -2235,6 +2248,7 @@ const APP_HTML = String.raw`<!doctype html>
         if(!prompt){ setMsg('aiMsg', t('先描述画风','Describe a style first'), true); return; }
         $('#aiGen').disabled=true; setMsg('aiMsg', t('生成中,约 15-30 秒…','Generating, ~15-30s…'));
         try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{prompt}});
+          if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
           paint(r.image); setMsg('aiMsg', t('完成 ✓ 今日剩余 ','Done ✓ remaining today ')+r.remaining);
         }catch(e){ setMsg('aiMsg', e.message, true); }
         $('#aiGen').disabled=false;
