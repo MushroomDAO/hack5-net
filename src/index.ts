@@ -1945,6 +1945,10 @@ const APP_HTML = String.raw`<!doctype html>
     @media(max-width:560px){.ag-item{flex-direction:column;gap:2px}.ag-t{flex:none}}
     .share-grid{display:grid;grid-template-columns:340px 1fr;gap:22px;align-items:start}
     .share-poster{border-radius:14px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow)}
+    .share-plats{display:flex;flex-wrap:wrap;gap:8px}
+    .splat{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border:1px solid var(--line);border-radius:999px;font-size:13px;font-weight:600;color:var(--ink)}
+    .splat:hover{background:var(--ghost-hover)}
+    .sdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
     @media(max-width:720px){.share-grid{grid-template-columns:1fr}.share-poster{max-width:340px}}
     .teamgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
     .tcard{position:relative;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--card);box-shadow:var(--shadow)}
@@ -2556,6 +2560,7 @@ const APP_HTML = String.raw`<!doctype html>
     img.onerror=function(){ URL.revokeObjectURL(u); rej(new Error('fail')); }; img.src=u;
   }); }
   async function copyText(str,elId){ try{ await navigator.clipboard.writeText(str); setMsg(elId,t('已复制 ✓','Copied ✓')); }catch(e){ setMsg(elId,t('复制失败,请手动选择','Copy failed—select manually'),true); } }
+  function shareLink(href,label,color){ return '<a target="_blank" rel="noopener" href="'+href+'" class="splat"><span class="sdot" style="background:'+color+'"></span>'+esc(label)+'</a>'; }
   function renderShare(){
     if(!CONFIG.tenant){ go('/'); return; }
     const tn=CONFIG.tenant; const sub=tn.subdomain||'';
@@ -2570,15 +2575,24 @@ const APP_HTML = String.raw`<!doctype html>
       +'<div><div id="shPosterBox" class="share-poster"></div>'
       +'<a target="_blank" rel="noopener" href="'+url+'/poster" style="display:inline-block;margin-top:8px;font-size:13px;font-weight:600">'+t('🎨 换成 AI 定制海报(付费)→','🎨 Make an AI poster (premium) →')+'</a></div>'
       +'<div class="panel">'
-      +'<label>'+t('分享文案','Caption')+'</label><textarea id="shCap" rows="7">'+esc(caption)+'</textarea>'
-      +'<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:12px">'
-      +'<button id="shCopyCap">'+t('复制文案','Copy caption')+'</button>'
+      +'<label>'+t('分享文案','Caption')+'</label><textarea id="shCap" rows="6">'+esc(caption)+'</textarea>'
+      +(hasNative?'<button id="shNative" style="width:100%;margin-top:12px;font-size:15px;padding:12px">📲 '+t('分享到微信 / 更多(含海报)','Share to WeChat / more (with poster)')+'</button>':'')
+      +'<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:10px">'
+      +'<button class="ghost" id="shCopyCap">'+t('复制文案','Copy caption')+'</button>'
       +'<button class="ghost" id="shCopyUrl">'+t('复制链接','Copy link')+'</button>'
       +'<button class="ghost" id="shPoster">'+t('下载海报','Download poster')+'</button>'
-      +(hasNative?'<button class="ghost" id="shNative">'+t('系统分享(含海报)','Share sheet')+'</button>':'')
-      +'<a target="_blank" rel="noopener" href="https://t.me/share/url?url='+encodeURIComponent(url)+'&text='+encodeURIComponent(caption)+'"><button class="ghost">Telegram</button></a>'
-      +'<a target="_blank" rel="noopener" href="https://twitter.com/intent/tweet?text='+encodeURIComponent(caption)+'"><button class="ghost">X / Twitter</button></a>'
-      +'</div><div id="shMsg" class="muted" style="margin-top:8px"></div></div>'
+      +'</div>'
+      +'<div class="muted" style="margin:14px 0 6px;font-size:12px">'+t('分享到平台','Post to a platform')+'</div>'
+      +'<div class="share-plats">'
+      +shareLink('https://service.weibo.com/share/share.php?url='+encodeURIComponent(url)+'&title='+encodeURIComponent(caption),'微博','#e6162d')
+      +shareLink('https://sns.qzone.qq.com/cgi-bin/qzshare/cgi_qzshare_onekey?url='+encodeURIComponent(url)+'&title='+encodeURIComponent((tn.name||'hack5'))+'&summary='+encodeURIComponent(caption),'QQ空间','#f7b500')
+      +shareLink('https://t.me/share/url?url='+encodeURIComponent(url)+'&text='+encodeURIComponent(caption),'Telegram','#229ed9')
+      +shareLink('https://twitter.com/intent/tweet?text='+encodeURIComponent(caption),'X','#111')
+      +shareLink('https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(url),'Facebook','#1877f2')
+      +shareLink('https://www.linkedin.com/sharing/share-offsite/?url='+encodeURIComponent(url),'LinkedIn','#0a66c2')
+      +'</div>'
+      +'<div class="muted" style="margin-top:12px;font-size:12px">'+t('微信:点上面「分享到微信」用手机系统面板;电脑上复制链接粘到微信即可。二维码扫码分享即将上线。','WeChat: use the share button on mobile, or copy the link. A scannable QR is coming.')+'</div>'
+      +'<div id="shMsg" class="muted" style="margin-top:8px"></div></div>'
       +'</div>';
     $('#shPosterBox').innerHTML = posterSvg('');
     $('#shCopyCap').addEventListener('click',()=>copyText($('#shCap').value,'shMsg'));
