@@ -4,9 +4,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-18",
   "observability": { "enabled": true },
-  "workers_dev": true,
+  "workers_dev": false,
   "routes": [
-    { "pattern": "hack5.net", "custom_domain": true }
+    { "pattern": "hack5.net", "custom_domain": true },
+    { "pattern": "*.hack5.net/*", "zone_name": "hack5.net" }
   ],
   "d1_databases": [
     {
@@ -29,7 +30,9 @@
     "MAX_VIDEO_SECONDS": "180",
     "MIN_SHOTS": "2",
     "MAX_SHOTS": "4",
-    "MAX_SHOT_BYTES": "1048576"
+    "MAX_SHOT_BYTES": "1048576",
+    "ROOT_DOMAIN": "hack5.net",
+    "CF_ZONE_ID": "c2b830cd9f441a3acedf9dc43c3692dc"
   }
   // R2 (direct video upload) and send_email (OTP) are intentionally omitted for now.
   // To enable R2 video upload later, add:

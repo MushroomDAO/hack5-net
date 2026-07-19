@@ -18,6 +18,9 @@ interface Env {
   RESEND_API_KEY?: string;
   MAIL_FROM?: string;
   DEV_MODE?: string;
+  CF_DNS_TOKEN?: string; // scoped to the hack5.net zone's DNS — used to auto-create <sub>.hack5.net
+  CF_ZONE_ID?: string;
+  ROOT_DOMAIN?: string; // e.g. "hack5.net"
   // R2 (only used when VIDEO_UPLOAD=on):
   R2_ACCOUNT_ID?: string;
   R2_BUCKET_NAME?: string;
@@ -448,13 +451,39 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached`, upgrade: true }, 402);
   }
 
+  // Auto-provision the subdomain DNS so <sub>.hack5.net resolves. Roll back the tenant if it fails.
+  const dnsErr = await createSubdomainDns(env, subdomain);
+  if (dnsErr) {
+    await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
+    return json({ error: "子域名配置失败,请重试 / Subdomain setup failed", detail: dnsErr }, 502);
+  }
+
+  const root = env.ROOT_DOMAIN || "hack5.net";
   return json({
     ok: true,
     subdomain,
     name,
-    url: `https://${subdomain}.hack5.net`,
+    url: `https://${subdomain}.${root}`,
     adminPassword: adminPass,
   });
+}
+
+// Create a proxied CNAME <sub>.hack5.net -> hack5.net so the wildcard Worker route serves it.
+// Returns null on success (or when not configured, e.g. dev/preview), else an error message.
+async function createSubdomainDns(env: Env, sub: string): Promise<string | null> {
+  if (!env.CF_DNS_TOKEN || !env.CF_ZONE_ID) return null;
+  const root = env.ROOT_DOMAIN || "hack5.net";
+  const res = await fetch(`https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/dns_records`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.CF_DNS_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "CNAME", name: sub, content: root, proxied: true, ttl: 1 }),
+  });
+  if (res.ok) return null;
+  const body = await res.json<{ errors?: { code?: number; message?: string }[] }>().catch(() => null);
+  if (body?.errors?.some((e) => e.code === 81053 || String(e.message ?? "").toLowerCase().includes("already exists"))) {
+    return null; // idempotent: record already present
+  }
+  return body?.errors?.[0]?.message || `DNS error ${res.status}`;
 }
 
 async function sendEmailCode(env: Env, email: string, code: string): Promise<boolean> {
