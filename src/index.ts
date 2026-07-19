@@ -150,12 +150,15 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   let sub: string | null = null;
   const m = host.match(/^([a-z0-9-]+)\.hack5\.net$/);
   if (m) sub = m[1];
-  // dev / preview hosts have no real subdomain. Default to the PLATFORM landing so the
-  // preview shows the headline (create-a-hackathon); ?tenant=<sub> reaches a tenant for testing.
-  else if (host.endsWith(".workers.dev") || host === "localhost" || host === "127.0.0.1") {
+  // Local dev only: ?tenant=<sub> reaches a tenant for testing.
+  else if (host === "localhost" || host === "127.0.0.1") {
     const q = new URL(request.url).searchParams.get("tenant");
     if (!q) return { platform: true, tenant: null };
     sub = q;
+  }
+  // Public preview host (workers.dev): platform landing only — never expose tenants via ?tenant.
+  else if (host.endsWith(".workers.dev")) {
+    return { platform: true, tenant: null };
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
@@ -204,10 +207,14 @@ async function login(request: Request, env: Env, tenant: Tenant | null): Promise
 
   const exp = unixNow() + 7 * 24 * 60 * 60;
   let payload: Auth;
-  // Admin: per-tenant password (hashed). The demo tenant has an empty hash → falls back to the global ADMIN_PASSCODE.
-  const isAdmin = tenant.admin_pass_hash
-    ? timingSafeEqual(await hashSecret(env, code), tenant.admin_pass_hash)
-    : Boolean(env.ADMIN_PASSCODE) && code === env.ADMIN_PASSCODE;
+  // Admin: per-tenant hashed password. ONLY the seeded demo tenant (empty hash) may fall back
+  // to the global ADMIN_PASSCODE — any other tenant with an empty hash fails closed.
+  let isAdmin = false;
+  if (tenant.admin_pass_hash) {
+    isAdmin = timingSafeEqual(await hashSecret(env, code), tenant.admin_pass_hash);
+  } else if (tenant.subdomain === "demo") {
+    isAdmin = Boolean(env.ADMIN_PASSCODE) && code === env.ADMIN_PASSCODE;
+  }
   if (isAdmin) {
     const name = String(body?.name ?? "").trim().slice(0, 40) || "管理员";
     payload = { role: "admin", name, jid: "admin", tenant: tenant.id, exp };
@@ -338,9 +345,17 @@ async function platformLoginRequest(request: Request, env: Env): Promise<Respons
     .bind(crypto.randomUUID(), email, await hashSecret(env, `${email}:${code}`), ip, now, now + 10 * 60)
     .run();
   const sent = await sendEmailCode(env, email, code);
-  const res: Record<string, unknown> = { ok: true };
-  if (!sent) res.debugCode = code; // no email provider configured (dev/test): surface the code
-  return json(res);
+  if (!sent) {
+    // No email provider: surface the code ONLY on dev/preview hosts, never on the real product domain.
+    if (isDevHost(request)) return json({ ok: true, debugCode: code });
+    return json({ error: "邮件服务暂未配置 / Email not configured" }, 503);
+  }
+  return json({ ok: true });
+}
+
+function isDevHost(request: Request): boolean {
+  const h = new URL(request.url).hostname.toLowerCase();
+  return h.endsWith(".workers.dev") || h === "localhost" || h === "127.0.0.1";
 }
 
 async function platformLoginVerify(request: Request, env: Env): Promise<Response> {
@@ -350,14 +365,28 @@ async function platformLoginVerify(request: Request, env: Env): Promise<Response
   if (!email || code.length !== 6) return json({ error: "邮箱或验证码无效 / Invalid email or code" }, 400);
   const now = unixNow();
   const rows = await env.DB.prepare(
-    "SELECT id, code_hash FROM email_codes WHERE email = ? AND used_at IS NULL AND expires_at >= ? ORDER BY created_at DESC LIMIT 5",
+    "SELECT id, code_hash, attempts FROM email_codes WHERE email = ? AND used_at IS NULL AND expires_at >= ? ORDER BY created_at DESC LIMIT 5",
   )
     .bind(email, now)
-    .all<{ id: string; code_hash: string }>();
+    .all<{ id: string; code_hash: string; attempts: number }>();
+  // Cap brute-force: too many wrong guesses against this email's live codes -> force a new code.
+  const totalAttempts = rows.results.reduce((a, r) => a + Number(r.attempts || 0), 0);
+  if (totalAttempts >= 10) return json({ error: "尝试过多,请重新获取验证码 / Too many attempts" }, 429);
   const expected = await hashSecret(env, `${email}:${code}`);
   const match = rows.results.find((r) => timingSafeEqual(r.code_hash, expected));
-  if (!match) return json({ error: "验证码错误或已过期 / Invalid or expired code" }, 401);
-  await env.DB.prepare("UPDATE email_codes SET used_at = ? WHERE id = ?").bind(now, match.id).run();
+  if (!match) {
+    if (rows.results[0]) {
+      await env.DB.prepare("UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?").bind(rows.results[0].id).run();
+    }
+    return json({ error: "验证码错误或已过期 / Invalid or expired code" }, 401);
+  }
+  // Atomic single-use consume: only one concurrent verify can win.
+  const consumed = await env.DB.prepare("UPDATE email_codes SET used_at = ? WHERE id = ? AND used_at IS NULL")
+    .bind(now, match.id)
+    .run();
+  if (consumed.meta.changes !== 1) return json({ error: "验证码已被使用 / Code already used" }, 401);
+  // Invalidate this email's other live codes on success.
+  await env.DB.prepare("UPDATE email_codes SET used_at = ? WHERE email = ? AND used_at IS NULL").bind(now, email).run();
   await env.DB.prepare("INSERT OR IGNORE INTO users (email, quota, plan, created_at) VALUES (?, 1, 'free', ?)")
     .bind(email, now)
     .run();
@@ -406,6 +435,19 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   )
     .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, now, now)
     .run();
+
+  // Close the quota race deterministically: keep the earliest `quota` tenants; if a concurrent
+  // create pushed this one past the limit, roll it back.
+  const owned = await env.DB.prepare(
+    "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' ORDER BY created_at ASC, id ASC",
+  )
+    .bind(user.email)
+    .all<{ id: string }>();
+  if (owned.results.findIndex((r) => r.id === id) >= quota) {
+    await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
+    return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached`, upgrade: true }, 402);
+  }
+
   return json({
     ok: true,
     subdomain,
