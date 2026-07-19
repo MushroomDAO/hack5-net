@@ -1001,6 +1001,11 @@ const APP_HTML = String.raw`<!doctype html>
   const app = document.getElementById('app');
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null };
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+  let LANG = lsGet('hv_lang') === 'en' ? 'en' : 'zh';
+  const t = (zh, en) => LANG === 'en' ? en : zh;
+  window.toggleLang = () => { LANG = LANG === 'en' ? 'zh' : 'en'; lsSet('hv_lang', LANG); document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN'; renderNav(); route(); };
 
   function go(path){ history.pushState(null, '', path); route(); }
   window.addEventListener('popstate', route);
@@ -1011,6 +1016,7 @@ const APP_HTML = String.raw`<!doctype html>
     CONFIG = await api('/api/config').catch(()=>({appName:'HackVideo',eventName:'Hackathon',maxShots:4,dims:['innovation','technical','completeness','presentation'],maxVideoSeconds:180}));
     document.getElementById('brandName').textContent = CONFIG.appName;
     document.title = CONFIG.appName;
+    document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
     ME = await api('/api/auth/me').catch(()=>({role:null}));
     renderNav();
     route();
@@ -1018,16 +1024,17 @@ const APP_HTML = String.raw`<!doctype html>
 
   function renderNav(){
     const n = document.getElementById('nav');
-    let h = '<button class="ghost" onclick="go(\'/\')">作品墙</button>'
-          + '<button class="ghost" onclick="go(\'/submit\')">提交作品</button>';
+    let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
+          + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>';
     if(ME.role){
-      h += '<button class="ghost" onclick="go(\'/leaderboard\')">排行榜</button>'
-         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/invites\')">邀请码</button><button class="ghost" onclick="go(\'/judges\')">评委</button>':'')
-         + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?'管理':'评委')+'</span>'
-         + '<button onclick="logout()">退出</button>';
+      h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
+         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
+         + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?t('管理','Admin'):t('评委','Judge'))+'</span>'
+         + '<button onclick="logout()">'+t('退出','Logout')+'</button>';
     } else {
-      h += '<button onclick="go(\'/judge\')">评审入口</button>';
+      h += '<button onclick="go(\'/judge\')">'+t('评审入口','Judge login')+'</button>';
     }
+    h += '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
     n.innerHTML = h;
   }
 
@@ -1045,17 +1052,17 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/judges') return renderJudges();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
-    app.innerHTML = '<div class="panel"><p>页面不存在。</p></div>';
+    app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
   }
 
   // ---------------- work wall ----------------
   async function renderWall(){
-    app.innerHTML = '<h1>'+esc(CONFIG.eventName)+' 作品墙</h1><p>点开作品看演示视频、README 和代码。</p><div id="wall" class="gallery"></div>';
+    app.innerHTML = '<h1>'+esc(CONFIG.eventName)+' '+t('作品墙','Gallery')+'</h1><p>'+t('点开作品看演示视频、README 和代码。','Open a project to watch its demo, view its README and code.')+'</p><div id="wall" class="gallery"></div>';
     const wall = $('#wall');
-    wall.innerHTML = '<p>加载中…</p>';
+    wall.innerHTML = '<p>'+t('加载中…','Loading…')+'</p>';
     try {
       const { submissions } = await api('/api/submissions');
-      if(!submissions.length){ wall.innerHTML = '<p>还没有作品,<a href="/submit" onclick="go(\'/submit\');return false">来交第一个</a >。</p>'; return; }
+      if(!submissions.length){ wall.innerHTML = '<p>'+t('还没有作品,','No projects yet — ')+'<a href="/submit" onclick="go(\'/submit\');return false">'+t('来交第一个','submit the first')+'</a >'+t('。','.')+'</p>'; return; }
       wall.innerHTML = '';
       submissions.forEach(s => wall.appendChild(card(s)));
     } catch(e){ wall.innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
@@ -1070,7 +1077,7 @@ const APP_HTML = String.raw`<!doctype html>
     const arrows = shots.length>1 ? '<button class="nav-btn prev" data-d="-1">‹</button><button class="nav-btn next" data-d="1">›</button>' : '';
     el.innerHTML =
       '<div class="carousel" data-i="0">'
-      + '<span class="vbadge">▶ 视频</span>' + imgs + arrows + dots
+      + '<span class="vbadge">▶ '+t('视频','Video')+'</span>' + imgs + arrows + dots
       + '</div>'
       + '<div class="card-body">'
       + '<div class="card-title">'+esc(s.projectName)+'</div>'
@@ -1093,13 +1100,13 @@ const APP_HTML = String.raw`<!doctype html>
       const d = await api('/api/gh/'+owner+'/'+repo);
       elm.innerHTML = '<span class="chip">★ '+(d.stars??0)+'</span>'
         + (d.language?'<span class="chip">'+esc(d.language)+'</span>':'')
-        + '<span class="chip">更新 '+fmtDate(d.pushedAt)+'</span>';
+        + '<span class="chip">'+t('更新','upd.')+' '+fmtDate(d.pushedAt)+'</span>';
     } catch { elm.innerHTML = '<span class="chip">GitHub</span>'; }
   }
 
   // ---------------- detail ----------------
   async function renderDetail(id){
-    app.innerHTML = '<div class="panel"><p>加载中…</p></div>';
+    app.innerHTML = '<div class="panel"><p>'+t('加载中…','Loading…')+'</p></div>';
     let s;
     try { s = (await api('/api/submissions/'+id)).submission; }
     catch(e){ app.innerHTML = '<div class="panel"><p class="notice err">'+esc(e.message)+'</p></div>'; return; }
@@ -1108,7 +1115,7 @@ const APP_HTML = String.raw`<!doctype html>
       ? '<div class="videobox"><iframe src="'+embed+'" allow="accelerometer;autoplay;encrypted-media;gyroscope;picture-in-picture;fullscreen" allowfullscreen scrolling="no"></iframe></div>'
       : (s.videoUrl.match(/\.(mp4|webm|mov)(\?|$)/i) || s.videoUrl.startsWith('/media/')
           ? '<div class="videobox"><video controls playsinline src="'+esc(s.videoUrl)+'"></video></div>'
-          : '<div class="panel"><a href="'+esc(s.videoUrl)+'" target="_blank" rel="noopener">▶ 打开演示视频</a ></div>');
+          : '<div class="panel"><a href="'+esc(s.videoUrl)+'" target="_blank" rel="noopener">▶ '+t('打开演示视频','Open demo video')+'</a ></div>');
     const shotsCar = s.shots.length
       ? '<div class="carousel detail-shots" data-i="0">'
         + s.shots.map((u,i)=>'<img class="'+(i===0?'on':'')+'" src="'+u+'" alt="screenshot '+(i+1)+'">').join('')
@@ -1120,24 +1127,24 @@ const APP_HTML = String.raw`<!doctype html>
       : '';
     app.innerHTML =
       '<div class="row" style="justify-content:space-between;margin-bottom:14px">'
-      + '<button class="ghost" onclick="go(\'/\')">← 返回作品墙</button>'
-      + '<a class="row" href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener"><button>查看代码 ↗</button></a >'
+      + '<button class="ghost" onclick="go(\'/\')">← '+t('返回作品墙','Back to gallery')+'</button>'
+      + '<a class="row" href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener"><button>'+t('查看代码','View code')+' ↗</button></a >'
       + '</div>'
       + '<div class="detail-grid">'
       + '<div>'
       + videoHtml
-      + (shotsCar ? '<h2 style="margin-top:22px">产品截图 / Screenshots</h2>'+shotsCar+'<div class="muted" style="margin-top:6px;font-size:12px">点图看大图 / click to enlarge</div>' : '')
+      + (shotsCar ? '<h2 style="margin-top:22px">'+t('产品截图','Screenshots')+'</h2>'+shotsCar+'<div class="muted" style="margin-top:6px;font-size:12px">'+t('点图看大图','Click to enlarge')+'</div>' : '')
       + '<h2 style="margin-top:22px">README</h2>'
-      + '<div id="readmeWrap"><button class="ghost" id="loadReadme">加载 README</button></div>'
+      + '<div id="readmeWrap"><button class="ghost" id="loadReadme">'+t('加载 README','Load README')+'</button></div>'
       + '</div>'
       + '<div>'
       + '<div class="panel">'
       + '<h2>'+esc(s.projectName)+'</h2>'
       + (s.teamName?'<div class="muted">👥 '+esc(s.teamName)+'</div>':'')
       + (s.description?'<p style="color:#3c4250">'+esc(s.description)+'</p>':'')
-      + '<div class="kv"><span>仓库</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
+      + '<div class="kv"><span>'+t('仓库','Repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
       + '<div id="ghMeta"></div>'
-      + (s.lockedSha?'<div class="kv"><span>评审版本</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
+      + (s.lockedSha?'<div class="kv"><span>'+t('评审版本','Reviewed')+'</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
       + '</div>'
       + '<div id="scorePanel"></div>'
       + '<div id="adminPanel"></div>'
@@ -1148,9 +1155,9 @@ const APP_HTML = String.raw`<!doctype html>
     api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
       $('#ghMeta').innerHTML =
         '<div class="kv"><span>Stars</span><b>★ '+(d.stars??0)+'</b></div>'
-        + (d.language?'<div class="kv"><span>语言</span><b>'+esc(d.language)+'</b></div>':'')
-        + '<div class="kv"><span>最后提交</span><b>'+fmtDate(d.pushedAt)+'</b></div>'
-        + (d.homepage?'<div class="kv"><span>官网</span><b><a href="'+esc(d.homepage)+'" target="_blank" rel="noopener">链接 ↗</a ></b></div>':'');
+        + (d.language?'<div class="kv"><span>'+t('语言','Language')+'</span><b>'+esc(d.language)+'</b></div>':'')
+        + '<div class="kv"><span>'+t('最后提交','Last push')+'</span><b>'+fmtDate(d.pushedAt)+'</b></div>'
+        + (d.homepage?'<div class="kv"><span>'+t('官网','Homepage')+'</span><b><a href="'+esc(d.homepage)+'" target="_blank" rel="noopener">'+t('链接','link')+' ↗</a ></b></div>':'');
     }).catch(()=>{});
 
     // screenshots carousel + lightbox
@@ -1159,7 +1166,7 @@ const APP_HTML = String.raw`<!doctype html>
 
     // readme
     $('#loadReadme').addEventListener('click', async ()=>{
-      $('#loadReadme').disabled = true; $('#loadReadme').textContent = '加载中…';
+      $('#loadReadme').disabled = true; $('#loadReadme').textContent = t('加载中…','Loading…');
       try {
         const { html } = await api('/api/gh/'+s.repoOwner+'/'+s.repoName+'/readme');
         const frame = document.createElement('iframe');
@@ -1183,20 +1190,20 @@ const APP_HTML = String.raw`<!doctype html>
     const box = $('#scorePanel');
     let existing = {};
     try { const { scores } = await api('/api/scores'); existing = scores[s.id] || {}; } catch {}
-    const labels = { innovation:'创新', technical:'技术', completeness:'完成度', presentation:'展示' };
-    box.innerHTML = '<div class="panel" style="margin-top:16px"><h2>我的评分</h2>'
+    const labels = { innovation:t('创新','Innovation'), technical:t('技术','Technical'), completeness:t('完成度','Completeness'), presentation:t('展示','Presentation') };
+    box.innerHTML = '<div class="panel" style="margin-top:16px"><h2>'+t('我的评分','My scores')+'</h2>'
       + CONFIG.dims.map(d=>{
           const v = existing[d] ?? 7;
           return '<div class="score-dim"><label>'+labels[d]+'</label><input type="range" min="1" max="10" value="'+v+'" data-dim="'+d+'" oninput="this.nextElementSibling.textContent=this.value"><span class="val">'+v+'</span></div>';
         }).join('')
-      + '<label>评语(可选)</label><textarea id="scoreComment" maxlength="500">'+esc(existing.comment||'')+'</textarea>'
-      + '<div class="row" style="margin-top:12px"><button id="saveScore">保存评分</button><span id="scoreMsg" class="muted"></span></div>'
+      + '<label>'+t('评语(可选)','Comment (optional)')+'</label><textarea id="scoreComment" maxlength="500">'+esc(existing.comment||'')+'</textarea>'
+      + '<div class="row" style="margin-top:12px"><button id="saveScore">'+t('保存评分','Save')+'</button><span id="scoreMsg" class="muted"></span></div>'
       + '</div>';
     $('#saveScore').addEventListener('click', async ()=>{
       const body = { submissionId: s.id, comment: $('#scoreComment').value };
       box.querySelectorAll('input[data-dim]').forEach(i=>body[i.dataset.dim]=Number(i.value));
       $('#saveScore').disabled = true;
-      try { await api('/api/scores',{method:'POST',body}); $('#scoreMsg').textContent='已保存 ✓'; }
+      try { await api('/api/scores',{method:'POST',body}); $('#scoreMsg').textContent=t('已保存 ✓','Saved ✓'); }
       catch(e){ $('#scoreMsg').textContent = e.message; }
       finally { $('#saveScore').disabled = false; }
     });
@@ -1204,16 +1211,16 @@ const APP_HTML = String.raw`<!doctype html>
 
   function renderAdminPanel(s){
     const box = $('#adminPanel');
-    box.innerHTML = '<div class="panel" style="margin-top:16px"><h2>管理</h2>'
-      + '<div class="row"><button class="ghost" id="lockBtn">锁定评审版本(记录当前 commit)</button>'
-      + '<button class="ghost" id="hideBtn">隐藏该作品</button></div>'
+    box.innerHTML = '<div class="panel" style="margin-top:16px"><h2>'+t('管理','Admin')+'</h2>'
+      + '<div class="row"><button class="ghost" id="lockBtn">'+t('锁定评审版本(记录当前 commit)','Lock reviewed version (record current commit)')+'</button>'
+      + '<button class="ghost" id="hideBtn">'+t('隐藏该作品','Hide this project')+'</button></div>'
       + '<div id="adminMsg" class="muted" style="margin-top:8px"></div></div>';
     $('#lockBtn').addEventListener('click', async ()=>{
-      try { const r = await api('/api/submissions/'+s.id+'/lock',{method:'POST',body:{}}); $('#adminMsg').textContent='已锁定 '+r.lockedSha.slice(0,10); }
+      try { const r = await api('/api/submissions/'+s.id+'/lock',{method:'POST',body:{}}); $('#adminMsg').textContent=t('已锁定 ','Locked ')+r.lockedSha.slice(0,10); }
       catch(e){ $('#adminMsg').textContent = e.message; }
     });
     $('#hideBtn').addEventListener('click', async ()=>{
-      if(!confirm('确定隐藏该作品?')) return;
+      if(!confirm(t('确定隐藏该作品?','Hide this project?'))) return;
       try { await api('/api/submissions/'+s.id+'/hide',{method:'POST',body:{}}); go('/'); }
       catch(e){ $('#adminMsg').textContent = e.message; }
     });
@@ -1222,34 +1229,37 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- submit ----------------
   let SHOTS = []; // dataURLs
   async function renderSubmit(){
-    SHOTS = [];
+    // NB: SHOTS is intentionally NOT reset here, so a language toggle / re-render keeps
+    // already-selected screenshots. It's cleared after a successful submit instead.
+    const mb = Math.round(CONFIG.maxShotBytes/1048576*10)/10;
     app.innerHTML =
-      '<h1>提交作品</h1>'
+      '<h1>'+t('提交作品','Submit a project')+'</h1>'
       + '<div class="panel" style="max-width:720px">'
-      + '<div class="notice">规则:① 视频请传到 <b>B站/YouTube</b>,这里贴链接(别塞进 Git);② 仓库必须 <b>Public</b>,否则评委看不到;③ PPT 放仓库 <code>/docs</code> 里的 <b>PDF</b>(GitHub 可在线预览);④ 截止后建议打 Release tag 锁版本。</div>'
-      + '<label>产品名称 * <span class="muted">(作品的主标题)</span></label><input id="projectName" maxlength="80" placeholder="你的产品 / 作品名">'
-      + '<label>GitHub 仓库链接 * <span class="muted">(必须 Public)</span></label><input id="repoUrl" placeholder="https://github.com/owner/repo">'
-      + '<label>演示视频链接 * <span class="muted">(B站 / YouTube)</span></label><input id="videoUrl" placeholder="https://www.bilibili.com/video/BV...">'
-      + '<label>一句话介绍 <span class="muted">(≤300 字)</span></label><textarea id="description" maxlength="300" placeholder="项目亮点 / 技术栈"></textarea>'
-      + '<label>队伍名称 <span class="muted">(可选)</span></label><input id="teamName" maxlength="80" placeholder="队名">'
-      + '<label>联系方式 <span class="muted">(可选,评委联系用)</span></label><input id="contact" maxlength="120" placeholder="微信 / 邮箱">'
-      + '<label>产品截图 * <span class="muted">('+CONFIG.minShots+'–'+CONFIG.maxShots+' 张,自动裁切为 16:9,单张≤'+(Math.round(CONFIG.maxShotBytes/1048576*10)/10)+'MB)</span></label>'
+      + '<div class="notice">'+t('规则:① 视频请传到 <b>B站/YouTube</b>,这里贴链接(别塞进 Git);② 仓库必须 <b>Public</b>,否则评委看不到;③ PPT 放仓库 <code>/docs</code> 里的 <b>PDF</b>(GitHub 可在线预览);④ 截止后建议打 Release tag 锁版本。','Rules: ① host the video on <b>Bilibili/YouTube</b> and paste the link (keep it out of Git); ② the repo must be <b>Public</b>; ③ put the slides as a <b>PDF</b> under <code>/docs</code> (GitHub previews it); ④ tag a Release after the deadline to lock the version.')+'</div>'
+      + '<label>'+t('产品名称','Product name')+' * <span class="muted">('+t('作品的主标题','the main title')+')</span></label><input id="projectName" maxlength="80" placeholder="'+t('你的产品 / 作品名','Your product name')+'">'
+      + '<label>'+t('GitHub 仓库链接','GitHub repo URL')+' * <span class="muted">('+t('必须 Public','must be Public')+')</span></label><input id="repoUrl" placeholder="https://github.com/owner/repo">'
+      + '<label>'+t('演示视频链接','Demo video link')+' * <span class="muted">'+t('(B站 / YouTube)','(Bilibili / YouTube)')+'</span></label><input id="videoUrl" placeholder="https://www.bilibili.com/video/BV...">'
+      + '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">(≤300)</span></label><textarea id="description" maxlength="300" placeholder="'+t('项目亮点 / 技术栈','Highlights / tech stack')+'"></textarea>'
+      + '<label>'+t('队伍名称','Team name')+' <span class="muted">('+t('可选','optional')+')</span></label><input id="teamName" maxlength="80" placeholder="'+t('队名','Team')+'">'
+      + '<label>'+t('联系方式','Contact')+' <span class="muted">('+t('可选,评委联系用','optional, for judges')+')</span></label><input id="contact" maxlength="120" placeholder="'+t('微信 / 邮箱','WeChat / email')+'">'
+      + '<label>'+t('产品截图','Screenshots')+' * <span class="muted">('+CONFIG.minShots+'–'+CONFIG.maxShots+' '+t('张,自动裁切为 16:9,单张≤','imgs, auto-cropped to 16:9, each ≤')+mb+'MB)</span></label>'
       + '<input id="shotFiles" type="file" accept="image/*" multiple>'
       + '<div class="thumbs" id="thumbs"></div>'
-      + '<label>邀请码 * <span class="muted">(主办方发给你队的专属码)</span></label><input id="passcode" placeholder="每队一个,如 HV-xxxxxx">'
-      + '<div class="row" style="margin-top:16px"><button id="submitBtn">提交</button></div>'
+      + '<label>'+t('邀请码','Invite code')+' * <span class="muted">('+t('主办方发给你队的专属码','the code the organizer gave your team')+')</span></label><input id="passcode" placeholder="'+t('每队一个,如 HV-xxxxxx','one per team, e.g. HV-xxxxxx')+'">'
+      + '<div class="row" style="margin-top:16px"><button id="submitBtn">'+t('提交','Submit')+'</button></div>'
       + '<div id="submitMsg"></div>'
       + '</div>';
     $('#shotFiles').addEventListener('change', onShots);
     $('#submitBtn').addEventListener('click', doSubmit);
+    renderThumbs(); // re-show any screenshots kept across a re-render/language toggle
   }
 
   async function onShots(ev){
     const files = [...ev.target.files];
     ev.target.value = '';
     for(const f of files){
-      if(SHOTS.length >= CONFIG.maxShots){ alert('最多 '+CONFIG.maxShots+' 张'); break; }
-      try { SHOTS.push(await compress(f)); } catch(e){ alert('图片处理失败:'+e.message); }
+      if(SHOTS.length >= CONFIG.maxShots){ alert(t('最多 ','Max ')+CONFIG.maxShots+t(' 张','')); break; }
+      try { SHOTS.push(await compress(f)); } catch(e){ alert(t('图片处理失败:','Image error: ')+e.message); }
     }
     renderThumbs();
   }
@@ -1298,14 +1308,15 @@ const APP_HTML = String.raw`<!doctype html>
       videoUrl: $('#videoUrl').value.trim(),
       shots: SHOTS,
     };
-    if(!body.projectName || !body.repoUrl || !body.videoUrl){ setMsg('submitMsg','请填齐产品名、仓库、视频链接',true); return; }
-    if(!body.passcode){ setMsg('submitMsg','请填写邀请码',true); return; }
-    if(SHOTS.length < CONFIG.minShots){ setMsg('submitMsg','请至少上传 '+CONFIG.minShots+' 张截图',true); return; }
-    $('#submitBtn').disabled = true; setMsg('submitMsg','提交中…');
+    if(!body.projectName || !body.repoUrl || !body.videoUrl){ setMsg('submitMsg',t('请填齐产品名、仓库、视频链接','Fill in product name, repo and video link'),true); return; }
+    if(!body.passcode){ setMsg('submitMsg',t('请填写邀请码','Enter your invite code'),true); return; }
+    if(SHOTS.length < CONFIG.minShots){ setMsg('submitMsg',t('请至少上传 ','At least ')+CONFIG.minShots+t(' 张截图',' screenshots required'),true); return; }
+    $('#submitBtn').disabled = true; setMsg('submitMsg',t('提交中…','Submitting…'));
     try {
       const r = await api('/api/submissions',{method:'POST',body});
-      const editLink = location.origin + r.viewUrl;
-      setMsg('submitMsg','提交成功!<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">查看作品</a ><br>编辑令牌(改稿用,请保存):<code>'+esc(r.editToken)+'</code>', false, true);
+      setMsg('submitMsg',t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看作品','View project')+'</a ><br>'+t('编辑令牌(改稿用,请保存):','Edit token (save it to edit later): ')+'<code>'+esc(r.editToken)+'</code>', false, true);
+      SHOTS = []; renderThumbs();
+      ['#projectName','#repoUrl','#videoUrl','#description','#teamName','#contact','#passcode'].forEach(id=>{ const el = $(id); if(el) el.value = ''; });
     } catch(e){ setMsg('submitMsg', e.message, true); }
     finally { $('#submitBtn').disabled = false; }
   }
@@ -1313,11 +1324,11 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- judge login ----------------
   function renderJudge(){
     if(ME.role){ go('/leaderboard'); return; }
-    app.innerHTML = '<h1>评审入口</h1><div class="panel" style="max-width:440px">'
-      + '<p>评委:输入主办方发给你的<b>专属登录码</b>(姓名由码决定)。管理员:输入管理口令。</p>'
-      + '<label>登录码 / 口令 *</label><input id="jCode" placeholder="评委登录码,或管理口令">'
-      + '<label>姓名 <span class="muted">(仅管理员可填)</span></label><input id="jName" maxlength="40" placeholder="管理员姓名(可选)">'
-      + '<div class="row" style="margin-top:14px"><button id="jLogin">登录</button></div>'
+    app.innerHTML = '<h1>'+t('评审入口','Judge login')+'</h1><div class="panel" style="max-width:440px">'
+      + '<p>'+t('评委:输入主办方发给你的<b>专属登录码</b>(姓名由码决定)。管理员:输入管理口令。','Judges: enter your <b>personal login code</b> from the organizer (your name comes from the code). Admin: enter the admin passcode.')+'</p>'
+      + '<label>'+t('登录码 / 口令','Login code / passcode')+' *</label><input id="jCode" placeholder="'+t('评委登录码,或管理口令','judge code, or admin passcode')+'">'
+      + '<label>'+t('姓名','Name')+' <span class="muted">('+t('仅管理员可填','admin only')+')</span></label><input id="jName" maxlength="40" placeholder="'+t('管理员姓名(可选)','admin name (optional)')+'">'
+      + '<div class="row" style="margin-top:14px"><button id="jLogin">'+t('登录','Log in')+'</button></div>'
       + '<div id="jMsg"></div></div>';
     $('#jLogin').addEventListener('click', async ()=>{
       try {
@@ -1330,15 +1341,15 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- leaderboard ----------------
   async function renderLeaderboard(){
     if(!ME.role){ go('/judge'); return; }
-    app.innerHTML = '<div class="row" style="justify-content:space-between"><h1>排行榜</h1>'
-      + (ME.role==='admin'?'<a href="/api/scores/export"><button class="ghost">导出 CSV</button></a >':'')
-      + '</div><div class="panel" id="lb"><p>加载中…</p></div>';
+    app.innerHTML = '<div class="row" style="justify-content:space-between"><h1>'+t('排行榜','Leaderboard')+'</h1>'
+      + (ME.role==='admin'?'<a href="/api/scores/export"><button class="ghost">'+t('导出 CSV','Export CSV')+'</button></a >':'')
+      + '</div><div class="panel" id="lb"><p>'+t('加载中…','Loading…')+'</p></div>';
     try {
       const { rows } = await api('/api/leaderboard');
-      $('#lb').innerHTML = '<table><thead><tr><th>#</th><th>产品</th><th>仓库</th><th>评委数</th><th>平均分(满分40)</th></tr></thead><tbody>'
+      $('#lb').innerHTML = '<table><thead><tr><th>#</th><th>'+t('产品','Product')+'</th><th>'+t('仓库','Repo')+'</th><th>'+t('评委数','Judges')+'</th><th>'+t('平均分(满分40)','Avg (of 40)')+'</th></tr></thead><tbody>'
         + rows.map((r,i)=>'<tr><td class="rank">'+(r.avgTotal==null?'-':i+1)+'</td><td>'+esc(r.projectName)+(r.teamName?' <span class="muted" style="font-size:12px">'+esc(r.teamName)+'</span>':'')+'</td>'
           + '<td class="card-repo"><a href="/p/'+r.id+'" onclick="go(\'/p/'+r.id+'\');return false">'+esc(r.repo)+'</a ></td>'
-          + '<td>'+r.judges+'</td><td><b>'+(r.avgTotal==null?'未评':r.avgTotal)+'</b></td></tr>').join('')
+          + '<td>'+r.judges+'</td><td><b>'+(r.avgTotal==null?t('未评','—'):r.avgTotal)+'</b></td></tr>').join('')
         + '</tbody></table>';
     } catch(e){ $('#lb').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
   }
@@ -1346,23 +1357,23 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- invite codes (admin) ----------------
   async function renderInvites(){
     if(ME.role !== 'admin'){ go('/judge'); return; }
-    app.innerHTML = '<h1>邀请码</h1><p>每队一个,单次有效。生成后发给各队,选手提交时填。</p>'
+    app.innerHTML = '<h1>'+t('邀请码','Invite codes')+'</h1><p>'+t('每队一个,单次有效。生成后发给各队,选手提交时填。','One per team, single-use. Generate, hand out, teams enter it when submitting.')+'</p>'
       + '<div class="panel" style="max-width:640px">'
-      + '<div class="row"><div style="flex:1"><label>生成数量</label><input id="invCount" type="number" min="1" max="500" value="100"></div>'
-      + '<div style="flex:1"><label>前缀</label><input id="invPrefix" maxlength="8" value="HV"></div>'
-      + '<div style="align-self:flex-end"><button id="genBtn">生成</button></div></div>'
+      + '<div class="row"><div style="flex:1"><label>'+t('生成数量','Count')+'</label><input id="invCount" type="number" min="1" max="500" value="100"></div>'
+      + '<div style="flex:1"><label>'+t('前缀','Prefix')+'</label><input id="invPrefix" maxlength="8" value="HV"></div>'
+      + '<div style="align-self:flex-end"><button id="genBtn">'+t('生成','Generate')+'</button></div></div>'
       + '<div id="genOut"></div>'
       + '</div>'
-      + '<div class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">已有邀请码</h2>'
-      + '<button class="ghost" id="copyUnused">复制全部未使用</button></div>'
-      + '<div id="invList" style="margin-top:12px"><p class="muted">加载中…</p></div></div>';
+      + '<div class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">'+t('已有邀请码','Existing codes')+'</h2>'
+      + '<button class="ghost" id="copyUnused">'+t('复制全部未使用','Copy all unused')+'</button></div>'
+      + '<div id="invList" style="margin-top:12px"><p class="muted">'+t('加载中…','Loading…')+'</p></div></div>';
 
     $('#genBtn').addEventListener('click', async ()=>{
       const count = Number($('#invCount').value), prefix = $('#invPrefix').value.trim();
       $('#genBtn').disabled = true;
       try {
         const r = await api('/api/invites',{method:'POST',body:{count,prefix}});
-        $('#genOut').innerHTML = '<div class="notice ok">已生成 '+r.count+' 个,复制发给各队:</div>'
+        $('#genOut').innerHTML = '<div class="notice ok">'+t('已生成 ','Generated ')+r.count+t(' 个,复制发给各队:',' — copy and hand out:')+'</div>'
           + '<textarea readonly rows="6" style="font-family:ui-monospace,monospace">'+r.codes.join('\n')+'</textarea>';
         loadInviteList();
       } catch(e){ $('#genOut').innerHTML = '<div class="notice err">'+esc(e.message)+'</div>'; }
@@ -1370,8 +1381,8 @@ const APP_HTML = String.raw`<!doctype html>
     });
     $('#copyUnused').addEventListener('click', async ()=>{
       const unused = (window.__invites||[]).filter(c=>!c.used).map(c=>c.code);
-      if(!unused.length){ alert('没有未使用的邀请码'); return; }
-      try { await navigator.clipboard.writeText(unused.join('\n')); $('#copyUnused').textContent='已复制 '+unused.length+' 个 ✓'; }
+      if(!unused.length){ alert(t('没有未使用的邀请码','No unused codes')); return; }
+      try { await navigator.clipboard.writeText(unused.join('\n')); $('#copyUnused').textContent=t('已复制 ','Copied ')+unused.length+t(' 个 ✓',' ✓'); }
       catch { alert(unused.join('\n')); }
     });
     loadInviteList();
@@ -1381,7 +1392,7 @@ const APP_HTML = String.raw`<!doctype html>
     try {
       const r = await api('/api/invites');
       window.__invites = r.codes;
-      $('#invList').innerHTML = '<div class="muted" style="margin-bottom:8px">共 '+r.total+' 个,未使用 <b>'+r.unused+'</b> 个</div>'
+      $('#invList').innerHTML = '<div class="muted" style="margin-bottom:8px">'+t('共 ','Total ')+r.total+t(' 个,未使用 ',', unused ')+'<b>'+r.unused+'</b></div>'
         + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px">'
         + r.codes.map(c=>'<code style="padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:'+(c.used?'#f3f4f6;color:#9aa1ac;text-decoration:line-through':'#fff')+'">'+esc(c.code)+'</code>').join('')
         + '</div>';
@@ -1391,24 +1402,24 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- judge codes (admin) ----------------
   async function renderJudges(){
     if(ME.role !== 'admin'){ go('/judge'); return; }
-    app.innerHTML = '<h1>评委登录码</h1><p>每个评委一个专属登录码,码绑定姓名,打分身份用码区分(不会同名互相覆盖)。</p>'
+    app.innerHTML = '<h1>'+t('评委登录码','Judge login codes')+'</h1><p>'+t('每个评委一个专属登录码,码绑定姓名,打分身份用码区分(不会同名互相覆盖)。','One code per judge, bound to a name; scores are keyed by code so same names never overwrite.')+'</p>'
       + '<div class="panel" style="max-width:640px">'
-      + '<label>评委姓名(每行一个)</label><textarea id="jNames" rows="5" placeholder="张三&#10;李四&#10;王五"></textarea>'
-      + '<div class="row" style="margin-top:6px"><div style="flex:1"><label>前缀</label><input id="jPrefix" maxlength="8" value="J"></div>'
-      + '<div style="align-self:flex-end"><button id="jGen">生成登录码</button></div></div>'
+      + '<label>'+t('评委姓名(每行一个)','Judge names (one per line)')+'</label><textarea id="jNames" rows="5" placeholder="'+t('张三&#10;李四&#10;王五','Alice&#10;Bob&#10;Carol')+'"></textarea>'
+      + '<div class="row" style="margin-top:6px"><div style="flex:1"><label>'+t('前缀','Prefix')+'</label><input id="jPrefix" maxlength="8" value="J"></div>'
+      + '<div style="align-self:flex-end"><button id="jGen">'+t('生成登录码','Generate codes')+'</button></div></div>'
       + '<div id="jGenOut"></div></div>'
-      + '<div class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">已有评委</h2>'
-      + '<button class="ghost" id="jCopy">复制全部(姓名+码)</button></div>'
-      + '<div id="jList" style="margin-top:12px"><p class="muted">加载中…</p></div></div>';
+      + '<div class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">'+t('已有评委','Judges')+'</h2>'
+      + '<button class="ghost" id="jCopy">'+t('复制全部(姓名+码)','Copy all (name + code)')+'</button></div>'
+      + '<div id="jList" style="margin-top:12px"><p class="muted">'+t('加载中…','Loading…')+'</p></div></div>';
 
     $('#jGen').addEventListener('click', async ()=>{
       const names = $('#jNames').value.split('\n').map(s=>s.trim()).filter(Boolean);
       const prefix = $('#jPrefix').value.trim();
-      if(!names.length){ alert('请至少输入一个姓名'); return; }
+      if(!names.length){ alert(t('请至少输入一个姓名','Enter at least one name')); return; }
       $('#jGen').disabled = true;
       try {
         const r = await api('/api/judges',{method:'POST',body:{names,prefix}});
-        $('#jGenOut').innerHTML = '<div class="notice ok">已生成 '+r.count+' 个,发给各评委:</div>'
+        $('#jGenOut').innerHTML = '<div class="notice ok">'+t('已生成 ','Generated ')+r.count+t(' 个,发给各评委:',' — hand out to judges:')+'</div>'
           + '<textarea readonly rows="6" style="font-family:ui-monospace,monospace">'+r.judges.map(j=>j.name+'  '+j.code).join('\n')+'</textarea>';
         $('#jNames').value = '';
         loadJudgeList();
@@ -1417,8 +1428,8 @@ const APP_HTML = String.raw`<!doctype html>
     });
     $('#jCopy').addEventListener('click', async ()=>{
       const all = (window.__judges||[]).map(j=>j.name+'  '+j.code).join('\n');
-      if(!all){ alert('还没有评委'); return; }
-      try { await navigator.clipboard.writeText(all); $('#jCopy').textContent='已复制 ✓'; }
+      if(!all){ alert(t('还没有评委','No judges yet')); return; }
+      try { await navigator.clipboard.writeText(all); $('#jCopy').textContent=t('已复制 ✓','Copied ✓'); }
       catch { alert(all); }
     });
     loadJudgeList();
@@ -1429,10 +1440,10 @@ const APP_HTML = String.raw`<!doctype html>
       const r = await api('/api/judges');
       window.__judges = r.judges;
       $('#jList').innerHTML = r.judges.length
-        ? '<table><thead><tr><th>姓名</th><th>登录码</th></tr></thead><tbody>'
+        ? '<table><thead><tr><th>'+t('姓名','Name')+'</th><th>'+t('登录码','Login code')+'</th></tr></thead><tbody>'
           + r.judges.map(j=>'<tr><td>'+esc(j.name)+'</td><td><code>'+esc(j.code)+'</code></td></tr>').join('')
           + '</tbody></table>'
-        : '<p class="muted">还没有评委,上面生成。</p>';
+        : '<p class="muted">'+t('还没有评委,上面生成。','No judges yet — generate above.')+'</p>';
     } catch(e){ $('#jList').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
   }
 
@@ -1468,7 +1479,7 @@ const APP_HTML = String.raw`<!doctype html>
   async function api(path,opts={}){
     const res = await fetch(path,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
     const data = await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(data.error||('请求失败 '+res.status));
+    if(!res.ok) throw new Error(data.error||(t('请求失败 ','Request failed ')+res.status));
     return data;
   }
   </script>
