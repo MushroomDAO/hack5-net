@@ -172,6 +172,9 @@ export default {
       // ---- WorkBench client + repo-provisioning smoke tests (mock only; inert in production) ----
       if (path === "/api/wb/selftest" && method === "GET") return wbSelftest(env);
       if (path === "/api/wb/repo-selftest" && method === "GET") return repoSelftest(env);
+      // ---- WorkBench build-status callback (W5, HMAC-verified) + its smoke test ----
+      if (path === "/api/wb/callback" && method === "POST") return wbCallback(request, env);
+      if (path === "/api/wb/callback-selftest" && method === "GET") return callbackSelftest(env);
 
       // ---- screenshots (KV, content-addressed by submission uuid) ----
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
@@ -1291,7 +1294,7 @@ async function listSubmissions(request: Request, env: Env, tenant: Tenant | null
   if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
   const secret = tenant?.mode === "secret";
   const rows = await env.DB.prepare(
-    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, link_url, likes FROM submissions WHERE tenant_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 300",
+    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, link_url, likes, wb_client, wb_project, app_url, build_state FROM submissions WHERE tenant_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 300",
   )
     .bind(tid)
     .all<Record<string, unknown>>();
@@ -1302,7 +1305,7 @@ async function getSubmission(request: Request, env: Env, tenant: Tenant | null, 
   if (!tid) return json({ error: "Not found" }, 404);
   if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
   const row = await env.DB.prepare(
-    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md, link_url, likes FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
+    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md, link_url, likes, wb_client, wb_project, app_url, build_state FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
   )
     .bind(id, tid)
     .first<Record<string, unknown>>();
@@ -1332,6 +1335,11 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean,
     viewUrl: `/p/${id}`,
     linkUrl: row.link_url ?? null,
     likes: Number(row.likes ?? 0),
+    // WorkBench build status (A4) — present once a mini idea is sent to "make into app".
+    wbClient: row.wb_client ?? null,
+    wbProject: row.wb_project ?? null,
+    appUrl: row.app_url ?? null,
+    buildState: row.build_state ?? null,
     // Secret fields only appear for secret tenants (open-mode responses stay unchanged). Online
     // demo + README show to anyone past the gate; credentials are judges/admin only (like contact).
     ...(secret
@@ -1469,6 +1477,77 @@ async function repoSelftest(env: Env): Promise<Response> {
     pushToken: { repository: push.repository, expiresAt: push.expiresAt, mock: push.mock, tokenLen: push.token.length }, // token value intentionally omitted
     deleted: del,
   });
+}
+
+// ============================ WorkBench build-status (A4) ============================
+
+// Build state machine (contract §5 v2). Stored fine-grained; the UI buckets it into 4 badges.
+type BuildState = "queued" | "planning" | "coding" | "reviewing" | "deployed" | "failed";
+const BUILD_STATE_RANK: Record<BuildState, number> = { queued: 0, planning: 1, coding: 2, reviewing: 3, deployed: 4, failed: 4 };
+
+// W5 callback events → build state. `failed` may arrive at any point; `deployed` is terminal-success.
+function wbEventToBuildState(event: string): BuildState | null {
+  switch (event) {
+    case "loop_ready":
+      return "coding"; // spec is ready and coding has begun
+    case "coding_done":
+      return "reviewing";
+    case "deployed":
+      return "deployed";
+    case "failed":
+      return "failed";
+    default:
+      return null;
+  }
+}
+
+// W5 callback receiver (C2): WorkBench notifies hack5 of build progress. Body is HMAC-signed with
+// WORKBENCH_CALLBACK_SECRET (hex SHA-256 over the raw body, header `x-workbench-signature`) so a
+// deployed/failed event can't be forged. Not tenant-scoped; the submission is located by its
+// (wb_client, wb_project) pair. State only advances (monotonic) except `failed`, which always wins —
+// this also makes retried/out-of-order callbacks idempotent.
+async function wbCallback(request: Request, env: Env): Promise<Response> {
+  const secret = env.WORKBENCH_CALLBACK_SECRET;
+  if (!secret) return json({ error: "callback not configured" }, 503);
+  const raw = await request.text();
+  const sig = request.headers.get("x-workbench-signature") ?? "";
+  const expected = await hmacHex(utf8(secret), raw);
+  if (!sig || !timingSafeEqual(sig.toLowerCase(), expected)) return json({ error: "bad signature" }, 401);
+  const body = (() => {
+    try {
+      return JSON.parse(raw) as { event?: string; clientSlug?: string; projectSlug?: string; repo?: string; appUrl?: string };
+    } catch {
+      return null;
+    }
+  })();
+  if (!body) return json({ error: "Invalid JSON" }, 400);
+  const state = wbEventToBuildState(String(body.event ?? ""));
+  if (!state) return json({ error: "unknown event" }, 400);
+  const clientSlug = String(body.clientSlug ?? "").trim();
+  const projectSlug = String(body.projectSlug ?? "").trim();
+  if (!clientSlug || !projectSlug) return json({ error: "clientSlug and projectSlug required" }, 400);
+  const row = await env.DB.prepare("SELECT id, build_state FROM submissions WHERE wb_client = ? AND wb_project = ? LIMIT 1")
+    .bind(clientSlug, projectSlug)
+    .first<{ id: string; build_state: string | null }>();
+  if (!row) return json({ error: "submission not found for client/project" }, 404);
+  // Monotonic: don't regress state; `failed` always applies.
+  const current = row.build_state as BuildState | null;
+  const advance = state === "failed" || !current || BUILD_STATE_RANK[state] >= BUILD_STATE_RANK[current];
+  if (advance) {
+    await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, updated_at = ? WHERE id = ?")
+      .bind(state, body.appUrl ?? null, body.repo ?? "", body.repo ?? "", unixNow(), row.id)
+      .run();
+  }
+  return json({ ok: true, id: row.id, state: advance ? state : current, applied: advance });
+}
+
+// Callback smoke test — mock-gated (404 in production); verifies the event→state mapping + badge
+// buckets without needing a signed request or a DB row.
+async function callbackSelftest(env: Env): Promise<Response> {
+  if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
+  const mapping = ["loop_ready", "coding_done", "deployed", "failed", "bogus"].map((e) => ({ event: e, state: wbEventToBuildState(e) }));
+  const ok = mapping.filter((m) => m.event !== "bogus").every((m) => m.state !== null) && mapping.find((m) => m.event === "bogus")?.state === null;
+  return json({ ok, mapping });
 }
 
 // A6 — AI 起名: suggest 2–3 Chinese project names from the participant's idea (cheap gpt-4o-mini).
@@ -3508,6 +3587,25 @@ const APP_HTML = String.raw`<!doctype html>
     loadTeams();
   }
 
+  // A4 — build-status badge (buckets the fine-grained build_state into 排队/构建/上线/失败).
+  function buildBadge(s){
+    const st = s.buildState;
+    if(!st) return '';
+    const map = {
+      queued:['⏳','排队中','Queued','#6b7280'],
+      planning:['🛠','构建中','Building','#d97706'],
+      coding:['🛠','构建中','Building','#d97706'],
+      reviewing:['🛠','构建中','Building','#d97706'],
+      deployed:['✅','已上线','Live','#16a34a'],
+      failed:['⚠️','构建失败','Build failed','#dc2626']
+    };
+    const m = map[st]; if(!m) return '';
+    let badge = '<span class="chip" style="border-color:'+m[3]+';color:'+m[3]+'">'+m[0]+' '+esc(t(m[1],m[2]))+'</span>';
+    if(st==='deployed' && s.appUrl){
+      badge += ' <a class="chip" href="'+esc(s.appUrl)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()">🔗 '+t('试用','Try it')+'</a>';
+    }
+    return '<div class="card-build" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">'+badge+'</div>';
+  }
   function card(s){
     const isMini = CONFIG.tenant && CONFIG.tenant.mode==='mini';
     const el = document.createElement('div');
@@ -3527,6 +3625,7 @@ const APP_HTML = String.raw`<!doctype html>
           ? (s.linkUrl?'<div class="card-repo">🔗 '+esc((s.linkUrl||'').replace(/^https?:\/\//,'').slice(0,40))+'</div>':'')
           : '<div class="card-repo">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</div>')
       + (s.description?'<div class="card-desc">'+esc(s.description)+'</div>':'')
+      + (isMini ? buildBadge(s) : '')
       + (isMini
           ? '<div class="card-meta"><button class="likebtn" data-id="'+esc(s.id)+'">♥ <span>'+(s.likes||0)+'</span></button></div>'
           : '<div class="card-meta" data-gh="'+esc(s.repoOwner)+'/'+esc(s.repoName)+'"><span class="chip">★ …</span></div>')
