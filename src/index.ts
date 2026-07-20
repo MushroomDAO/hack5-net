@@ -1512,7 +1512,9 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
   const raw = await request.text();
   const sig = request.headers.get("x-workbench-signature") ?? "";
   const expected = await hmacHex(utf8(secret), raw);
-  if (!sig || !timingSafeEqual(sig.toLowerCase(), expected)) return json({ error: "bad signature" }, 401);
+  // WorkBench signs with a `sha256=` prefix (Self-FDE-WorkBench#35); strip it before comparing.
+  const provided = sig.startsWith("sha256=") ? sig.slice(7) : sig;
+  if (!provided || !timingSafeEqual(provided.toLowerCase(), expected)) return json({ error: "bad signature" }, 401);
   const body = (() => {
     try {
       return JSON.parse(raw) as { event?: string; clientSlug?: string; projectSlug?: string; repo?: string; appUrl?: string };
@@ -1530,12 +1532,16 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
     .bind(clientSlug, projectSlug)
     .first<{ id: string; build_state: string | null }>();
   if (!row) return json({ error: "submission not found for client/project" }, 404);
-  // Monotonic: don't regress state; `failed` always applies.
+  // Monotonic: state only advances. `failed` applies unless the build already reached the terminal
+  // `deployed` — a stale/out-of-order `failed` must not un-deploy a live app. Makes retries idempotent.
   const current = row.build_state as BuildState | null;
-  const advance = state === "failed" || !current || BUILD_STATE_RANK[state] >= BUILD_STATE_RANK[current];
+  const advance = !current || (state === "failed" ? current !== "deployed" : BUILD_STATE_RANK[state] >= BUILD_STATE_RANK[current]);
   if (advance) {
+    // Signed (trusted) source, but validate scheme as defense-in-depth so only http(s) URLs are stored/rendered.
+    const appUrl = body.appUrl && isHttpUrl(body.appUrl) ? body.appUrl : null;
+    const repo = body.repo && isHttpUrl(body.repo) ? body.repo : "";
     await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, updated_at = ? WHERE id = ?")
-      .bind(state, body.appUrl ?? null, body.repo ?? "", body.repo ?? "", unixNow(), row.id)
+      .bind(state, appUrl, repo, repo, unixNow(), row.id)
       .run();
   }
   return json({ ok: true, id: row.id, state: advance ? state : current, applied: advance });
