@@ -166,6 +166,9 @@ export default {
       if (likeMatch && method === "POST") return likeSubmission(request, env, tenant, tid, likeMatch[1]);
       if (path === "/api/tenant/mini/assist" && method === "POST") return miniAssist(request, env, tenant, tid);
       if (path === "/api/tenant/mini/name" && method === "POST") return miniName(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/usage" && method === "GET") return miniUsage(request, env, tenant, tid);
+      // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
+      if (path === "/api/wb/usage-selftest" && method === "GET") return usageSelftest(env);
       // ---- AI naming smoke test (mock only; inert in production) ----
       if (path === "/api/wb/name-selftest" && method === "GET") return nameSelftest(env);
 
@@ -1555,6 +1558,49 @@ async function nameSelftest(env: Env): Promise<Response> {
   return json({ ok: names.length > 0, mock: true, names });
 }
 
+// ============================ WorkBench usage / billing (A7) ============================
+
+// Shape the raw WorkBench usage into a per-participant summary + the mini free-tier note.
+// Read-only display (C4: v1 只记录用量;成本模型 Phase 2). `mini 首场免费,之后累计待结算`.
+function shapeMiniUsage(usage: { global?: { tokens?: number; requests?: number }; perProject?: Record<string, { tokens?: number; requests?: number }>; byClient?: Record<string, { tokens?: number }>; at?: string }) {
+  const perProject = Object.entries(usage.perProject ?? {})
+    .map(([project, v]) => ({ project, tokens: Number(v?.tokens ?? 0), requests: v?.requests ?? null }))
+    .sort((a, b) => b.tokens - a.tokens);
+  return {
+    at: usage.at ?? null,
+    totalTokens: Number(usage.global?.tokens ?? 0),
+    totalRequests: usage.global?.requests ?? null,
+    participants: perProject.length,
+    perProject,
+    byClient: usage.byClient ?? null,
+    // v1 只读:免费/付费由 hack5 侧 DB plan='paid' 控制;这里仅展示用量与额度口径。
+    freeTier: { model: "mini 首场免费,之后按 token 累计待结算 / first event free, then metered", freeEvents: 1 },
+  };
+}
+
+// A7 — mini 计费汇总(只读):按 hackathon(client)/参赛者(project)归集 token 用量。
+async function miniUsage(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const wb = createWorkbench(env);
+  let usage;
+  try {
+    usage = await wb.usage(tenant.subdomain);
+  } catch {
+    return json({ error: "用量暂不可用 / usage unavailable" }, 502);
+  }
+  return json({ ok: true, mock: wb.mock, ...shapeMiniUsage(usage) });
+}
+
+// Usage-shaping smoke test — mock-gated (404 in production).
+async function usageSelftest(env: Env): Promise<Response> {
+  if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
+  const usage = await createWorkbench(env).usage("demo-hackathon");
+  const shaped = shapeMiniUsage(usage);
+  return json({ ok: shaped.totalTokens > 0 && shaped.participants > 0, ...shaped });
+}
+
 // Mini-mode submission: no code required. Any work link (no-code app / site / doc / video) + a
 // one-line description + optional screenshots. Open (no invite code); one per email (edit via token).
 async function createMiniSubmission(request: Request, env: Env, tid: string): Promise<Response> {
@@ -2733,6 +2779,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
          + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/manage\')">'+t('首页','Homepage')+'</button><button class="ghost" onclick="go(\'/poster\')">'+t('海报','Poster')+'</button><button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
+         + (ME.role==='admin' && CONFIG.tenant && CONFIG.tenant.mode==='mini'?'<button class="ghost" onclick="go(\'/usage\')">'+t('用量','Usage')+'</button>':'')
          + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?t('管理','Admin'):t('评委','Judge'))+'</span>'
          + '<button onclick="logout()">'+t('退出','Logout')+'</button>';
     } else {
@@ -2767,6 +2814,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/about') return renderAbout();
     if(p === '/start') return renderStart();
     if(p === '/leaderboard') return renderLeaderboard();
+    if(p === '/usage') return renderMiniUsage();
     if(p === '/invites') return renderInvites();
     if(p === '/judges') return renderJudges();
     if(p === '/manage') return renderTenantEdit();
@@ -3924,6 +3972,24 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   // ---------------- leaderboard ----------------
+  async function renderMiniUsage(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    app.innerHTML = '<h1>'+t('用量与计费','Usage & billing')+'</h1>'
+      + '<div class="notice">'+t('只读:mini 首场免费,之后按 token 累计待结算。真实用量需 WorkBench 联调后显示。','Read-only: first mini event free, then metered. Real figures appear after WorkBench integration.')+'</div>'
+      + '<div id="usageBox" class="panel"><p>'+t('加载中…','Loading…')+'</p></div>';
+    try{
+      const u = await api('/api/tenant/mini/usage');
+      const rows = (u.perProject||[]).map(p=>'<tr><td>'+esc(p.project)+'</td><td style="text-align:right">'+Number(p.tokens||0).toLocaleString()+'</td><td style="text-align:right">'+(p.requests==null?'—':p.requests)+'</td></tr>').join('');
+      $('#usageBox').innerHTML =
+        '<div class="row" style="gap:20px;flex-wrap:wrap;align-items:flex-end">'
+        + '<div><div class="muted">'+t('总 token','Total tokens')+'</div><div style="font-size:26px;font-weight:700">'+Number(u.totalTokens||0).toLocaleString()+'</div></div>'
+        + '<div><div class="muted">'+t('参赛者','Participants')+'</div><div style="font-size:26px;font-weight:700">'+(u.participants||0)+'</div></div>'
+        + (u.mock?'<span class="chip" style="border-color:#d97706;color:#d97706">mock</span>':'')
+        + '</div>'
+        + '<table style="width:100%;margin-top:14px;border-collapse:collapse"><thead><tr><th style="text-align:left;border-bottom:1px solid var(--line,#333)">'+t('参赛作品','Project')+'</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">token</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">'+t('请求','Requests')+'</th></tr></thead><tbody>'+(rows||'<tr><td colspan="3" class="muted">'+t('暂无用量','No usage yet')+'</td></tr>')+'</tbody></table>'
+        + '<div class="muted" style="margin-top:10px">'+esc(u.freeTier?u.freeTier.model:'')+(u.at?' · '+esc(u.at):'')+'</div>';
+    }catch(e){ $('#usageBox').innerHTML = '<p class="muted">'+esc(e.message)+'</p>'; }
+  }
   async function renderLeaderboard(){
     if(!ME.role){ go('/judge'); return; }
     app.innerHTML = '<div class="row" style="justify-content:space-between"><h1>'+t('排行榜','Leaderboard')+'</h1>'
