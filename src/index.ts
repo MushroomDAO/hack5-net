@@ -2909,6 +2909,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/share') return renderShare();
     if(p === '/teams') return renderTeams();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
+    if((m = p.match(/^\/s\/([^/]+)$/))) return renderDetail(m[1]); // A5 — mini work detail page
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
     app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
   }
@@ -3730,7 +3731,10 @@ const APP_HTML = String.raw`<!doctype html>
     app.innerHTML =
       '<div class="row" style="justify-content:space-between;margin-bottom:14px">'
       + '<button class="ghost" onclick="go(\'/\')">← '+t('返回作品墙','Back to gallery')+'</button>'
-      + '<a class="row" href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener"><button>'+t('查看代码','View code')+' ↗</button></a >'
+      + '<div class="row" style="gap:8px">'
+      + '<button class="ghost" id="dShare">🔗 '+t('分享','Share')+'</button>'
+      + (s.repoUrl?'<a class="row" href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener"><button>'+t('查看代码','View code')+' ↗</button></a >':'')
+      + '</div>'
       + '</div>'
       + '<div class="detail-grid">'
       + '<div>'
@@ -3743,6 +3747,11 @@ const APP_HTML = String.raw`<!doctype html>
       + '<h2>'+esc(s.projectName)+'</h2>'
       + (s.teamName?'<div class="muted">👥 '+esc(s.teamName)+'</div>':'')
       + (s.description?'<p style="color:var(--ink2)">'+esc(s.description)+'</p>':'')
+      // A5 — WorkBench build block: status badge + 在线试用(app_url)+ 公有仓库(repo_url), only when set.
+      + ((s.buildState||s.appUrl||s.wbClient) ? buildBadge(s)
+          + (s.appUrl?'<div class="kv"><span>'+t('在线试用','Try it live')+'</span><b><a href="'+esc(s.appUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
+          + (s.repoUrl?'<div class="kv"><span>'+t('公有仓库','Public repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
+        : '')
       + (s.secret && s.demoUrl?'<div class="kv"><span>'+t('在线 Demo','Live demo')+'</span><b><a href="'+esc(s.demoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
       + (s.secret && s.demoUser?'<div class="kv"><span>'+t('Demo 账号','Demo user')+'</span><b>'+esc(s.demoUser)+'</b></div>':'')
       + (s.secret && s.demoPass?'<div class="kv"><span>'+t('Demo 密码','Demo pass')+'</span><b>'+esc(s.demoPass)+'</b></div>':'')
@@ -3763,6 +3772,8 @@ const APP_HTML = String.raw`<!doctype html>
 
     // detail like button (mini)
     const dl=$('#dLike'); if(dl) dl.addEventListener('click', async ()=>{ try{ const r=await api('/api/submissions/'+s.id+'/like',{method:'POST',body:{}}); dl.querySelector('span').textContent=r.likes; dl.classList.add('liked'); }catch(e){} });
+    // share (A5) — native share sheet, fallback to clipboard copy of the /s/<id> link
+    const sh=$('#dShare'); if(sh) sh.addEventListener('click', async ()=>{ const url=location.origin+'/s/'+s.id; try{ if(navigator.share){ await navigator.share({title:s.projectName,url}); } else { await navigator.clipboard.writeText(url); const o=sh.textContent; sh.textContent='✓ '+t('已复制','Copied'); setTimeout(()=>{sh.textContent=o;},1500); } }catch(e){} });
     // github meta — skipped for secret (private repo) and mini (no repo)
     if(!s.secret && !s.linkUrl) api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
       $('#ghMeta').innerHTML =
