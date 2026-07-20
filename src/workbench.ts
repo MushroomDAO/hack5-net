@@ -113,6 +113,7 @@ export interface CommitInput {
   projectSlug: string;
   push: boolean;
   repo?: string; // W2: target repo remote URL
+  pushToken?: string; // B2: repo-scoped short-lived push token, used only at the push boundary (secret)
 }
 export interface PlanInput {
   clientSlug: string;

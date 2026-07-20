@@ -1567,8 +1567,22 @@ async function callbackSelftest(env: Env): Promise<Response> {
 // Multi-turn chat with WorkBench (fde-copilot). On the first call we create the client (hackathon)
 // + project (idea); subsequent calls pass their slugs back. chat carries the hack5-signed scoped
 // token (B3). Returns readiness (score, loop_ready) so the UI can show progress toward "ready".
+// Best-effort daily counter in KV (same read-modify-write pattern as miniAssist). false → over cap.
+async function bumpDailyCap(env: Env, key: string, cap: number, ttlDays = 2): Promise<boolean> {
+  const used = Number((await env.SHOTS.get(key)) ?? "0");
+  if (used >= cap) return false;
+  await env.SHOTS.put(key, String(used + 1), { expirationTtl: ttlDays * 86400 });
+  return true;
+}
+
 async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  // Public/anonymous mini: bound WorkBench LLM cost with per-IP + per-tenant daily caps.
+  const day = Math.floor(unixNow() / 86400);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
+  if (!(await bumpDailyCap(env, `miniapp:chat:${tid}:ip:${ipHash}:${day}`, 40))) return json({ error: "今日对话次数已达上限,请明天再来 / Daily chat limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:chat:${tid}:${day}`, 400))) return json({ error: "本场今日对话已达上限 / Event daily chat limit reached" }, 429);
   const body = await request.json<{ clientSlug?: string; projectSlug?: string; input?: string; projectName?: string }>().catch(() => null);
   const input = String(body?.input ?? "").trim().slice(0, 1000);
   if (!input) return json({ error: "请说说你的想法 / Describe your idea" }, 400);
@@ -1577,8 +1591,15 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
   let projectSlug = String(body?.projectSlug ?? "").trim();
   try {
     if (!clientSlug) {
-      const c = await wb.createClient({ name: tenant.name || tenant.subdomain, background: "hack5 mini hackathon" });
-      clientSlug = c.client.slug;
+      // One WorkBench client per hackathon (tenant) — reuse it rather than creating one per chat.
+      const cached = await env.SHOTS.get(`miniapp:wbclient:${tid}`);
+      if (cached) {
+        clientSlug = cached;
+      } else {
+        const c = await wb.createClient({ name: tenant.name || tenant.subdomain, background: "hack5 mini hackathon" });
+        clientSlug = c.client.slug;
+        await env.SHOTS.put(`miniapp:wbclient:${tid}`, clientSlug, { expirationTtl: 30 * 86400 });
+      }
     }
     if (!projectSlug) {
       const pname = String(body?.projectName ?? input).trim().slice(0, 40) || "idea";
@@ -1610,20 +1631,33 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   if (!nameCheck.ok || !nameCheck.name) return json({ error: nameCheck.error || "仓库名不合法 / Invalid repo name" }, 400);
   const repoName = nameCheck.name;
 
+  const owner = "mini";
+  const repoKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
+  // Per-participant free quota: mini gives 1 free build per email; beyond that requires payment
+  // (anonymous mini has no login, so email is the identity — same key as the submission identity).
+  const launchKey = `miniapp:launch:${tid}:${repoKey}`;
+  const launched = Number((await env.SHOTS.get(launchKey)) ?? "0");
+  const FREE_LAUNCHES = 1;
+  if (launched >= FREE_LAUNCHES) {
+    return json({ error: "免费额度已用完(每人首场免费),请充值后再生成 / Free quota used — top up to build more", pricingUrl: "/pricing" }, 402);
+  }
+
   const wb = createWorkbench(env);
   let repo, jobId: string, queuePos: number;
   try {
     repo = await createParticipantRepo(env, repoName, { description: idea || projectName });
-    await wb.commit({ clientSlug, projectSlug, push: true, repo: repo.cloneUrl });
+    // B2: mint a repo-scoped, short-lived push token and hand it only to the commit/push boundary.
+    const push = await mintRepoScopedPushToken(env, repoName);
+    await wb.commit({ clientSlug, projectSlug, push: true, repo: repo.cloneUrl, pushToken: push.token });
     jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl })).jobId;
     queuePos = (await wb.run(jobId)).queuePos;
   } catch {
     return json({ error: "建仓或触发编码失败,请稍后再试 / Provisioning failed" }, 502);
   }
+  // Count this build against the participant's quota only after successful provisioning.
+  await env.SHOTS.put(launchKey, String(launched + 1), { expirationTtl: 400 * 86400 });
 
   const now = unixNow();
-  const owner = "mini";
-  const repoKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
   const existing = await env.DB.prepare("SELECT id, edit_token FROM submissions WHERE tenant_id = ? AND repo_owner = ? AND repo_name = ?")
     .bind(tid, owner, repoKey)
     .first<{ id: string; edit_token: string }>();
