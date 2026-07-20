@@ -1,6 +1,7 @@
 import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
 import { createWorkbench, workbenchMockEnabled, mintScopedChatToken } from "./workbench";
+import { createParticipantRepo, mintRepoScopedPushToken, deleteParticipantRepo, validateRepoName, repoBotMockEnabled } from "./participant-repo";
 
 interface Env {
   DB: D1Database;
@@ -39,6 +40,13 @@ interface Env {
   WORKBENCH_TOKEN?: string; // admin orchestration token (B3)
   WORKBENCH_CALLBACK_SECRET?: string; // HMAC key to verify inbound W5 callbacks (C2)
   WORKBENCH_MOCK?: string; // "1" forces offline mock data
+  // ---- Mini participant public-repo provisioning (B2, CC-51) ----
+  GITHUB_BOT_TOKEN?: string; // isolated bot account/org credential (CF secret) — create/delete repos
+  GITHUB_BOT_OWNER?: string; // bot login owning the repos (default hack5-mini-bot)
+  GITHUB_BOT_IS_ORG?: string; // "1" if the bot owner is an org
+  GITHUB_APP_ID?: string; // GitHub App for repo-scoped short-lived push tokens
+  GITHUB_APP_PRIVATE_KEY?: string; // PKCS#8 PEM
+  GITHUB_APP_INSTALLATION_ID?: string;
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
@@ -158,8 +166,9 @@ export default {
       if (likeMatch && method === "POST") return likeSubmission(request, env, tenant, tid, likeMatch[1]);
       if (path === "/api/tenant/mini/assist" && method === "POST") return miniAssist(request, env, tenant, tid);
 
-      // ---- WorkBench client smoke test (mock only; inert in production) ----
+      // ---- WorkBench client + repo-provisioning smoke tests (mock only; inert in production) ----
       if (path === "/api/wb/selftest" && method === "GET") return wbSelftest(env);
+      if (path === "/api/wb/repo-selftest" && method === "GET") return repoSelftest(env);
 
       // ---- screenshots (KV, content-addressed by submission uuid) ----
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
@@ -1427,6 +1436,35 @@ async function wbSelftest(env: Env): Promise<Response> {
     status,
     usage,
     scopedToken: { format: "base64url(payloadJson).base64url(hmac_sha256(payloadBytes))", claim: scopedClaim, payloadLen: scopedPayload.length, sigLen: scopedSig.length },
+  });
+}
+
+// Participant repo provisioning smoke test — validates the B2 whitelist and runs a mock
+// create → mint repo-scoped push token → delete round-trip. Strictly gated on WORKBENCH_MOCK=1
+// (404 in production). Never returns the token itself, only proof-of-shape (length), to keep the
+// "tokens never leak to logs/responses" discipline visible. Not tenant-scoped.
+async function repoSelftest(env: Env): Promise<Response> {
+  if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
+  // Whitelist: these must all be rejected.
+  const badNames = ["", "UPPER", "-lead", "trailing-", "has_underscore", "a/b", "空格 name", "x".repeat(40), "汉字名"];
+  const rejected = badNames.map((n) => ({ name: n, ok: validateRepoName(n).ok }));
+  const allRejected = rejected.every((r) => r.ok === false);
+  // Whitelist: these must all be accepted.
+  const goodNames = ["a", "app1", "neighborhood-groupbuy", "x".repeat(39)];
+  const accepted = goodNames.map((n) => ({ name: n.length > 12 ? n.slice(0, 6) + "…(" + n.length + ")" : n, ok: validateRepoName(n).ok }));
+  const allAccepted = accepted.every((r) => r.ok === true);
+
+  // Mock create → token → delete round-trip.
+  const repo = await createParticipantRepo(env, "neighborhood-groupbuy", { description: "mini demo" });
+  const push = await mintRepoScopedPushToken(env, repo.name);
+  const del = await deleteParticipantRepo(env, repo.name);
+  return json({
+    ok: allRejected && allAccepted && del.deleted,
+    mock: repoBotMockEnabled(env),
+    whitelist: { allRejected, allAccepted, rejected, accepted },
+    repo,
+    pushToken: { repository: push.repository, expiresAt: push.expiresAt, mock: push.mock, tokenLen: push.token.length }, // token value intentionally omitted
+    deleted: del,
   });
 }
 
