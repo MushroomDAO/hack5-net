@@ -1,6 +1,6 @@
 import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
-import { createWorkbench, workbenchMockEnabled } from "./workbench";
+import { createWorkbench, workbenchMockEnabled, mintScopedChatToken } from "./workbench";
 
 interface Env {
   DB: D1Database;
@@ -1408,6 +1408,11 @@ async function wbSelftest(env: Env): Promise<Response> {
   const run = await wb.run(jobId);
   const status = await wb.status(jobId);
   const usage = await wb.usage(client.slug);
+  // B3 scoped chat token — decode the payload to prove it matches WorkBench verifyScopedToken
+  // (claim {client,project,exp}; token = base64url(payload).base64url(hmac)). Token value itself omitted.
+  const scoped = await mintScopedChatToken(env, client.slug, project.slug, 3600);
+  const [scopedPayload, scopedSig] = scoped.split(".");
+  const scopedClaim = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(scopedPayload.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0))));
   return json({
     ok: true,
     mock: wb.mock,
@@ -1421,6 +1426,7 @@ async function wbSelftest(env: Env): Promise<Response> {
     run,
     status,
     usage,
+    scopedToken: { format: "base64url(payloadJson).base64url(hmac_sha256(payloadBytes))", claim: scopedClaim, payloadLen: scopedPayload.length, sigLen: scopedSig.length },
   });
 }
 

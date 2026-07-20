@@ -18,8 +18,9 @@ export interface WorkbenchEnv {
   WORKBENCH_BASE_URL?: string; // e.g. https://self-fde-workbench.example
   WORKBENCH_TOKEN?: string; // admin orchestration token (B3)
   WORKBENCH_CALLBACK_SECRET?: string; // HMAC key to verify inbound W5 callbacks (used elsewhere)
+  WORKBENCH_SCOPED_SECRET?: string; // shared HMAC key for scoped chat tokens (B3); must equal WorkBench's
   WORKBENCH_MOCK?: string; // "1" forces the offline mock
-  AUTH_SECRET?: string; // pepper used to sign scoped chat tokens (B3)
+  AUTH_SECRET?: string; // fallback signing key for scoped chat tokens when WORKBENCH_SCOPED_SECRET unset
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +53,9 @@ export interface WbChatResult {
 
 export interface WbCommitResult {
   pushed: boolean;
-  sha: string;
+  committed?: boolean;
+  sha?: string; // absent when committed but not pushed
+  detail?: string;
   repo?: string;
   [k: string]: unknown;
 }
@@ -151,35 +154,40 @@ export function slugify(input: string, fallback = "x"): string {
   return ascii || fallback;
 }
 
-async function hmacHex(key: string, data: string): Promise<string> {
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey("raw", enc.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(data));
-  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+async function hmacBytes(key: string, data: Uint8Array): Promise<Uint8Array> {
+  const cryptoKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, data);
+  return new Uint8Array(sig);
 }
 
-function b64url(input: string): string {
-  return btoa(input).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+function b64urlFromBytes(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-// B3: hack5-signed scoped chat token. Claim pins client/project path + expiry, HMAC-signed
-// with AUTH_SECRET. WorkBench verifies the signature and that the claim matches the request
-// subtree. Format: base64url(JSON claim) + "." + hmacHex(claim).
+// B3: hack5-signed scoped chat token. Claim pins client/project path + expiry; hack5 is the sole
+// issuer, WorkBench only verifies. Format MUST match WorkBench's verifyScopedToken (Self-FDE-WorkBench#33):
+//   token       = base64url(payloadBytes) + "." + base64url(HMAC_SHA256(secret, payloadBytes))
+//   payloadJson = {"client","project","exp"?}   (HMAC is over the JSON UTF-8 bytes, not the b64url string)
+// Signing key is the shared WORKBENCH_SCOPED_SECRET (falls back to AUTH_SECRET for local/dev); both
+// sides must hold the same value.
 export async function mintScopedChatToken(
   env: WorkbenchEnv,
   clientSlug: string,
   projectSlug: string,
   ttlSeconds = 3600,
 ): Promise<string> {
-  const secret = env.AUTH_SECRET;
-  if (!secret) throw new Error("AUTH_SECRET required to sign scoped chat token");
-  const claim = JSON.stringify({
-    c: clientSlug,
-    p: projectSlug,
+  const secret = env.WORKBENCH_SCOPED_SECRET ?? env.AUTH_SECRET;
+  if (!secret) throw new Error("WORKBENCH_SCOPED_SECRET (or AUTH_SECRET) required to sign scoped chat token");
+  const payloadJson = JSON.stringify({
+    client: clientSlug,
+    project: projectSlug,
     exp: Math.floor(Date.now() / 1000) + Math.max(60, ttlSeconds),
   });
-  const payload = b64url(claim);
-  const sig = await hmacHex(secret, payload);
+  const payloadBytes = new TextEncoder().encode(payloadJson);
+  const payload = b64urlFromBytes(payloadBytes);
+  const sig = b64urlFromBytes(await hmacBytes(secret, payloadBytes));
   return `${payload}.${sig}`;
 }
 
@@ -280,7 +288,14 @@ function createMockClient(env: WorkbenchEnv): WorkbenchClient {
       };
     },
     async commit(input) {
-      return { pushed: Boolean(input.push), sha: "mock" + slugify(input.projectSlug, "sha").slice(0, 7), repo: input.repo, mock: true };
+      return {
+        committed: true,
+        pushed: Boolean(input.push),
+        sha: "mock" + slugify(input.projectSlug, "sha").slice(0, 7),
+        detail: input.push ? "mock committed + pushed" : "mock committed (not pushed)",
+        repo: input.repo,
+        mock: true,
+      };
     },
     async plan(input) {
       return { jobId: `mock-${slugify(input.clientSlug, "c")}-${slugify(input.projectSlug, "p")}` };
