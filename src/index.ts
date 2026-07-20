@@ -39,7 +39,7 @@ interface Env {
   WORKBENCH_BASE_URL?: string; // fde-copilot/loop-engineer base URL (unset → mock)
   WORKBENCH_TOKEN?: string; // admin orchestration token (B3)
   WORKBENCH_CALLBACK_SECRET?: string; // HMAC key to verify inbound W5 callbacks (C2)
-  WORKBENCH_MOCK?: string; // "1" forces offline mock data
+  WORKBENCH_MOCK?: string; // "1" forces offline mock data (WorkBench client, AI naming self-test, ...)
   // ---- Mini participant public-repo provisioning (B2, CC-51) ----
   GITHUB_BOT_TOKEN?: string; // isolated bot account/org credential (CF secret) — create/delete repos
   GITHUB_BOT_OWNER?: string; // bot login owning the repos (default hack5-mini-bot)
@@ -165,6 +165,9 @@ export default {
       const likeMatch = path.match(/^\/api\/submissions\/([^/]+)\/like$/);
       if (likeMatch && method === "POST") return likeSubmission(request, env, tenant, tid, likeMatch[1]);
       if (path === "/api/tenant/mini/assist" && method === "POST") return miniAssist(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/name" && method === "POST") return miniName(request, env, tenant, tid);
+      // ---- AI naming smoke test (mock only; inert in production) ----
+      if (path === "/api/wb/name-selftest" && method === "GET") return nameSelftest(env);
 
       // ---- WorkBench client + repo-provisioning smoke tests (mock only; inert in production) ----
       if (path === "/api/wb/selftest" && method === "GET") return wbSelftest(env);
@@ -1466,6 +1469,90 @@ async function repoSelftest(env: Env): Promise<Response> {
     pushToken: { repository: push.repository, expiresAt: push.expiresAt, mock: push.mock, tokenLen: push.token.length }, // token value intentionally omitted
     deleted: del,
   });
+}
+
+// A6 — AI 起名: suggest 2–3 Chinese project names from the participant's idea (cheap gpt-4o-mini).
+// Reuses the miniAssist rate-limit + daily quota pattern. Mock (WORKBENCH_MOCK=1) returns
+// deterministic offline names so the flow is testable via wrangler dev with no OpenAI billing.
+async function generateMiniNames(env: Env, idea: string, link: string): Promise<string[]> {
+  if (env.WORKBENCH_MOCK === "1") {
+    const base = idea.replace(/[\s，。,.]+/g, "").slice(0, 4) || "作品";
+    return [`${base}小助手`, `一键${base}`, `${base}Go`].map((s) => s.slice(0, 12));
+  }
+  const prompt =
+    `你是取名助手。为下面这个黑客松作品想法起 3 个中文项目名,每个 2–8 个字,好记、具体、不浮夸。` +
+    `想法:${idea || "(未描述)"}。` +
+    (link ? `参考链接:${link}。` : "") +
+    ` 只输出一个 JSON 字符串数组,例如 ["邻里团","楼下拼","一键凑单"],不要解释、不要多余文字。`;
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], max_tokens: 120, temperature: 0.9 }),
+  });
+  if (!resp.ok) {
+    console.log("mini name error", resp.status, (await resp.text().catch(() => "")).slice(0, 200));
+    throw new Error("openai");
+  }
+  const data = await resp.json<{ choices?: { message?: { content?: string } }[] }>().catch(() => null);
+  return parseNameList(String(data?.choices?.[0]?.message?.content ?? ""));
+}
+
+// Robustly extract up to 3 names from a model reply (prefers a JSON array; falls back to lines).
+function parseNameList(raw: string): string[] {
+  let names: string[] = [];
+  const m = raw.match(/\[[\s\S]*\]/);
+  if (m) {
+    try {
+      const arr = JSON.parse(m[0]);
+      if (Array.isArray(arr)) names = arr.map((x) => String(x));
+    } catch {
+      /* fall through to line parsing */
+    }
+  }
+  if (!names.length) {
+    names = raw.split(/[\n,、,]+/).map((s) => s.replace(/^[\s\d.。、)）"'“”*\-]+/, ""));
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const n of names) {
+    const clean = n.replace(/["'“”]/g, "").trim().slice(0, 20);
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+async function miniName(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const mock = env.WORKBENCH_MOCK === "1";
+  if (!env.OPENAI_API_KEY && !mock) return json({ error: "AI 未开通 / AI not enabled" }, 503);
+  const body = await request.json<{ idea?: string; name?: string; link?: string }>().catch(() => null);
+  const idea = String(body?.idea ?? body?.name ?? "").trim().slice(0, 300);
+  const link = String(body?.link ?? "").trim().slice(0, 300);
+  if (!idea && !link) return json({ error: "请先描述你的想法 / Describe your idea first" }, 400);
+  const day = Math.floor(unixNow() / 86400);
+  const capKey = `mininame:${tid}:${day}`;
+  const used = Number((await env.SHOTS.get(capKey)) ?? "0");
+  if (used >= 60) return json({ error: "今日 AI 次数已用完 / Daily AI limit reached" }, 429);
+  await env.SHOTS.put(capKey, String(used + 1), { expirationTtl: 2 * 86400 });
+  let names: string[];
+  try {
+    names = await generateMiniNames(env, idea, link);
+  } catch {
+    return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
+  }
+  if (!names.length) return json({ error: "生成失败 / Failed" }, 502);
+  return json({ ok: true, names });
+}
+
+// AI-naming smoke test — mock-gated (404 in production); lets wrangler dev exercise the parse/shape.
+async function nameSelftest(env: Env): Promise<Response> {
+  if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
+  const names = await generateMiniNames(env, "帮小区做团购的小工具", "");
+  return json({ ok: names.length > 0, mock: true, names });
 }
 
 // Mini-mode submission: no code required. Any work link (no-code app / site / doc / video) + a
@@ -3653,6 +3740,8 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="notice">'+t('Mini 赛:不用写代码,交一个作品链接就行 —— no-code 应用 / 网站 / 文档 / 视频都可以。','Mini track: no coding — just submit a work link (no-code app / site / doc / video).')+'</div>'
       + '<div class="panel" style="max-width:640px">'
       + '<label>'+t('作品名称','Product name')+' *</label><input id="mProj" maxlength="80">'
+      + '<div class="row" style="margin-top:6px"><button class="ghost" id="mNameAI">✨ '+t('AI 帮我起名','AI names it')+'</button><span id="mNameMsg" class="muted"></span></div>'
+      + '<div id="mNames" class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px"></div>'
       + '<label>'+t('作品链接','Work link')+' *</label><input id="mLink" placeholder="https://...">'
       + '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">'+t('(可让 AI 帮你写)','(AI can help)')+'</span></label>'
       + '<textarea id="mDesc" rows="3" maxlength="300" placeholder="'+t('你的作品是做什么的?','What does it do?')+'"></textarea>'
@@ -3664,6 +3753,19 @@ const APP_HTML = String.raw`<!doctype html>
       + '</div>';
     SHOTS = [];
     $('#mShots').addEventListener('change', async ev=>{ const files=[...ev.target.files]; ev.target.value=''; for(const f of files){ if(SHOTS.length>=CONFIG.maxShots){ alert(t('最多 ','Max ')+CONFIG.maxShots); break; } try{ SHOTS.push(await compress(f)); }catch(e){ alert(t('图片处理失败','Image error')); } } renderMiniThumbs(); });
+    $('#mNameAI').addEventListener('click', async ()=>{
+      const idea=($('#mDesc').value.trim()||$('#mProj').value.trim()), link=$('#mLink').value.trim();
+      if(!idea && !link){ setMsg('mNameMsg', t('先写点想法/简介或链接','Add an idea or link first'), true); return; }
+      $('#mNameAI').disabled=true; setMsg('mNameMsg', t('起名中…','Naming…'));
+      try{
+        const r=await api('/api/tenant/mini/name',{method:'POST',body:{idea,link}});
+        const names=r.names||[];
+        $('#mNames').innerHTML = names.map(n=>'<button type="button" class="ghost" data-n="'+esc(n)+'">'+esc(n)+'</button>').join('');
+        $('#mNames').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ $('#mProj').value=b.dataset.n; setMsg('mNameMsg', t('✓ 已填入,可再改','✓ filled, edit as you like')); }));
+        setMsg('mNameMsg', names.length? t('点一个填入','tap one to use') : t('没想出来,再试一次','try again'));
+      }catch(e){ setMsg('mNameMsg', e.message, true); }
+      $('#mNameAI').disabled=false;
+    });
     $('#mAI').addEventListener('click', async ()=>{
       const name=$('#mProj').value.trim(), link=$('#mLink').value.trim();
       if(!name && !link){ setMsg('mAIMsg', t('先填作品名或链接','Add a name or link first'), true); return; }
