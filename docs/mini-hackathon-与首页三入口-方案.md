@@ -88,11 +88,41 @@ ALTER TABLE submissions ADD COLUMN link_url TEXT;   -- mini:任意作品链接(n
 3. **付费 = 后付费(需充值),每人 1 次免费**:每个用户可**免费办 1 场 mini**;之后需**充值后付费**;可由**赞助商代付**。→ 复用 users.quota 思路,给 mini 单独计免费额度 + 充值/赞助入口(计费细节 Phase 2)。
 4. **规模 = 软建议 ~50 人以下**:5 队只是参考,不做硬上限;发起页/文档建议「50 人以下用 mini,更大用常规」,不强制拦截。
 
-### 8. (探索中)对接 AuraAI WorkBench:非开发者"想法→自动建应用"
-方向:mini 参赛者(非开发者)在 hack5 里**输入想法** → 调用 AuraAI 的 **WorkBench / loop-engineer**(线上 workbench.idoris.ai)**生成 spec 并部署代码** → 每个 mini hackathon 一个**代码子目录/子仓库**。token 由 WorkBench 提供,**后付费出账单**。
-- 现状:正在彻底研究 `/Users/jason/Dev/auraai/Self-FDE-WorkBench`(loop-engineer 引擎、DEPLOY-PLATFORM、经济/token 模型、对外接口)。
-- 待研究结论出来后补:对接方式(API/webhook?)、子目录 vs 子仓库、计费打通、给 WorkBench 提的诉求清单。
-- 这条让 mini 从"交个链接"升级为"**AI 帮你把想法直接做成能跑的应用**"——正是 Mini「为非开发者提供工具辅助」的终极形态。
+### 8. 对接 AuraAI WorkBench:非开发者"想法→自动建应用"(已调研)
+
+**愿景**:mini 参赛者(非开发者)输入一句想法 → WorkBench 追问补全 → 生成规格 → 自动编码 → 部署成能跑的应用,每个 mini hackathon 一个代码子目录 / 子仓库。这让 mini 从"交个链接"升级为"**AI 帮你把想法直接做成应用**"——Mini「工具托着走」的终极形态。
+
+**WorkBench 是什么**(`/Users/jason/Dev/auraai/Self-FDE-WorkBench`,线上 workbench.idoris.ai = 静态落地页):一条三段流水线,一个仓库三个子项目——
+- `fde-copilot`(Next.js + Claude Agent SDK):**想法 → 规格**。数据模型 `clients/<client>/projects/<project>/`,天然多项目目录隔离。**有 HTTP API 且带 `x-workbench-token` 鉴权**。
+- `loop-engineer`(TS CLI):**规格 → 代码**。planner(Claude 订阅)+ coder(GLM)+ 跨模型评审(Kimi/DeepSeek),worktree 隔离、质量闸全绿才合进 integration 分支、人守 main。**没有 HTTP API,靠文件驱动**:丢一个 `loop.json` 进 watchDirs,`pnpm run run` 触发。
+- `capability-packs`:原子能力(生成/发布/研究)。
+- **运行前提硬**:依赖常驻 Mac Mini(本地 claude login + `claude -p` 子进程 + 便宜模型 key),不能 serverless。
+
+**契合点(现成的)**:
+- fde-copilot 的 `clients/<hackathon>/projects/<idea>/` = **一场黑客松一个 client、每个想法一个 project**,目录级隔离,正好对上"每场一个子目录"。
+- `POST /api/chat` 就是"非开发者输入想法 → 追问 → 生成规格",还自动区分"AI 能查的" vs "要问人的",非常适合黑客松模糊输入。
+- 每 project 独立 token 账本(`state.json` / `GET /api/usage`)——天然能算"每支队伍用了多少 token"。
+
+**缺口(hack5 要补的胶水,约 60%)**:
+1. loop-engineer **无编排 API**——要么 hack5 在后端机上写 `loop.json` 到 watchDirs 再调 `pnpm run run`,要么给它加一层薄 HTTP wrapper。
+2. **"每个想法建一个子仓库 + 部署上线"没有自动化**——loop-engineer 只做到合并 integration 分支 + 尽力 `gh pr create`,不含部署。要 `gh repo create` per idea + 跑完触发 `wrangler pages deploy`。这是双方对接工作量的大头。
+3. **多租户鉴权隔离**是明确的"后续工程"(现在单个 `WORKBENCH_TOKEN`);D1 决策里"生成类可中心化多租户"没被否,方向对但未实现。
+4. **并发**:v0 单 repo 串行一次一任务,几十个想法会排队(多 repo 并行是 v0.4)。
+5. **计量已就位但没有出账单代码**——用量统计到位,结算/发账单未实现。
+
+**建议对接路线(务实,先跑通 1 个想法)**:
+- 入口选 **fde-copilot `/api/chat`**(唯一现成、带鉴权的编程面):每场黑客松 `POST /api/clients`,每个想法 `POST .../projects`,参赛者自然语言走 `/api/chat` 到 `readiness=loop-ready`,`POST /api/commit` 落库。
+- **loop-engineer 走文件缝 + 调度**:hack5 后台在 Mac Mini 上为每个 loop-ready 项目跑 `pnpm plan <projectDir> --repo <为该idea新建的repo>`,再 `pnpm run run --drain`。
+- **部署环 hack5 自建**:loop 跑完 → hack5 的 deploy hook 建子仓库 / CF 项目并 `wrangler deploy`。
+- **计费**:复用 fde-copilot per-project token 用量 → hack5 按 hackathon/team 汇总,对齐 mini「每人 1 次免费、之后后付费、可赞助代付」。
+
+### 9. 给 WorkBench 提的诉求清单(对接需要它补的)
+1. **给 loop-engineer 一个薄 HTTP 编排 API**:`POST /plan`、`POST /run`、`GET /status`,复用 `WORKBENCH_TOKEN`——最小改动让 hack5 不碰文件系统就能触发编码循环。
+2. **per-idea 建仓 + 部署的自动化 hook**:loop 跑完自动建子仓库 / CF 项目并部署(双方都缺的部署环)。
+3. **多租户鉴权隔离**:per-hackathon / per-team 的 token 作用域 + 目录/仓库隔离(替代单一 `WORKBENCH_TOKEN`)。
+4. **计量 → 出账单 API**:基于现有 per-project token 用量,提供"按 hackathon/team 出账单 + 后付费结算"接口,支持 mini 的免费额度 + 赞助代付。
+5. **并发**:多 repo / 多 worktree 并行(黑客松几十个想法同时跑,v0.4)。
+6. **回调 webhook**:项目 loop-ready / 编码完成 / 部署完成时回调 hack5,好更新参赛者作品状态。
 
 ---
 
