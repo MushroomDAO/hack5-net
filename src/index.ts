@@ -167,6 +167,9 @@ export default {
       if (path === "/api/tenant/mini/assist" && method === "POST") return miniAssist(request, env, tenant, tid);
       if (path === "/api/tenant/mini/name" && method === "POST") return miniName(request, env, tenant, tid);
       if (path === "/api/tenant/mini/usage" && method === "GET") return miniUsage(request, env, tenant, tid);
+      // A3 — mini「做成应用」: multi-turn chat → repo provisioning + trigger loop
+      if (path === "/api/tenant/mini/app/chat" && method === "POST") return miniAppChat(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/app/launch" && method === "POST") return miniAppLaunch(request, env, tenant, tid);
       // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
       if (path === "/api/wb/usage-selftest" && method === "GET") return usageSelftest(env);
       // ---- AI naming smoke test (mock only; inert in production) ----
@@ -1559,6 +1562,91 @@ async function callbackSelftest(env: Env): Promise<Response> {
   return json({ ok, mapping });
 }
 
+// ============================ A3 — mini「做成应用」入口 ============================
+
+// Multi-turn chat with WorkBench (fde-copilot). On the first call we create the client (hackathon)
+// + project (idea); subsequent calls pass their slugs back. chat carries the hack5-signed scoped
+// token (B3). Returns readiness (score, loop_ready) so the UI can show progress toward "ready".
+async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const body = await request.json<{ clientSlug?: string; projectSlug?: string; input?: string; projectName?: string }>().catch(() => null);
+  const input = String(body?.input ?? "").trim().slice(0, 1000);
+  if (!input) return json({ error: "请说说你的想法 / Describe your idea" }, 400);
+  const wb = createWorkbench(env);
+  let clientSlug = String(body?.clientSlug ?? "").trim();
+  let projectSlug = String(body?.projectSlug ?? "").trim();
+  try {
+    if (!clientSlug) {
+      const c = await wb.createClient({ name: tenant.name || tenant.subdomain, background: "hack5 mini hackathon" });
+      clientSlug = c.client.slug;
+    }
+    if (!projectSlug) {
+      const pname = String(body?.projectName ?? input).trim().slice(0, 40) || "idea";
+      const p = await wb.createProject(clientSlug, { name: pname, deliverableName: "app", deliverableType: "web" });
+      projectSlug = p.project.slug;
+    }
+    const scoped = await mintScopedChatToken(env, clientSlug, projectSlug);
+    const res = await wb.chat({ clientSlug, projectSlug, input }, { scopedToken: scoped });
+    return json({ ok: true, clientSlug, projectSlug, readiness: res.result.readiness, reply: res.result.reply ?? "" });
+  } catch {
+    return json({ error: "WorkBench 暂不可用,请稍后再试 / WorkBench unavailable" }, 502);
+  }
+}
+
+// Once the spec is loop_ready: create the participant's public repo (B2), push the spec, and
+// enqueue the coding loop. Records/refreshes the participant's submission (email-hash identity)
+// with the WorkBench link + build_state='queued' so it appears on the wall with a build badge.
+async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const body = await request.json<{ clientSlug?: string; projectSlug?: string; repoName?: string; projectName?: string; email?: string; idea?: string }>().catch(() => null);
+  const clientSlug = String(body?.clientSlug ?? "").trim();
+  const projectSlug = String(body?.projectSlug ?? "").trim();
+  const email = normalizeEmail(body?.email);
+  const idea = String(body?.idea ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+  const projectName = (String(body?.projectName ?? "").trim().slice(0, 80) || projectSlug).slice(0, 80);
+  if (!clientSlug || !projectSlug) return json({ error: "请先完成对话 / Complete the chat first" }, 400);
+  if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
+  const nameCheck = validateRepoName(body?.repoName);
+  if (!nameCheck.ok || !nameCheck.name) return json({ error: nameCheck.error || "仓库名不合法 / Invalid repo name" }, 400);
+  const repoName = nameCheck.name;
+
+  const wb = createWorkbench(env);
+  let repo, jobId: string, queuePos: number;
+  try {
+    repo = await createParticipantRepo(env, repoName, { description: idea || projectName });
+    await wb.commit({ clientSlug, projectSlug, push: true, repo: repo.cloneUrl });
+    jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl })).jobId;
+    queuePos = (await wb.run(jobId)).queuePos;
+  } catch {
+    return json({ error: "建仓或触发编码失败,请稍后再试 / Provisioning failed" }, 502);
+  }
+
+  const now = unixNow();
+  const owner = "mini";
+  const repoKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
+  const existing = await env.DB.prepare("SELECT id, edit_token FROM submissions WHERE tenant_id = ? AND repo_owner = ? AND repo_name = ?")
+    .bind(tid, owner, repoKey)
+    .first<{ id: string; edit_token: string }>();
+  let id: string, editToken: string;
+  if (existing) {
+    id = existing.id;
+    editToken = existing.edit_token;
+    await env.DB.prepare("UPDATE submissions SET project_name = ?, email = ?, link_url = ?, description = ?, repo_url = ?, wb_client = ?, wb_project = ?, build_state = 'queued', updated_at = ? WHERE id = ?")
+      .bind(projectName, email, repo.htmlUrl, idea, repo.htmlUrl, clientSlug, projectSlug, now, id)
+      .run();
+  } else {
+    id = crypto.randomUUID();
+    editToken = randomToken(18);
+    const shareToken = randomToken(16);
+    await env.DB.prepare(
+      "INSERT INTO submissions (id, tenant_id, project_name, team_name, email, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, link_url, status, created_at, updated_at, wb_client, wb_project, build_state) VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, '', 0, '[]', ?, ?, ?, 'ready', ?, ?, ?, ?, 'queued')",
+    )
+      .bind(id, tid, projectName, email, owner, repoKey, repo.htmlUrl, idea, shareToken, editToken, repo.htmlUrl, now, now, clientSlug, projectSlug)
+      .run();
+  }
+  return json({ ok: true, id, editToken, viewUrl: `/s/${id}`, repoUrl: repo.htmlUrl, jobId, queuePos });
+}
+
 // A6 — AI 起名: suggest 2–3 Chinese project names from the participant's idea (cheap gpt-4o-mini).
 // Reuses the miniAssist rate-limit + daily quota pattern. Mock (WORKBENCH_MOCK=1) returns
 // deterministic offline names so the flow is testable via wrangler dev with no OpenAI billing.
@@ -2894,6 +2982,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(CONFIG.tenant && CONFIG.tenant.gated && p !== '/judge') return renderGate();
     if(p === '/' || p === '') return renderWall();
     if(p === '/submit') return renderSubmit();
+    if(p === '/make') return renderMiniMakeApp(); // A3 — mini「做成应用」
     if(p === '/judge') return renderJudge();
     if(p === '/guide') return renderGuide();
     if(p === '/about') return renderAbout();
@@ -3898,10 +3987,74 @@ const APP_HTML = String.raw`<!doctype html>
     }catch(e){ setMsg('sMsg', e.message, true); }
     finally{ $('#sBtn').disabled=false; }
   }
+  // A3 — mini「做成应用」: multi-turn chat → provision repo + trigger loop, then it appears on the wall.
+  async function renderMiniMakeApp(){
+    if(!CONFIG.tenant || CONFIG.tenant.mode!=='mini'){ go('/'); return; }
+    let clientSlug='', projectSlug='', ready=false, lastIdea='';
+    app.innerHTML = '<h1>✨ '+t('让 AI 帮我做成应用','Turn your idea into an app')+'</h1>'
+      + '<div class="notice">'+t('说说你的想法,AI 会追问补全;准备好后自动建公有仓库 + 编码 + 部署。','Describe your idea — the AI asks follow-ups, then provisions a public repo, codes and deploys it.')+'</div>'
+      + '<div class="panel" style="max-width:680px">'
+      + '<div id="chatLog" style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px"></div>'
+      + '<div id="readyBar" style="margin-bottom:8px"></div>'
+      + '<div class="row" style="gap:8px"><textarea id="chatIn" rows="2" maxlength="1000" placeholder="'+t('例:帮小区做一个团购小工具…','e.g. a group-buy tool for my neighborhood…')+'" style="flex:1"></textarea><button id="chatSend">'+t('发送','Send')+'</button></div>'
+      + '<div id="chatMsg" class="muted" style="margin-top:6px"></div>'
+      + '<div id="launchBox" style="margin-top:12px"></div>'
+      + '</div>';
+    const log=$('#chatLog');
+    function addMsg(who, text){
+      const d=document.createElement('div');
+      d.style.cssText = who==='me'
+        ? 'align-self:flex-end;background:#2563eb;color:#fff;padding:8px 12px;border-radius:12px;max-width:82%'
+        : 'align-self:flex-start;background:var(--panel2,rgba(127,127,127,.12));padding:8px 12px;border-radius:12px;max-width:82%';
+      d.textContent=text; log.appendChild(d); log.scrollTop=log.scrollHeight;
+    }
+    function renderReady(r){
+      if(!r){ $('#readyBar').innerHTML=''; return; }
+      const pct=Math.max(0,Math.min(100,r.score||0));
+      $('#readyBar').innerHTML = '<div class="muted" style="font-size:12px;margin-bottom:2px">'+t('规格完备度','Spec readiness')+' '+pct+'%'+(r.loop_ready?' · ✅ '+t('可以开始生成','ready to build'):'')+'</div>'
+        + '<div style="height:8px;border-radius:4px;background:var(--line,#333);overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+(r.loop_ready?'#16a34a':'#d97706')+'"></div></div>';
+      if(r.loop_ready && !ready){ ready=true; showLaunch(); }
+    }
+    function showLaunch(){
+      $('#launchBox').innerHTML = '<div class="notice ok">'+t('规格已就绪!给作品起个仓库名(小写字母/数字/连字符),AI 就开始建仓 + 编码。','Spec ready! Pick a repo name (lowercase, digits, hyphens) and it will provision + code.')+'</div>'
+        + '<label>'+t('仓库名','Repo name')+' *</label><input id="mkRepo" maxlength="39" placeholder="my-cool-app">'
+        + '<label>'+t('作品名称','Project name')+'</label><input id="mkName" maxlength="80">'
+        + '<label>'+t('联系邮箱','Contact email')+' *</label><input id="mkEmail" type="email" maxlength="254" placeholder="you@example.com">'
+        + '<div class="row" style="margin-top:12px"><button id="mkGo">🚀 '+t('开始生成','Build it')+'</button></div><div id="mkMsg"></div>';
+      $('#mkGo').addEventListener('click', doLaunch);
+    }
+    async function send(){
+      const input=$('#chatIn').value.trim();
+      if(!input) return;
+      lastIdea=input;
+      addMsg('me', input); $('#chatIn').value=''; $('#chatSend').disabled=true; setMsg('chatMsg', t('思考中…','Thinking…'));
+      try{
+        const r=await api('/api/tenant/mini/app/chat',{method:'POST',body:{clientSlug,projectSlug,input}});
+        clientSlug=r.clientSlug; projectSlug=r.projectSlug;
+        if(r.reply) addMsg('ai', r.reply);
+        renderReady(r.readiness); setMsg('chatMsg','');
+      }catch(e){ setMsg('chatMsg', e.message, true); }
+      $('#chatSend').disabled=false;
+    }
+    async function doLaunch(){
+      const repoName=$('#mkRepo').value.trim(), email=$('#mkEmail').value.trim(), projectName=$('#mkName').value.trim();
+      if(!repoName||!email){ setMsg('mkMsg', t('请填仓库名和邮箱','Repo name and email required'), true); return; }
+      $('#mkGo').disabled=true; setMsg('mkMsg', t('建仓 + 触发编码中…','Provisioning…'));
+      try{
+        const r=await api('/api/tenant/mini/app/launch',{method:'POST',body:{clientSlug,projectSlug,repoName,email,projectName,idea:lastIdea}});
+        $('#launchBox').innerHTML = '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+' '+t('队列位','Queue')+' #'+(r.queuePos||1)+'<br>'
+          + t('公有仓库','Repo')+': <a href="'+esc(r.repoUrl)+'" target="_blank" rel="noopener">'+esc(r.repoUrl)+'</a ><br>'
+          + '<a href="'+esc(r.viewUrl)+'" onclick="go(\''+esc(r.viewUrl)+'\');return false">'+t('查看作品详情 →','View project →')+'</a > · '+t('编辑令牌','Edit token')+': <code>'+esc(r.editToken)+'</code></div>';
+      }catch(e){ setMsg('mkMsg', e.message, true); $('#mkGo').disabled=false; }
+    }
+    $('#chatSend').addEventListener('click', send);
+    $('#chatIn').addEventListener('keydown', e=>{ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(); } });
+  }
   async function renderMiniSubmit(){
     if(!CONFIG.tenant){ go('/'); return; }
     app.innerHTML = '<h1>'+t('提交作品','Submit')+'</h1>'
       + '<div class="notice">'+t('Mini 赛:不用写代码,交一个作品链接就行 —— no-code 应用 / 网站 / 文档 / 视频都可以。','Mini track: no coding — just submit a work link (no-code app / site / doc / video).')+'</div>'
+      + '<div class="guide-banner" onclick="go(\'/make\')" style="cursor:pointer"><span>✨ '+t('还没做出来?让 AI 把你的想法直接做成应用','No app yet? Let AI turn your idea into one')+'</span><b>→</b></div>'
       + '<div class="panel" style="max-width:640px">'
       + '<label>'+t('作品名称','Product name')+' *</label><input id="mProj" maxlength="80">'
       + '<div class="row" style="margin-top:6px"><button class="ghost" id="mNameAI">✨ '+t('AI 帮我起名','AI names it')+'</button><span id="mNameMsg" class="muted"></span></div>'
