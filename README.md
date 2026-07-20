@@ -15,6 +15,25 @@
 
 ---
 
+## 界面 / Screenshots
+
+<p align="center"><img src="assets/screenshots/landing.png" width="860" alt="hack5 平台首页 / landing"></p>
+
+<table>
+<tr>
+<td align="center" width="50%"><b>一键转发 · 海报 + 二维码 + 多平台<br>Share — poster, QR & platforms</b></td>
+<td align="center" width="50%"><b>媒体矩阵 / Media matrix</b></td>
+</tr>
+<tr>
+<td><img src="assets/screenshots/share.png" alt="一键转发页 / share page"></td>
+<td><img src="assets/screenshots/media.png" alt="媒体页 / media page"></td>
+</tr>
+</table>
+
+> 更多:每个黑客松有独立子域名首页(banner + 简介 + 作品墙)、报名、组队、日程、评审打分、深色模式。More: each hackathon gets its own subdomain homepage (banner + intro + gallery), registration, team-forming, agenda, judging, dark mode.
+
+---
+
 ## 海报 / Posters
 
 每个黑客松都能一键生成 A4 宣传海报,自动填入名称、时间、地点与报名链接。**免费版**为固定模板;**付费版**用一句话描述画风,AI(OpenAI `gpt-image-1`)生成背景,活动文字仍清晰叠加。Every hackathon can generate an A4 promo poster auto-filled from its homepage. The **free** version is a fixed template; the **premium** version paints an AI background from a text prompt (`gpt-image-1`) with crisp text kept on top.

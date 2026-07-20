@@ -2093,7 +2093,7 @@ const APP_HTML = String.raw`<!doctype html>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>
-  <footer class="site-footer"><div id="sponsorBar"></div><div id="orgFooter"></div>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.</footer>
+  <footer class="site-footer"><div id="sponsorBar"></div><div id="orgFooter"></div>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.<span id="appVer"></span></footer>
   <div id="lightbox" class="lightbox hidden" onclick="this.classList.add('hidden')"></div>
 
   <script>
@@ -2101,6 +2101,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
+  const APP_VERSION = '0.3.2'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -2139,6 +2140,8 @@ const APP_HTML = String.raw`<!doctype html>
     else ME = await api('/api/auth/me').catch(()=>({role:null}));
     renderOrgFooter();
     renderSponsorFooter();
+    const av = document.getElementById('appVer');
+    if(av) av.innerHTML = ' · <a href="https://github.com/MushroomDAO/hack5-net/releases" target="_blank" rel="noopener">v'+APP_VERSION+'</a>';
     renderNav();
     route();
   }
