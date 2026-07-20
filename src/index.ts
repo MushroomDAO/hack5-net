@@ -148,6 +148,9 @@ export default {
       if (lockMatch && method === "POST") return lockSubmission(request, env, tid, lockMatch[1]);
       const hideMatch = path.match(/^\/api\/submissions\/([^/]+)\/hide$/);
       if (hideMatch && method === "POST") return hideSubmission(request, env, tid, hideMatch[1]);
+      const likeMatch = path.match(/^\/api\/submissions\/([^/]+)\/like$/);
+      if (likeMatch && method === "POST") return likeSubmission(request, env, tid, likeMatch[1]);
+      if (path === "/api/tenant/mini/assist" && method === "POST") return miniAssist(request, env, tenant, tid);
 
       // ---- screenshots (KV, content-addressed by submission uuid) ----
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
@@ -248,7 +251,7 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
 
 async function getConfig(request: Request, env: Env): Promise<Response> {
   const tctx = await resolveTenant(request, env);
-  const mode = tctx.tenant?.mode === "secret" ? "secret" : "open";
+  const mode = tctx.tenant?.mode === "secret" ? "secret" : tctx.tenant?.mode === "mini" ? "mini" : "open";
   // Secret tenants gate everything behind an access session: without it, expose only name + mode
   // so the client can render the access-code page — never the intro/details/submissions.
   const gated = mode === "secret" && !(await hasSecretAccess(request, env, tctx.tenant));
@@ -617,16 +620,23 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   if (!user) return json({ error: "请先登录 / Please log in" }, 401);
   const body = await request.json<{ name?: string; subdomain?: string; intro?: string; banner?: string; mode?: string; accessDays?: number }>().catch(() => null);
   const name = String(body?.name ?? "").trim().slice(0, 60);
-  const subdomain = String(body?.subdomain ?? "").trim().toLowerCase();
+  const mode = body?.mode === "secret" ? "secret" : body?.mode === "mini" ? "mini" : "open";
+  // Mini is a 5-minute flow: auto-generate a subdomain from the name if none given.
+  let subdomain = String(body?.subdomain ?? "").trim().toLowerCase();
+  if (mode === "mini" && !subdomain) {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "mini";
+    subdomain = `${slug}-${randomCodeBody(4).toLowerCase()}`.slice(0, 30);
+  }
   const intro = String(body?.intro ?? "").trim().slice(0, 2000);
-  const mode = body?.mode === "secret" ? "secret" : "open";
   const accessDays = mode === "secret" ? Math.min(90, Math.max(1, Math.floor(Number(body?.accessDays) || 7))) : 7;
   if (!name) return json({ error: "请填写黑客松名称 / Name required" }, 400);
   if (!/^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(subdomain)) {
     return json({ error: "子域名需 3-30 位小写字母/数字/连字符 / Invalid subdomain" }, 400);
   }
   if (RESERVED_SUBDOMAINS.has(subdomain)) return json({ error: "该子域名被保留 / Reserved subdomain" }, 400);
-  if (intro.length < 10) return json({ error: "请写一段黑客松简介(至少 10 字)/ Add an intro (10+ chars)" }, 400);
+  // Mini is a 5-minute flow — intro optional (a default is used); other modes require an intro.
+  const finalIntro = mode === "mini" && intro.length < 10 ? `${name} —— 一场快速的 mini 黑客松` : intro;
+  if (mode !== "mini" && intro.length < 10) return json({ error: "请写一段黑客松简介(至少 10 字)/ Add an intro (10+ chars)" }, 400);
   // Banner is optional — if omitted, the homepage shows a generated default. If provided it must be
   // a small raster image (no SVG, to avoid stored-XSS when the blob is fetched directly).
   let bannerParsed: { contentType: string; bytes: Uint8Array } | null = null;
@@ -643,11 +653,21 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
 
   const urow = await env.DB.prepare("SELECT quota FROM users WHERE email = ?").bind(user.email).first<{ quota: number }>();
   const quota = urow?.quota ?? 1;
-  const used = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active'")
-    .bind(user.email)
-    .first<{ c: number }>();
-  if ((used?.c ?? 0) >= quota) {
-    return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached — upgrade for 100`, upgrade: true }, 402);
+  if (mode === "mini") {
+    // Mini has its own free allowance (1 per person), separate from the regular quota. Post-paid after.
+    const miniUsed = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND mode = 'mini' AND status = 'active'")
+      .bind(user.email)
+      .first<{ c: number }>();
+    if ((miniUsed?.c ?? 0) >= 1) {
+      return json({ error: "mini 免费额度已用完(每人 1 场)。充值或由赞助商代付后可继续 / Free mini used — top up or get a sponsor", upgrade: true }, 402);
+    }
+  } else {
+    const used = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode != 'mini'")
+      .bind(user.email)
+      .first<{ c: number }>();
+    if ((used?.c ?? 0) >= quota) {
+      return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached — upgrade for 100`, upgrade: true }, 402);
+    }
   }
 
   const adminPass = `hack5-${randomCodeBody(8).toLowerCase()}`;
@@ -656,19 +676,20 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   await env.DB.prepare(
     "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
   )
-    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, intro, mode, accessDays, now, now)
+    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, mode, accessDays, now, now)
     .run();
 
-  // Close the quota race deterministically: keep the earliest `quota` tenants; if a concurrent
-  // create pushed this one past the limit, roll it back.
-  const owned = await env.DB.prepare(
-    "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' ORDER BY created_at ASC, id ASC",
-  )
-    .bind(user.email)
-    .all<{ id: string }>();
-  if (owned.results.findIndex((r) => r.id === id) >= quota) {
-    await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
-    return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached`, upgrade: true }, 402);
+  // Close the quota race deterministically for regular/secret (mini uses its own upfront cap).
+  if (mode !== "mini") {
+    const owned = await env.DB.prepare(
+      "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode != 'mini' ORDER BY created_at ASC, id ASC",
+    )
+      .bind(user.email)
+      .all<{ id: string }>();
+    if (owned.results.findIndex((r) => r.id === id) >= quota) {
+      await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
+      return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached`, upgrade: true }, 402);
+    }
   }
 
   // Auto-provision the subdomain DNS so <sub>.hack5.net resolves. Roll back the tenant if it fails.
@@ -1238,7 +1259,7 @@ async function listSubmissions(request: Request, env: Env, tenant: Tenant | null
   if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
   const secret = tenant?.mode === "secret";
   const rows = await env.DB.prepare(
-    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url FROM submissions WHERE tenant_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 300",
+    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, link_url, likes FROM submissions WHERE tenant_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 300",
   )
     .bind(tid)
     .all<Record<string, unknown>>();
@@ -1249,7 +1270,7 @@ async function getSubmission(request: Request, env: Env, tenant: Tenant | null, 
   if (!tid) return json({ error: "Not found" }, 404);
   if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
   const row = await env.DB.prepare(
-    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
+    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md, link_url, likes FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
   )
     .bind(id, tid)
     .first<Record<string, unknown>>();
@@ -1277,6 +1298,8 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean,
     createdAt: row.created_at,
     shots: Array.from({ length: shotCount }, (_, i) => `/shot/${id}/${i}`),
     viewUrl: `/p/${id}`,
+    linkUrl: row.link_url ?? null,
+    likes: Number(row.likes ?? 0),
     // Secret fields only appear for secret tenants (open-mode responses stay unchanged). Online
     // demo + README show to anyone past the gate; credentials are judges/admin only (like contact).
     ...(secret
@@ -1289,6 +1312,125 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean,
         }
       : {}),
   };
+}
+
+// Like a submission (mini judging). Deduped per liker (hashed IP) so a browser can't inflate it.
+async function likeSubmission(request: Request, env: Env, tid: string | null, id: string): Promise<Response> {
+  if (!tid) return json({ error: "Not found" }, 404);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const liker = await hmacHex(utf8(env.AUTH_SECRET), `like:${ip}`);
+  const ins = await env.DB.prepare("INSERT OR IGNORE INTO submission_likes (submission_id, liker, created_at) VALUES (?, ?, ?)")
+    .bind(id, liker, unixNow())
+    .run();
+  if (ins.meta.changes === 1) {
+    await env.DB.prepare("UPDATE submissions SET likes = likes + 1 WHERE id = ? AND tenant_id = ?").bind(id, tid).run();
+  }
+  const row = await env.DB.prepare("SELECT likes FROM submissions WHERE id = ? AND tenant_id = ?").bind(id, tid).first<{ likes: number }>();
+  return json({ ok: true, likes: row?.likes ?? 0, liked: ins.meta.changes === 1 });
+}
+
+// Mini AI assist: write a one-line project description from the name/link (cheap gpt-4o-mini).
+async function miniAssist(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  if (!env.OPENAI_API_KEY) return json({ error: "AI 未开通 / AI not enabled" }, 503);
+  const body = await request.json<{ name?: string; link?: string }>().catch(() => null);
+  const name = String(body?.name ?? "").trim().slice(0, 120);
+  const link = String(body?.link ?? "").trim().slice(0, 300);
+  if (!name && !link) return json({ error: "请先填作品名或链接 / Add a name or link first" }, 400);
+  const day = Math.floor(unixNow() / 86400);
+  const capKey = `miniassist:${tid}:${day}`;
+  const used = Number((await env.SHOTS.get(capKey)) ?? "0");
+  if (used >= 60) return json({ error: "今日 AI 次数已用完 / Daily AI limit reached" }, 429);
+  await env.SHOTS.put(capKey, String(used + 1), { expirationTtl: 2 * 86400 });
+  const prompt =
+    `为一个黑客松作品写一句话中文简介(不超过 80 字,亲切、具体、不浮夸)。作品名:${name || "(未命名)"}。` +
+    (link ? `作品链接:${link}。` : "") +
+    ` 只输出简介本身,不要引号、不要前缀。`;
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], max_tokens: 160, temperature: 0.7 }),
+    });
+  } catch {
+    return json({ error: "AI 暂不可用 / AI unavailable" }, 502);
+  }
+  if (!resp.ok) {
+    console.log("mini assist error", resp.status, (await resp.text().catch(() => "")).slice(0, 200));
+    return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
+  }
+  const data = await resp.json<{ choices?: { message?: { content?: string } }[] }>().catch(() => null);
+  const text = String(data?.choices?.[0]?.message?.content ?? "").trim().slice(0, 300);
+  if (!text) return json({ error: "生成失败 / Failed" }, 502);
+  return json({ ok: true, text });
+}
+
+// Mini-mode submission: no code required. Any work link (no-code app / site / doc / video) + a
+// one-line description + optional screenshots. Open (no invite code); one per email (edit via token).
+async function createMiniSubmission(request: Request, env: Env, tid: string): Promise<Response> {
+  const body = await request
+    .json<{ projectName?: string; linkUrl?: string; description?: string; email?: string; teamName?: string; shots?: string[]; editToken?: string }>()
+    .catch(() => null);
+  if (!body) return json({ error: "Invalid JSON" }, 400);
+  const projectName = String(body.projectName ?? "").trim().slice(0, 80);
+  const linkUrl = String(body.linkUrl ?? "").trim();
+  const description = String(body.description ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+  const email = normalizeEmail(body.email);
+  const teamName = String(body.teamName ?? "").trim().slice(0, 80);
+  if (!projectName) return json({ error: "请填写作品名称 / Product name required" }, 400);
+  if (!isHttpUrl(linkUrl) || linkUrl.length > 500) return json({ error: "请填写有效的作品链接 / Valid work link required" }, 400);
+  if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
+
+  const maxShots = numberEnv(env.MAX_SHOTS, DEFAULT_MAX_SHOTS);
+  const maxShotBytes = numberEnv(env.MAX_SHOT_BYTES, DEFAULT_MAX_SHOT_BYTES);
+  const decoded: { contentType: string; bytes: Uint8Array }[] = [];
+  for (const shot of (Array.isArray(body.shots) ? body.shots : []).slice(0, maxShots)) {
+    const parsed = dataUrlToBytes(shot);
+    if (!parsed || !isRasterImage(parsed.contentType) || parsed.bytes.byteLength > maxShotBytes) continue;
+    decoded.push(parsed);
+  }
+  const now = unixNow();
+  // No repo in mini — key identity on email so each person has one editable entry.
+  const owner = "mini";
+  const repo = (email.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "anon").slice(0, 60);
+  const shotsMeta = JSON.stringify(decoded.map((d) => ({ ct: d.contentType })));
+  const existing = await env.DB.prepare(
+    "SELECT id, edit_token, shot_count FROM submissions WHERE tenant_id = ? AND repo_owner = ? AND repo_name = ?",
+  )
+    .bind(tid, owner, repo)
+    .first<{ id: string; edit_token: string; shot_count: number }>();
+  if (existing) {
+    if (String(body.editToken ?? "") !== existing.edit_token) {
+      return json({ error: "你已提交过,请用编辑令牌修改 / Already submitted — use the edit token" }, 409);
+    }
+    if (decoded.length) {
+      await clearShots(env, existing.id, existing.shot_count);
+      await putShots(env, existing.id, decoded);
+      await env.DB.prepare(
+        "UPDATE submissions SET project_name = ?, team_name = ?, email = ?, link_url = ?, description = ?, shot_count = ?, shots_meta = ?, updated_at = ? WHERE id = ?",
+      )
+        .bind(projectName, teamName, email, linkUrl, description, decoded.length, shotsMeta, now, existing.id)
+        .run();
+    } else {
+      await env.DB.prepare(
+        "UPDATE submissions SET project_name = ?, team_name = ?, email = ?, link_url = ?, description = ?, updated_at = ? WHERE id = ?",
+      )
+        .bind(projectName, teamName, email, linkUrl, description, now, existing.id)
+        .run();
+    }
+    return json({ ok: true, id: existing.id, editToken: existing.edit_token, viewUrl: `/p/${existing.id}`, updated: true });
+  }
+  const id = crypto.randomUUID();
+  const shareToken = randomToken(16);
+  const editToken = randomToken(18);
+  await putShots(env, id, decoded);
+  await env.DB.prepare(
+    "INSERT INTO submissions (id, tenant_id, project_name, team_name, email, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, link_url, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, '', ?, ?, ?, ?, ?, 'ready', ?, ?)",
+  )
+    .bind(id, tid, projectName, teamName, email, owner, repo, description, decoded.length, shotsMeta, shareToken, editToken, linkUrl, now, now)
+    .run();
+  return json({ ok: true, id, editToken, viewUrl: `/p/${id}` });
 }
 
 // Secret-mode submission: online demo + credentials + pasted README + private repo. No public-repo
@@ -1347,6 +1489,7 @@ async function createSecretSubmission(request: Request, env: Env, tenant: Tenant
 async function createSubmission(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tid) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
   if (tenant?.mode === "secret") return createSecretSubmission(request, env, tenant, tid);
+  if (tenant?.mode === "mini") return createMiniSubmission(request, env, tid);
   const body = await request
     .json<{
       passcode?: string;
@@ -2211,6 +2354,18 @@ const APP_HTML = String.raw`<!doctype html>
     .guide-cta h2{color:#fff;margin:0 0 14px}
     .guide-cta button{background:#fff;color:var(--brand)}
     @media(max-width:720px){.guide-row{grid-template-columns:1fr}.guide-row.rev .guide-art{order:0}}
+    .likebtn{background:var(--ghost-bg);border:1px solid var(--line);color:var(--danger);border-radius:999px;padding:5px 14px;font-weight:700;font-size:14px;cursor:pointer}
+    .likebtn:hover{background:var(--ghost-hover)}
+    .likebtn.liked{background:var(--danger);color:#fff;border-color:var(--danger)}
+    .entry-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:940px;margin:26px auto 0;text-align:left}
+    @media(max-width:760px){.entry-grid{grid-template-columns:1fr}}
+    .entry-card{border:1px solid var(--line);border-radius:16px;padding:22px;background:var(--card);box-shadow:var(--shadow);cursor:pointer;transition:transform .12s,border-color .12s;display:flex;flex-direction:column;gap:6px}
+    .entry-card:hover{transform:translateY(-3px);border-color:var(--brand)}
+    .entry-card .ec-ico{font-size:30px}
+    .entry-card h3{margin:4px 0 0;font-size:19px}
+    .entry-card .ec-sub{color:var(--brand);font-weight:700;font-size:13px}
+    .entry-card p{margin:6px 0 10px;font-size:14px;color:var(--ink2)}
+    .entry-card .ec-go{margin-top:auto;color:var(--brand);font-weight:700;font-size:14px}
     .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
     .sponsor-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:14px;margin-bottom:12px;font-size:13px}
     .sponsor-bar .muted{text-transform:uppercase;letter-spacing:.1em;font-size:11px;font-weight:700}
@@ -2315,6 +2470,7 @@ const APP_HTML = String.raw`<!doctype html>
   function go(path){ history.pushState(null, '', path); route(); }
   window.addEventListener('popstate', route);
   window.go = go;
+  window.startMode = (m)=>{ window.__createMode = m; go('/start'); };
 
   boot();
   async function boot(){
@@ -2585,13 +2741,13 @@ const APP_HTML = String.raw`<!doctype html>
     app.innerHTML = '<div class="guide">'
       + '<div class="guide-hero" style="padding:44px 0 8px">'
       + '<h1 style="font-size:clamp(30px,6vw,54px)">'+t('人人可办的黑客松平台','The hackathon platform anyone can run')+'</h1>'
-      + '<p class="guide-sub">'+t('10 分钟发起 · 独立域名 · 首场免费','Live in 10 minutes · your own domain · first event free')+'</p>'
-      + '<div class="row" style="justify-content:center;margin-top:22px">'
-      + '<button onclick="go(\'/start\')" style="font-size:16px;padding:12px 24px">'+t('🚀 发起你的黑客松','🚀 Start your hackathon')+'</button>'
-      + '<a href="https://demo.hack5.net" target="_blank" rel="noopener"><button class="ghost" style="font-size:16px;padding:12px 24px">'+t('👀 看 Demo 示例','👀 See the demo')+'</button></a >'
-      + '<button class="ghost" onclick="go(\'/about\')" style="font-size:16px;padding:12px 24px">'+t('了解 hack5','About hack5')+'</button></div>'
-      + '<div style="text-align:center;margin-top:14px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 示例站点 → demo.hack5.net','👀 Live example → demo.hack5.net')+'</a></div>'
+      + '<p class="guide-sub">'+t('三种规模,一键发起 · 独立域名 · 首场免费','Three scales, one click · your own domain · first free')+'</p>'
+      + '<div class="entry-grid">'
+      + '<div class="entry-card" onclick="startMode(\'open\')"><div class="ec-ico">⚡</div><h3>'+t('常规黑客松','Regular')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 200 人以下','10 min · under 200 people')+'</div><p>'+t('公开报名、作品墙、评审打分——通用规模。','Public sign-up, gallery, judging — general scale.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
+      + '<div class="entry-card" onclick="startMode(\'secret\')"><div class="ec-ico">🔒</div><h3>'+t('企业私密黑客松','Enterprise')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 邀请制','10 min · invite-only')+'</div><p>'+t('访问码门禁、不公开源码、Demo 评审。付费。','Access-gated, no source exposed, demo review. Paid.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
+      + '<div class="entry-card" onclick="startMode(\'mini\')"><div class="ec-ico">✨</div><h3>'+t('Mini 黑客松','Mini')+'</h3><div class="ec-sub">'+t('5 分钟启动 · 50 人以下','5 min · under 50 people')+'</div><p>'+t('面向非开发者,交个链接就行,AI 帮你写简介。每人 1 次免费。','For non-coders — just a link, AI helps. 1 free each.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
       + '</div>'
+      + '<div style="text-align:center;margin-top:16px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 看 Demo 示例 → demo.hack5.net','👀 See the demo → demo.hack5.net')+'</a></div>'
       + '<div class="guide-steps" style="margin-top:38px">'
       + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
       + '</div></div>';
@@ -2694,19 +2850,26 @@ const APP_HTML = String.raw`<!doctype html>
     if(!ME_USER.email){ go('/start'); return; }
     ME_USER = await api('/api/platform/me').catch(()=>ME_USER);
     const hs = ME_USER.hackathons || [];
-    const canCreate = (ME_USER.used||0) < (ME_USER.quota||1);
+    const cm = window.__createMode==='mini'?'mini':window.__createMode==='secret'?'secret':'open';
+    const modeLabel = cm==='mini'?t('✨ Mini(5 分钟)','✨ Mini'):cm==='secret'?t('🔒 企业私密','🔒 Enterprise'):t('⚡ 常规','⚡ Regular');
+    // Mini has its own free allowance; regular/secret share the quota. canCreate never blocks mini here.
+    const canCreate = cm==='mini' || (ME_USER.used||0) < (ME_USER.quota||1);
     app.innerHTML = '<div class="guide"><h1>'+t('我的黑客松','My hackathons')+'</h1>'
       + '<p class="muted">'+t('已用','Used')+' '+(ME_USER.used||0)+' / '+(ME_USER.quota||1)+'</p>'
       + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
       + (canCreate
-          ? '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
-            + '<label>'+t('子域名','Subdomain')+' <span class="muted">.hack5.net</span></label><input id="hSub" maxlength="30" placeholder="shanghai2026">'
-            + '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…,欢迎…','A hackathon about… for… come build…')+'"></textarea>'
-            + '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款;宽幅,自动裁并压 ≤120KB)','(optional — a default is generated; wide, ≤120KB)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>'
-            + '<label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="hSecret" style="width:auto"> '+t('🔒 私密 / 企业模式(需访问码才能进,不暴露源码)','🔒 Private / enterprise (access-gated, no source exposed)')+'</label>'
-            + '<div id="hSecretOpts" style="display:none"><label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px"></div>'
-            + '<div class="row" style="margin-top:14px"><button id="hCreate">'+t('创建并部署','Create & deploy')+'</button></div><div id="hMsg"></div>'
+          ? '<div class="muted" style="margin-bottom:10px">'+t('模式','Mode')+': <b>'+modeLabel+'</b>'+(cm!=='open'?' · <a href="#" onclick="window.__createMode=null;renderDashboard();return false" style="font-size:12px">'+t('换常规','switch to regular')+'</a>':'')+'</div>'
+            + '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
+            + (cm==='mini' ? '' : '<label>'+t('子域名','Subdomain')+' <span class="muted">.hack5.net</span></label><input id="hSub" maxlength="30" placeholder="shanghai2026">')
+            + (cm==='mini'
+                ? '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">'+t('(可选)','(optional)')+'</span></label><input id="hIntro" maxlength="2000" placeholder="'+t('这是一场关于…的 mini 黑客松','A mini hackathon about…')+'">'
+                : '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…','A hackathon about… for…')+'"></textarea>')
+            + (cm==='mini' ? '' : '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款)','(optional — default used)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>')
+            + (cm==='open'
+                ? '<label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="hSecret" style="width:auto"> '+t('🔒 私密 / 企业模式','🔒 Private / enterprise')+'</label><div id="hSecretOpts" style="display:none"><label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px"></div>'
+                : cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
+            + '<div class="row" style="margin-top:14px"><button id="hCreate">'+(cm==='mini'?t('✨ 5 分钟创建','✨ Create in 5 min'):t('创建并部署','Create & deploy'))+'</button></div><div id="hMsg"></div>'
           : '<div class="notice">'+t('已达免费额度。充值 ¥99 可举办 100 场。','Free quota reached. Upgrade (¥99) for 100 hackathons.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('充值 ¥99','Upgrade ¥99')+'</button></div>')
       + '</div></div>';
     if(canCreate){
@@ -2717,12 +2880,15 @@ const APP_HTML = String.raw`<!doctype html>
         catch(e){ setMsg('hMsg', t('图片处理失败','Image error')+': '+e.message, true); }
       });
       $('#hCreate').addEventListener('click', async ()=>{
-        const name=$('#hName').value.trim(), subdomain=$('#hSub').value.trim().toLowerCase(), intro=$('#hIntro').value.trim();
-        if(!name || !subdomain){ setMsg('hMsg', t('请填写名称和子域名','Fill in name and subdomain'), true); return; }
-        if(intro.length<10){ setMsg('hMsg', t('请写至少 10 字的简介','Add a 10+ character intro'), true); return; }
-        const secret = $('#hSecret') && $('#hSecret').checked;
-        const mode = secret ? 'secret' : 'open';
-        const accessDays = secret ? Number($('#hDays').value)||7 : 7;
+        const name=$('#hName').value.trim();
+        const subdomain = $('#hSub') ? $('#hSub').value.trim().toLowerCase() : '';
+        const intro = $('#hIntro') ? $('#hIntro').value.trim() : '';
+        if(!name){ setMsg('hMsg', t('请填写名称','Enter a name'), true); return; }
+        if(cm!=='mini' && !subdomain){ setMsg('hMsg', t('请填写子域名','Enter a subdomain'), true); return; }
+        if(cm!=='mini' && intro.length<10){ setMsg('hMsg', t('请写至少 10 字的简介','Add a 10+ character intro'), true); return; }
+        const secretChecked = $('#hSecret') && $('#hSecret').checked;
+        const mode = cm==='mini' ? 'mini' : (cm==='secret' || secretChecked) ? 'secret' : 'open';
+        const accessDays = (mode==='secret' && $('#hDays')) ? Number($('#hDays').value)||7 : 7;
         $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
         try {
           const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,banner:window.__hBanner,mode,accessDays}});
@@ -3116,6 +3282,7 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   function card(s){
+    const isMini = CONFIG.tenant && CONFIG.tenant.mode==='mini';
     const el = document.createElement('div');
     el.className = 'card';
     const shots = s.shots.length ? s.shots : [];
@@ -3129,15 +3296,23 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="card-body">'
       + '<div class="card-title">'+esc(s.projectName)+'</div>'
       + (s.teamName?'<div class="muted" style="font-size:12px">👥 '+esc(s.teamName)+'</div>':'')
-      + '<div class="card-repo">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</div>'
+      + (isMini
+          ? (s.linkUrl?'<div class="card-repo">🔗 '+esc((s.linkUrl||'').replace(/^https?:\/\//,'').slice(0,40))+'</div>':'')
+          : '<div class="card-repo">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</div>')
       + (s.description?'<div class="card-desc">'+esc(s.description)+'</div>':'')
-      + '<div class="card-meta" data-gh="'+esc(s.repoOwner)+'/'+esc(s.repoName)+'"><span class="chip">★ …</span></div>'
+      + (isMini
+          ? '<div class="card-meta"><button class="likebtn" data-id="'+esc(s.id)+'">♥ <span>'+(s.likes||0)+'</span></button></div>'
+          : '<div class="card-meta" data-gh="'+esc(s.repoOwner)+'/'+esc(s.repoName)+'"><span class="chip">★ …</span></div>')
       + '</div>';
     // carousel nav + click image to open detail
     wireCarousel(el.querySelector('.carousel'), ()=>go(s.viewUrl));
-    el.querySelector('.card-body').addEventListener('click', ()=>go(s.viewUrl));
-    // lazy GitHub stars/lang
-    loadGhMeta(el.querySelector('.card-meta'));
+    el.querySelector('.card-body').addEventListener('click', (e)=>{ if(e.target.closest('.likebtn')) return; go(s.viewUrl); });
+    if(isMini){
+      const lb=el.querySelector('.likebtn');
+      if(lb) lb.addEventListener('click', async (e)=>{ e.stopPropagation(); try{ const r=await api('/api/submissions/'+s.id+'/like',{method:'POST',body:{}}); lb.querySelector('span').textContent=r.likes; lb.classList.add('liked'); }catch(err){} });
+    } else {
+      loadGhMeta(el.querySelector('.card-meta'));
+    }
     return el;
   }
 
@@ -3181,8 +3356,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div>'
       + videoHtml
       + (shotsCar ? '<h2 style="margin-top:22px">'+t('产品截图','Screenshots')+'</h2>'+shotsCar+'<div class="muted" style="margin-top:6px;font-size:12px">'+t('点图看大图','Click to enlarge')+'</div>' : '')
-      + '<h2 style="margin-top:22px">README</h2>'
-      + '<div id="readmeWrap"><button class="ghost" id="loadReadme">'+t('加载 README','Load README')+'</button></div>'
+      + (s.linkUrl ? '' : '<h2 style="margin-top:22px">README</h2><div id="readmeWrap"><button class="ghost" id="loadReadme">'+t('加载 README','Load README')+'</button></div>')
       + '</div>'
       + '<div>'
       + '<div class="panel">'
@@ -3192,8 +3366,11 @@ const APP_HTML = String.raw`<!doctype html>
       + (s.secret && s.demoUrl?'<div class="kv"><span>'+t('在线 Demo','Live demo')+'</span><b><a href="'+esc(s.demoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
       + (s.secret && s.demoUser?'<div class="kv"><span>'+t('Demo 账号','Demo user')+'</span><b>'+esc(s.demoUser)+'</b></div>':'')
       + (s.secret && s.demoPass?'<div class="kv"><span>'+t('Demo 密码','Demo pass')+'</span><b>'+esc(s.demoPass)+'</b></div>':'')
-      + '<div class="kv"><span>'+(s.secret?t('私有仓库','Private repo'):t('仓库','Repo'))+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
-      + (s.secret?'<div class="muted" style="font-size:12px">'+t('作为协作者可 clone 评估','Clone it as a collaborator to review')+'</div>':'')
+      + (s.linkUrl
+          ? '<div class="kv"><span>'+t('作品链接','Work link')+'</span><b><a href="'+esc(s.linkUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>'
+          : '<div class="kv"><span>'+(s.secret?t('私有仓库','Private repo'):t('仓库','Repo'))+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
+            + (s.secret?'<div class="muted" style="font-size:12px">'+t('作为协作者可 clone 评估','Clone it as a collaborator to review')+'</div>':''))
+      + (s.linkUrl?'<div class="kv"><span>👍 '+t('点赞','Likes')+'</span><b><button class="likebtn" id="dLike" data-id="'+esc(s.id)+'">♥ <span>'+(s.likes||0)+'</span></button></b></div>':'')
       + '<div id="ghMeta"></div>'
       + (s.lockedSha?'<div class="kv"><span>'+t('评审版本','Reviewed')+'</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
       + (s.email?'<div class="kv"><span>'+t('邮箱','Email')+'</span><b><a href="mailto:'+esc(s.email)+'">'+esc(s.email)+'</a ></b></div>':'')
@@ -3204,8 +3381,10 @@ const APP_HTML = String.raw`<!doctype html>
       + '</div>'
       + '</div>';
 
-    // github meta — skipped for secret (private repo isn't reachable via the public API)
-    if(!s.secret) api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
+    // detail like button (mini)
+    const dl=$('#dLike'); if(dl) dl.addEventListener('click', async ()=>{ try{ const r=await api('/api/submissions/'+s.id+'/like',{method:'POST',body:{}}); dl.querySelector('span').textContent=r.likes; dl.classList.add('liked'); }catch(e){} });
+    // github meta — skipped for secret (private repo) and mini (no repo)
+    if(!s.secret && !s.linkUrl) api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
       $('#ghMeta').innerHTML =
         '<div class="kv"><span>Stars</span><b>★ '+(d.stars??0)+'</b></div>'
         + (d.language?'<div class="kv"><span>'+t('语言','Language')+'</span><b>'+esc(d.language)+'</b></div>':'')
@@ -3228,7 +3407,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(s.secret){
       $('#readmeWrap').innerHTML='';
       readmeFrame(esc(s.readmeMd||t('(未提供 README)','(no README)')));
-    } else
+    } else if(!s.linkUrl && $('#loadReadme'))
     $('#loadReadme').addEventListener('click', async ()=>{
       $('#loadReadme').disabled = true; $('#loadReadme').textContent = t('加载中…','Loading…');
       try {
@@ -3328,7 +3507,45 @@ const APP_HTML = String.raw`<!doctype html>
     }catch(e){ setMsg('sMsg', e.message, true); }
     finally{ $('#sBtn').disabled=false; }
   }
+  async function renderMiniSubmit(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    app.innerHTML = '<h1>'+t('提交作品','Submit')+'</h1>'
+      + '<div class="notice">'+t('Mini 赛:不用写代码,交一个作品链接就行 —— no-code 应用 / 网站 / 文档 / 视频都可以。','Mini track: no coding — just submit a work link (no-code app / site / doc / video).')+'</div>'
+      + '<div class="panel" style="max-width:640px">'
+      + '<label>'+t('作品名称','Product name')+' *</label><input id="mProj" maxlength="80">'
+      + '<label>'+t('作品链接','Work link')+' *</label><input id="mLink" placeholder="https://...">'
+      + '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">'+t('(可让 AI 帮你写)','(AI can help)')+'</span></label>'
+      + '<textarea id="mDesc" rows="3" maxlength="300" placeholder="'+t('你的作品是做什么的?','What does it do?')+'"></textarea>'
+      + '<div class="row" style="margin-top:6px"><button class="ghost" id="mAI">✨ '+t('AI 帮我写简介','AI writes it')+'</button><span id="mAIMsg" class="muted"></span></div>'
+      + '<label style="margin-top:12px">'+t('截图','Screenshots')+' <span class="muted">'+t('(可选,'+CONFIG.minShots+'–'+CONFIG.maxShots+' 张)','(optional)')+'</span></label><input id="mShots" type="file" accept="image/*" multiple><div class="thumbs" id="mThumbs"></div>'
+      + '<label>'+t('联系邮箱','Contact email')+' *</label><input id="mEmail" type="email" maxlength="254" placeholder="you@example.com">'
+      + '<label>'+t('队伍/昵称(可选)','Team/name (optional)')+'</label><input id="mTeam" maxlength="80">'
+      + '<div class="row" style="margin-top:16px"><button id="mBtn">'+t('提交','Submit')+'</button></div><div id="mMsg"></div>'
+      + '</div>';
+    SHOTS = [];
+    $('#mShots').addEventListener('change', async ev=>{ const files=[...ev.target.files]; ev.target.value=''; for(const f of files){ if(SHOTS.length>=CONFIG.maxShots){ alert(t('最多 ','Max ')+CONFIG.maxShots); break; } try{ SHOTS.push(await compress(f)); }catch(e){ alert(t('图片处理失败','Image error')); } } renderMiniThumbs(); });
+    $('#mAI').addEventListener('click', async ()=>{
+      const name=$('#mProj').value.trim(), link=$('#mLink').value.trim();
+      if(!name && !link){ setMsg('mAIMsg', t('先填作品名或链接','Add a name or link first'), true); return; }
+      $('#mAI').disabled=true; setMsg('mAIMsg', t('生成中…','Writing…'));
+      try{ const r=await api('/api/tenant/mini/assist',{method:'POST',body:{name,link}}); $('#mDesc').value=r.text||''; setMsg('mAIMsg', t('✓ 可以再改改','✓ edit as you like')); }
+      catch(e){ setMsg('mAIMsg', e.message, true); }
+      $('#mAI').disabled=false;
+    });
+    $('#mBtn').addEventListener('click', async ()=>{
+      const body={ projectName:$('#mProj').value.trim(), linkUrl:$('#mLink').value.trim(), description:$('#mDesc').value.trim(), email:$('#mEmail').value.trim(), teamName:$('#mTeam').value.trim(), shots:SHOTS };
+      if(!body.projectName||!body.linkUrl||!body.email){ setMsg('mMsg', t('请填齐作品名、链接、邮箱','Fill in name, link and email'), true); return; }
+      $('#mBtn').disabled=true; setMsg('mMsg', t('提交中…','Submitting…'));
+      try{ const r=await api('/api/submissions',{method:'POST',body});
+        setMsg('mMsg', t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看','View')+'</a ><br>'+t('编辑令牌(改稿用):','Edit token: ')+'<code>'+esc(r.editToken)+'</code>', false, true);
+        SHOTS=[];
+      }catch(e){ setMsg('mMsg', e.message, true); }
+      finally{ $('#mBtn').disabled=false; }
+    });
+  }
+  function renderMiniThumbs(){ $('#mThumbs').innerHTML = SHOTS.map((d,i)=>'<div class="t"><img src="'+d+'"><span class="x" data-i="'+i+'">×</span></div>').join(''); $('#mThumbs').querySelectorAll('.x').forEach(x=>x.addEventListener('click',()=>{ SHOTS.splice(Number(x.dataset.i),1); renderMiniThumbs(); })); }
   async function renderSubmit(){
+    if(CONFIG.tenant && CONFIG.tenant.mode==='mini') return renderMiniSubmit();
     if(CONFIG.tenant && CONFIG.tenant.mode==='secret') return renderSecretSubmit();
     // NB: SHOTS is intentionally NOT reset here, so a language toggle / re-render keeps
     // already-selected screenshots. It's cleared after a successful submit instead.
