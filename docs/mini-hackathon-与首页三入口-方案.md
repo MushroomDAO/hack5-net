@@ -124,6 +124,19 @@ ALTER TABLE submissions ADD COLUMN link_url TEXT;   -- mini:任意作品链接(n
 5. **并发**:多 repo / 多 worktree 并行(黑客松几十个想法同时跑,v0.4)。
 6. **回调 webhook**:项目 loop-ready / 编码完成 / 部署完成时回调 hack5,好更新参赛者作品状态。
 
+**核心诉求(用户明确,B 的主线)—— 按参赛者开隔离实例 + 自动入库**:
+> 每个参赛者(开发者)**按名字开一个实例**,拿到**专属 URL、互不干扰**,进入即可开始开发。
+> 该参赛者与 WorkBench 的**全部对话内容 + 生成的规格文档 + loop-engineer 产出的代码**,
+> **全部自动提交到一个新建的 GitHub 仓库**——仓库名由参赛者命名,建在**我方提供 PAT 的专用 GitHub 账户**下。
+
+拆成对 WorkBench 的具体要求:
+- (a) **per-participant 实例/会话隔离**:按参赛者 slug 开 `clients/<hackathon>/projects/<participant>/`(fde-copilot 已有目录隔离),每人一个可访问 URL,鉴权 token 按参赛者作用域。
+- (b) **自动建仓 + 全量入库**:实例创建时用**我方 PAT**在专用账户下 `gh repo create <participant-named-repo>`;`conversation.jsonl`、6 份规格 `.md`、loop 产出的代码**都 push 到这个仓库**(fde-copilot 的 commit + loop-engineer 的 `--repo` 指向同一个)。
+- (c) **PAT 注入**:我方提供 GitHub PAT(专用账户),WorkBench 用它建仓 + push;权限最小化(仅该账户建仓/推送)。
+- (d) 计费按参赛者/场次归集,后付费出账单(对齐 mini 免费额度 + 赞助代付)。
+
+> 这份诉求先给你 review,确认后再正式提给 WorkBench 团队(goutou)。
+
 ---
 
 *设计稿。首页三入口可先做(常规/私密已就绪,Mini 待建);Mini 待你在 §7 拍板后进入实现(照旧开 PR)。底层复用、逻辑隔离贯穿。hack5 · Mycelium。*
