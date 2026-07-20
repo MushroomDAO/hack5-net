@@ -2288,7 +2288,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.3.2'; // shown in the footer; bump on release
+  const APP_VERSION = '0.4.0'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
