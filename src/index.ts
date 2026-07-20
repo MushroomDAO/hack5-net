@@ -1393,7 +1393,8 @@ async function createMiniSubmission(request: Request, env: Env, tid: string): Pr
   const now = unixNow();
   // No repo in mini — key identity on email so each person has one editable entry.
   const owner = "mini";
-  const repo = (email.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "anon").slice(0, 60);
+  // Hash the email (not a slug) so different emails can't collide onto the same identity key.
+  const repo = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
   const shotsMeta = JSON.stringify(decoded.map((d) => ({ ct: d.contentType })));
   const existing = await env.DB.prepare(
     "SELECT id, edit_token, shot_count FROM submissions WHERE tenant_id = ? AND repo_owner = ? AND repo_name = ?",
