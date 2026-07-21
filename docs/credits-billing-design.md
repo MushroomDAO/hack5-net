@@ -59,8 +59,26 @@ hack5 需要**每 job / 每轮的实际 token 数**才能精确 settle。来源:
 2. **接你的 API + 定价**:打开开关,launch 接 reserve/settle,超免费额度走积分。
 3. **WorkBench 报 token**:精确 settle(协同任务)。
 
-## 7. 待你拍板的参数
+## 7. 定价(已定):按实际成本 × 2
 
-- `CREDITS_PER_1K_TOKENS`:1000 token = ? 积分(定价)。
-- 外部 API:确认第 2 节契约(4 端点,或退化 2 端点),给我 `CREDITS_API_URL` + 带外 `CREDITS_API_SECRET`。
-- build 的 `maxCost` 估算口径(固定上限,还是按 spec 规模估)。
+规则:**1 积分 = $0.02**;**卖价 = 实际 token 成本 × 2**(2 倍加价)。
+
+**不用平均估算,用真实模型价逐 job 算成本** —— 见 `docs/model-prices.csv`(34 个模型的输入/输出 $/1M,图像 $/次)。因为不同模型、输入 vs 输出价差很大(如 kimi-k3 输出 $13.97/1M vs deepseek-v4-flash 输出 $0.29/1M),平均会失真。
+
+**由 WorkBench(实际跑模型的一方)算每 job 的实际 $ 成本**(它知道用了哪个模型、输入/输出各多少 token、价格),回传给 hack5;hack5 换算积分:
+
+```
+credits = ceil( 实际成本_usd × 2 / 0.02 ) = ceil( 实际成本_usd × 100 )
+```
+
+配置:`CREDIT_USD_VALUE = 0.02`(每积分 $)、`CREDITS_MARKUP = 2`(加价倍数)。
+
+**参考量级**(用 deepseek-v4-pro 输入$0.44/输出$0.88 粗估):一次 build 若 ~50K 入 + ~150K 出 ≈ $0.022 + $0.132 = $0.154 成本 → ×2 = $0.31 → **~16 积分 ≈ $0.31**。chat 一轮很小,通常 1 积分(取整下限)。
+
+> `CREDITS_PER_1K_TOKENS`(阶段 1 脚手架里的平均法)保留为 **fallback**:WorkBench 未回传实际成本时用它粗估;主路径是上面的实际成本 × 2。
+
+## 8. 仍待你拍板
+
+- 外部 API:确认第 2 节契约(4 端点,或退化为 balance+deduct 我做退差),给我 `CREDITS_API_URL` + 带外 `CREDITS_API_SECRET`。
+- build 的 `reserve` 预扣口径(实际成本跑完才知 → reserve 用固定上限如 20 积分/次封顶,settle 时退差)。
+- WorkBench 按 `model-prices.csv` 算成本并回传(协同任务已发 repo:workbench)。

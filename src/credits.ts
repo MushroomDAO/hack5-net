@@ -16,7 +16,9 @@ export type CreditsEnv = {
   CREDITS_ENABLED?: string; // "1"/"true" to turn the whole feature on
   CREDITS_API_URL?: string; // base URL of the external credits API
   CREDITS_API_SECRET?: string; // shared secret for HMAC request signing
-  CREDITS_PER_1K_TOKENS?: string; // price: credits charged per 1000 tokens
+  CREDIT_USD_VALUE?: string; // dollars per credit (default 0.02 — "两美分")
+  CREDITS_MARKUP?: string; // price multiplier over raw model cost (default 2)
+  CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
 };
 
 export function creditsEnabled(env: CreditsEnv): boolean {
@@ -24,7 +26,16 @@ export function creditsEnabled(env: CreditsEnv): boolean {
   return on && !!env.CREDITS_API_URL && !!env.CREDITS_API_SECRET;
 }
 
-// credits owed for a token count, rounded up per-1000 so partial thousands still charge.
+// Primary billing: credits owed for the actual USD model cost of a job (computed by WorkBench from
+// docs/model-prices.csv). credits = ceil(cost * markup / creditUsd) = ceil(cost * 100) at defaults.
+export function costUsdToCredits(env: CreditsEnv, usdCost: number): number {
+  const creditUsd = Number(env.CREDIT_USD_VALUE ?? "0.02") || 0.02;
+  const markup = Number(env.CREDITS_MARKUP ?? "2") || 2;
+  if (!Number.isFinite(usdCost) || usdCost <= 0) return 0;
+  return Math.ceil((usdCost * markup) / creditUsd);
+}
+
+// Fallback estimate when the actual $ cost isn't available: a flat blended rate per 1000 tokens.
 export function tokensToCredits(env: CreditsEnv, tokens: number): number {
   const rate = Number(env.CREDITS_PER_1K_TOKENS ?? "0");
   if (!Number.isFinite(rate) || rate <= 0 || !Number.isFinite(tokens) || tokens <= 0) return 0;

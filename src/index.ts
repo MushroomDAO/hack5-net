@@ -60,7 +60,9 @@ interface Env {
   CREDITS_ENABLED?: string; // "1"/"true" turns the feature on; off = current free-quota behaviour
   CREDITS_API_URL?: string; // external credits API base (balance/reserve/settle/release, keyed by email)
   CREDITS_API_SECRET?: string; // HMAC secret to sign requests to the credits API
-  CREDITS_PER_1K_TOKENS?: string; // price: credits charged per 1000 tokens
+  CREDIT_USD_VALUE?: string; // dollars per credit (default 0.02)
+  CREDITS_MARKUP?: string; // markup multiplier over raw model cost (default 2)
+  CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
