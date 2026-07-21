@@ -50,6 +50,11 @@ interface Env {
   GITHUB_APP_ID?: string; // GitHub App for repo-scoped short-lived push tokens
   GITHUB_APP_PRIVATE_KEY?: string; // PKCS#8 PEM
   GITHUB_APP_INSTALLATION_ID?: string;
+  // ---- Mini /make anonymous-abuse guardrails (tunable daily caps; defaults in code) ----
+  MINIAPP_CHAT_GLOBAL_CAP?: string; // all-tenant daily chat (LLM) ceiling — default 3000
+  MINIAPP_LAUNCH_IP_CAP?: string; // per-IP daily build ceiling — default 3
+  MINIAPP_LAUNCH_TENANT_CAP?: string; // per-tenant daily build ceiling — default 10
+  MINIAPP_LAUNCH_GLOBAL_CAP?: string; // all-tenant daily build ceiling — default 30
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
@@ -1669,6 +1674,12 @@ async function bumpDailyCap(env: Env, key: string, cap: number, ttlDays = 2): Pr
   return true;
 }
 
+// Parse a positive-integer cap from an env string, falling back to a default when unset/invalid.
+function capNum(v: string | undefined, def: number): number {
+  const n = parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+}
+
 async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
   // Public/anonymous mini: bound WorkBench LLM cost with per-IP + per-tenant daily caps.
@@ -1677,6 +1688,9 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
   const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
   if (!(await bumpDailyCap(env, `miniapp:chat:${tid}:ip:${ipHash}:${day}`, 40))) return json({ error: "今日对话次数已达上限,请明天再来 / Daily chat limit reached" }, 429);
   if (!(await bumpDailyCap(env, `miniapp:chat:${tid}:${day}`, 400))) return json({ error: "本场今日对话已达上限 / Event daily chat limit reached" }, 429);
+  // Absolute platform-wide backstop: caps total LLM spend even if an attacker spreads across many
+  // tenants/IPs. Per-IP + per-tenant caps above bound a single source; this bounds the whole day.
+  if (!(await bumpDailyCap(env, `miniapp:chat:global:${day}`, capNum(env.MINIAPP_CHAT_GLOBAL_CAP, 3000)))) return json({ error: "系统今日对话已达上限,请明天再来 / Service daily chat limit reached" }, 429);
   const body = await request.json<{ clientSlug?: string; projectSlug?: string; input?: string; projectName?: string }>().catch(() => null);
   const input = String(body?.input ?? "").trim().slice(0, 1000);
   if (!input) return json({ error: "请说说你的想法 / Describe your idea" }, 400);
@@ -1724,6 +1738,18 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   const nameCheck = validateRepoName(body?.repoName);
   if (!nameCheck.ok || !nameCheck.name) return json({ error: nameCheck.error || "仓库名不合法 / Invalid repo name" }, 400);
   const repoName = nameCheck.name;
+
+  // Identity-independent abuse caps. `email` below is attacker-controllable and unverified, so the
+  // per-email free quota alone can't bound how many real GitHub repos + coding-loop runs get created
+  // (rotate the email string -> unlimited). These per-IP / per-tenant / global daily ceilings bound
+  // the blast radius regardless of email. Counted per attempt (before provisioning) so retries can't
+  // bypass them. Tunable via MINIAPP_LAUNCH_*_CAP.
+  const day = Math.floor(unixNow() / 86400);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
+  if (!(await bumpDailyCap(env, `miniapp:launch:ip:${ipHash}:${day}`, capNum(env.MINIAPP_LAUNCH_IP_CAP, 3)))) return json({ error: "今日生成次数已达上限,请明天再来 / Daily build limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:launch:t:${tid}:${day}`, capNum(env.MINIAPP_LAUNCH_TENANT_CAP, 10)))) return json({ error: "本场今日生成已达上限 / Event daily build limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:launch:global:${day}`, capNum(env.MINIAPP_LAUNCH_GLOBAL_CAP, 30)))) return json({ error: "系统今日生成已达上限,请明天再来 / Service daily build limit reached" }, 429);
 
   const owner = "mini";
   const repoKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
