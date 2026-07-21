@@ -1197,7 +1197,7 @@ function parseAgenda(raw: string | null | undefined): { time: string; title: str
 
 async function registerParticipant(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
   if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
-  const body = await request.json<{ name?: string; email?: string; note?: string }>().catch(() => null);
+  const body = await request.json<{ name?: string; email?: string; note?: string; turnstileToken?: string }>().catch(() => null);
   const email = normalizeEmail(body?.email);
   if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
   const note = String(body?.note ?? "").trim().slice(0, 300) || null;
@@ -1209,6 +1209,13 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
 
   const now = unixNow();
   const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  // Same anti-abuse gate as the email-code login flow: registration is an open endpoint that now sends
+  // a confirmation email to any address in the body, so — like login — require a Turnstile token to stop
+  // it being scripted as an email amplifier. No-ops (passes) when Turnstile isn't configured, so mini
+  // registration stays frictionless until an operator turns Turnstile on.
+  if (!(await verifyTurnstile(env, body?.turnstileToken, ip))) {
+    return json({ error: "人机验证失败,请重试 / Verification failed" }, 403);
+  }
   // Per-tenant capacity cap: stop unbounded DB growth from a single event.
   const total = await env.DB.prepare("SELECT COUNT(*) AS c FROM registrations WHERE tenant_id = ?")
     .bind(tenant.id)
@@ -4138,13 +4145,21 @@ const APP_HTML = String.raw`<!doctype html>
       + '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
       + (isMini ? '<p class="muted" style="margin:6px 0 0;font-size:13px">'+t('用户名将自动取自邮箱','Your display name is taken from your email')+'</p>' : '')
       + '<label>'+t('想法 / 找队友(可选)','Idea / looking for a team (optional)')+'</label><textarea id="rgNote" maxlength="300"></textarea>'
+      + (CONFIG.turnstileSiteKey ? '<div id="rgts" style="margin-top:12px"></div>' : '')
       + '<div class="row" style="margin-top:14px"><button id="rgBtn">'+t('提交报名','Register')+'</button></div>'
       + '<div id="rgMsg"></div></div></div>';
+    let rgTs = null;
+    if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ rgTs = window.turnstile.render('#rgts', {sitekey: CONFIG.turnstileSiteKey}); }catch(e){} });
     $('#rgBtn').addEventListener('click', async ()=>{
       const nameEl=$('#rgName'); const name=nameEl?nameEl.value.trim():''; const email=$('#rgEmail').value.trim(), note=$('#rgNote').value.trim();
       if(!email||(!isMini&&!name)){ setMsg('rgMsg', isMini?t('请填写邮箱','Email required'):t('请填写姓名和邮箱','Name and email required'), true); return; }
+      let turnstileToken;
+      if(CONFIG.turnstileSiteKey){
+        turnstileToken = (window.turnstile && rgTs!=null) ? window.turnstile.getResponse(rgTs) : '';
+        if(!turnstileToken){ setMsg('rgMsg', t('请先完成人机验证','Please complete the check'), true); return; }
+      }
       $('#rgBtn').disabled=true;
-      try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note}});
+      try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note,turnstileToken}});
         const done = r.already ? t('你已经报名过了 ✓','You are already registered ✓') : t('报名成功!🎉','Registered! 🎉');
         let next;
         if(isMini){
@@ -4158,7 +4173,7 @@ const APP_HTML = String.raw`<!doctype html>
             + '<div class="row" style="margin-top:6px"><button onclick="go(\'/submit\')">'+t('去提交作品','Go to Submit')+'</button></div>';
         }
         $('#regForm').innerHTML='<div class="notice ok">'+done+'</div>'+next;
-      }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; }
+      }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; if(window.turnstile && rgTs!=null) try{ window.turnstile.reset(rgTs); }catch(_){} }
     });
   }
 
