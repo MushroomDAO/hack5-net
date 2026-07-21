@@ -3487,6 +3487,9 @@ const APP_HTML = String.raw`<!doctype html>
     '请至少输入一个姓名':'กรุณากรอกอย่างน้อยหนึ่งชื่อ', ' 个,发给各评委:':' รหัส ส่งให้กรรมการแต่ละคน:', '还没有评委':'ยังไม่มีกรรมการ', '登录码':'รหัสเข้า',
     '还没有评委,上面生成。':'ยังไม่มีกรรมการ สร้างด้านบน', '请求失败':'คำขอไม่สำเร็จ', '请求失败 ':'คำขอไม่สำเร็จ ',
     '管理':'ผู้ดูแล',
+    '下载对话':'ดาวน์โหลดบทสนทนา', '清空重来':'เริ่มใหม่',
+    '对话已存本机浏览器,重进本页可继续;清空会丢失,建议先下载。':'บทสนทนาถูกเก็บในเบราว์เซอร์นี้ กลับมาหน้านี้เพื่อทำต่อได้ การล้างจะทำให้หาย ควรดาวน์โหลดไว้ก่อน',
+    '清空后当前对话会丢失,建议先「下载对话」保存。确定清空?':'การล้างจะทำให้บทสนทนานี้หาย ควรกด「ดาวน์โหลดบทสนทนา」เก็บไว้ก่อน ยืนยันล้าง?',
     '报名确认邮件已发到你的邮箱 📩(没收到看下垃圾箱)。主办方会把你的参赛邀请码发给你(微信 / 邮件 / 群),拿到后到「提交作品」填邀请码提交。建议收藏本页。':'ส่งอีเมลยืนยันการลงทะเบียนไปแล้ว 📩 (ถ้าไม่พบ ลองดูในโฟลเดอร์สแปม) ผู้จัดจะส่งรหัสเชิญให้คุณ (WeChat / อีเมล / กลุ่ม) เมื่อได้แล้วไปที่「ส่งผลงาน」แล้วกรอกรหัสเชิญเพื่อส่ง แนะนำให้บุ๊กมาร์กหน้านี้',
   };
 
@@ -4722,13 +4725,21 @@ const APP_HTML = String.raw`<!doctype html>
   // A3 — mini「做成应用」: multi-turn chat → provision repo + trigger loop, then it appears on the wall.
   async function renderMiniMakeApp(){
     if(!CONFIG.tenant || CONFIG.tenant.mode!=='mini'){ go('/'); return; }
-    let clientSlug='', projectSlug='', ready=false, lastIdea='';
+    let clientSlug='', projectSlug='', ready=false, lastIdea='', msgs=[], lastReadiness=null;
+    // The /make chat only lived in memory, so a reload lost it. Persist the conversation to this
+    // browser's localStorage (per tenant) and restore it on return; the user can download it or start
+    // over (with a warning). Nothing is stored server-side — download is the way to keep a copy.
+    const DKEY = 'hv_make_' + ((CONFIG.tenant && CONFIG.tenant.subdomain) || 'mini');
+    function saveDraft(){ try{ lsSet(DKEY, JSON.stringify({clientSlug,projectSlug,ready,lastIdea,msgs,lastReadiness})); }catch(e){} }
+    function clearDraft(){ lsSet(DKEY, ''); }
+    function loadDraft(){ try{ const raw=lsGet(DKEY); if(!raw) return null; const d=JSON.parse(raw); return (d && Array.isArray(d.msgs) && d.msgs.length) ? d : null; }catch(e){ return null; } }
     app.innerHTML = '<h1>✨ '+t('让 AI 帮我做成应用','Turn your idea into an app')+'</h1>'
       + '<div class="notice">'+t('说说你的想法,AI 会追问补全;准备好后自动建公有仓库 + 编码 + 部署。','Describe your idea — the AI asks follow-ups, then provisions a public repo, codes and deploys it.')+'</div>'
       + '<div class="panel" style="max-width:680px">'
       + '<div id="chatLog" style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px"></div>'
       + '<div id="readyBar" style="margin-bottom:8px"></div>'
       + '<div class="row" style="gap:8px"><textarea id="chatIn" rows="2" maxlength="1000" placeholder="'+t('例:帮小区做一个团购小工具…','e.g. a group-buy tool for my neighborhood…')+'" style="flex:1"></textarea><button id="chatSend">'+t('发送','Send')+'</button></div>'
+      + '<div id="mkTools" class="row" style="gap:8px;margin-top:6px;flex-wrap:wrap"></div>'
       + '<div id="chatMsg" class="muted" style="margin-top:6px"></div>'
       + '<div id="launchBox" style="margin-top:12px"></div>'
       + '</div>';
@@ -4740,12 +4751,31 @@ const APP_HTML = String.raw`<!doctype html>
         : 'align-self:flex-start;background:var(--panel2,rgba(127,127,127,.12));padding:8px 12px;border-radius:12px;max-width:82%';
       d.textContent=text; log.appendChild(d); log.scrollTop=log.scrollHeight;
     }
-    function renderReady(r){
+    function downloadChat(){
+      const body = msgs.map(m=>(m.who==='me'?'🧑 ':'🤖 ')+m.text).join('\n\n');
+      const head = '# '+((CONFIG.tenant&&CONFIG.tenant.name)||'hack5')+' · /make\n'+(projectSlug?('project: '+projectSlug+'\n'):'')+'\n';
+      const blob = new Blob([head+body+'\n'], {type:'text/markdown;charset=utf-8'});
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='make-'+(projectSlug||'chat')+'.md';
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>{ try{ URL.revokeObjectURL(a.href); }catch(_){} }, 1000);
+    }
+    function renderTools(){
+      const el=$('#mkTools'); if(!el) return;
+      if(!msgs.length){ el.innerHTML=''; return; }
+      el.innerHTML = '<button class="ghost" id="mkDl">💾 '+t('下载对话','Download chat')+'</button>'
+        + '<button class="ghost" id="mkClr">🗑 '+t('清空重来','New chat')+'</button>'
+        + '<span class="muted" style="font-size:12px;align-self:center">'+t('对话已存本机浏览器,重进本页可继续;清空会丢失,建议先下载。','Saved in this browser — reopen to continue. Clearing loses it, so download first.')+'</span>';
+      $('#mkDl').onclick=downloadChat;
+      $('#mkClr').onclick=()=>{ if(confirm(t('清空后当前对话会丢失,建议先「下载对话」保存。确定清空?','Clearing loses this conversation — download it first. Clear anyway?'))){ clearDraft(); renderMiniMakeApp(); } };
+    }
+    function paintReady(r){
       if(!r){ $('#readyBar').innerHTML=''; return; }
       const pct=Math.max(0,Math.min(100,r.score||0));
       $('#readyBar').innerHTML = '<div class="muted" style="font-size:12px;margin-bottom:2px">'+t('规格完备度','Spec readiness')+' '+pct+'%'+(r.loop_ready?' · ✅ '+t('可以开始生成','ready to build'):'')+'</div>'
         + '<div style="height:8px;border-radius:4px;background:var(--line,#333);overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+(r.loop_ready?'#16a34a':'#d97706')+'"></div></div>';
-      if(r.loop_ready && !ready){ ready=true; showLaunch(); }
+    }
+    function renderReady(r){
+      lastReadiness=r||null; paintReady(r);
+      if(r && r.loop_ready && !ready){ ready=true; showLaunch(); }
     }
     function showLaunch(){
       // One English name only — it is used as BOTH the project name and the public repo name, so it
@@ -4760,12 +4790,14 @@ const APP_HTML = String.raw`<!doctype html>
       const input=$('#chatIn').value.trim();
       if(!input) return;
       lastIdea=input;
-      addMsg('me', input); $('#chatIn').value=''; $('#chatSend').disabled=true; setMsg('chatMsg', t('思考中…','Thinking…'));
+      msgs.push({who:'me',text:input}); addMsg('me', input); renderTools();
+      $('#chatIn').value=''; $('#chatSend').disabled=true; setMsg('chatMsg', t('思考中…','Thinking…'));
       try{
         const r=await api('/api/tenant/mini/app/chat',{method:'POST',body:{clientSlug,projectSlug,input}});
         clientSlug=r.clientSlug; projectSlug=r.projectSlug;
-        if(r.reply) addMsg('ai', r.reply);
+        if(r.reply){ msgs.push({who:'ai',text:r.reply}); addMsg('ai', r.reply); }
         renderReady(r.readiness); setMsg('chatMsg','');
+        saveDraft(); renderTools();
       }catch(e){ setMsg('chatMsg', e.message, true); }
       $('#chatSend').disabled=false;
     }
@@ -4779,7 +4811,17 @@ const APP_HTML = String.raw`<!doctype html>
         $('#launchBox').innerHTML = '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+' '+t('队列位','Queue')+' #'+(r.queuePos||1)+'<br>'
           + t('公有仓库','Repo')+': <a href="'+esc(r.repoUrl)+'" target="_blank" rel="noopener">'+esc(r.repoUrl)+'</a ><br>'
           + '<a href="'+esc(r.viewUrl)+'" onclick="go(\''+esc(r.viewUrl)+'\');return false">'+t('查看作品详情 →','View project →')+'</a > · '+t('编辑令牌','Edit token')+': <code>'+esc(r.editToken)+'</code></div>';
+        clearDraft(); // build is queued and the repo is the artifact now — drop the saved chat draft
       }catch(e){ setMsg('mkMsg', e.message, true); $('#mkGo').disabled=false; }
+    }
+    // Restore a saved conversation (this browser) so a reload / navigation doesn't lose it.
+    const saved=loadDraft();
+    if(saved){
+      clientSlug=saved.clientSlug||''; projectSlug=saved.projectSlug||''; lastIdea=saved.lastIdea||''; lastReadiness=saved.lastReadiness||null;
+      saved.msgs.forEach(m=>addMsg(m.who,m.text));
+      paintReady(lastReadiness);
+      if(saved.ready){ ready=true; showLaunch(); }
+      renderTools();
     }
     $('#chatSend').addEventListener('click', send);
     $('#chatIn').addEventListener('keydown', e=>{ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(); } });
