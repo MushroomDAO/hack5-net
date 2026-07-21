@@ -750,7 +750,7 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   }
   if (RESERVED_SUBDOMAINS.has(subdomain)) return json({ error: "该子域名被保留 / Reserved subdomain" }, 400);
   // Mini is a 5-minute flow — intro optional (a default is used); other modes require an intro.
-  const finalIntro = mode === "mini" && intro.length < 10 ? `${name} —— 一场快速的 mini 黑客松` : intro;
+  const finalIntro = mode === "mini" && intro.length < 10 ? `${name} —— AI 驱动的 mini 黑客松:一句想法,AI 帮你自动做成能跑的应用` : intro;
   if (mode !== "mini" && intro.length < 10) return json({ error: "请写一段黑客松简介(至少 10 字)/ Add an intro (10+ chars)" }, 400);
   // Banner is optional — if omitted, the homepage shows a generated default. If provided it must be
   // a small raster image (no SVG, to avoid stored-XSS when the blob is fetched directly).
@@ -3395,7 +3395,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="entry-grid">'
       + '<div class="entry-card" onclick="startMode(\'open\')"><div class="ec-ico">⚡</div><h3>'+t('常规黑客松','Regular')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 200 人以下','10 min · under 200 people')+'</div><p>'+t('公开报名、作品墙、评审打分——通用规模。','Public sign-up, gallery, judging — general scale.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
       + '<div class="entry-card" onclick="startMode(\'secret\')"><div class="ec-ico">🔒</div><h3>'+t('企业私密黑客松','Enterprise')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 邀请制','10 min · invite-only')+'</div><p>'+t('访问码门禁、不公开源码、Demo 评审。付费。','Access-gated, no source exposed, demo review. Paid.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
-      + '<div class="entry-card" onclick="startMode(\'mini\')"><div class="ec-ico">✨</div><h3>'+t('Mini 黑客松','Mini')+'</h3><div class="ec-sub">'+t('5 分钟启动 · 50 人以下','5 min · under 50 people')+'</div><p>'+t('面向非开发者,交个链接就行,AI 帮你写简介。每人 1 次免费。','For non-coders — just a link, AI helps. 1 free each.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
+      + '<div class="entry-card" onclick="startMode(\'mini\')"><div class="ec-ico">✨</div><h3>'+t('Mini 黑客松','Mini')+'</h3><div class="ec-sub">'+t('5 分钟启动 · AI 驱动 · 50 人以下','5 min · AI-powered · under 50')+'</div><p>'+t('面向非开发者:AI 驱动,一句想法就能自动做成能跑的应用。每人 1 次免费。','For non-coders — AI-powered: one idea auto-built into a working app. 1 free each.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
       + '</div>'
       + '<div style="text-align:center;margin-top:16px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 看 Demo 示例 → demo.hack5.net','👀 See the demo → demo.hack5.net')+'</a></div>'
       + '<div class="guide-steps" style="margin-top:38px">'
