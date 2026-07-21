@@ -724,7 +724,10 @@ function userCookie(request: Request, token: string, maxAge: number): string {
 // abilities — it is only an identity so the client can show "your" registration/submission state.
 // The cookie is host-only (no Domain attr) so it never leaks across subdomains; the claim also pins
 // the tenant id as defence in depth.
-type ParticipantAuth = { email: string; tenant: string; exp: number };
+// `verified` distinguishes a #47 email-verified session (true — proven inbox ownership) from a
+// registration-issued session (false — the browser merely typed an email at 报名, which anyone can do
+// for any address). Missing (legacy cookies) is treated as NOT verified: fail closed.
+type ParticipantAuth = { email: string; tenant: string; exp: number; verified?: boolean };
 
 async function signParticipant(env: Env, payload: ParticipantAuth): Promise<string> {
   const body = b64urlEncode(JSON.stringify(payload));
@@ -809,8 +812,10 @@ async function participantLoginVerify(request: Request, env: Env, tenant: Tenant
     .run();
   if (consumed.meta.changes !== 1) return json({ error: "验证码已被使用 / Code already used" }, 401);
   await env.DB.prepare("UPDATE email_codes SET used_at = ? WHERE email = ? AND used_at IS NULL").bind(now, email).run();
-  // Participant session only — NO users insert (that would grant organizer abilities).
-  const token = await signParticipant(env, { email, tenant: tid, exp: now + 30 * 24 * 60 * 60 });
+  // Participant session only — NO users insert (that would grant organizer abilities). This path
+  // proved inbox ownership via the emailed code, so the session is `verified` and may read the
+  // participant's own admin-only registration/submission details.
+  const token = await signParticipant(env, { email, tenant: tid, exp: now + 30 * 24 * 60 * 60, verified: true });
   return json({ ok: true, email }, 200, { "Set-Cookie": participantCookie(request, token, 30 * 24 * 60 * 60) });
 }
 
@@ -825,6 +830,13 @@ async function participantMe(request: Request, env: Env, tenant: Tenant | null, 
   const reg = await env.DB.prepare("SELECT name, note, created_at FROM registrations WHERE tenant_id = ? AND email = ? LIMIT 1")
     .bind(tid, me.email)
     .first<{ name: string; note: string | null; created_at: number }>();
+  // An unverified (registration-issued, or legacy) session proves only that this browser typed an
+  // email — not that it owns that inbox. It may unlock 开始开发 (needs just `registered`), but must never
+  // expose admin-only registration note/name or submission details, or anyone could read a victim's
+  // data by registering under their email. Those require a #47 email-verified session.
+  if (me.verified !== true) {
+    return json({ email: me.email, registered: Boolean(reg), verified: false, registration: null, submission: null });
+  }
   const sub = await env.DB.prepare(
     "SELECT id, project_name, repo_url, link_url, build_state, share_token, created_at FROM submissions WHERE tenant_id = ? AND email = ? ORDER BY created_at DESC LIMIT 1",
   )
@@ -833,6 +845,7 @@ async function participantMe(request: Request, env: Env, tenant: Tenant | null, 
   return json({
     email: me.email,
     registered: Boolean(reg),
+    verified: true,
     registration: reg ? { name: reg.name, note: reg.note, at: reg.created_at } : null,
     submission: sub
       ? { id: sub.id, projectName: sub.project_name, repoUrl: sub.repo_url, linkUrl: sub.link_url, buildState: sub.build_state, viewUrl: `/s/${sub.id}`, at: sub.created_at }
@@ -1161,10 +1174,11 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
   )
     .bind(crypto.randomUUID(), tenant.id, name, email, note, now, ip)
     .run();
-  // Registering also establishes a participant session (hv_part) so this browser is now a known
-  // participant: 「我的黑客松」can show registration/submission status and unlock 开始开发 without a
-  // separate login step. Same cookie whether the row was newly inserted or already present.
-  const token = await signParticipant(env, { email, tenant: tenant.id, exp: now + 30 * 24 * 60 * 60 });
+  // Registering establishes an UNVERIFIED participant session (hv_part, verified:false): this browser
+  // typed an email but has not proven it owns that inbox, so the session may unlock 开始开发 (which needs
+  // only `registered`) but must NOT read admin-only registration/submission details — otherwise anyone
+  // could read a victim's data by registering under their email. Full access requires the #47 code flow.
+  const token = await signParticipant(env, { email, tenant: tenant.id, exp: now + 30 * 24 * 60 * 60, verified: false });
   const cookie = { "Set-Cookie": participantCookie(request, token, 30 * 24 * 60 * 60) };
   if (res.meta.changes !== 1) return json({ ok: true, already: true }, 200, cookie); // idempotent: already registered
   return json({ ok: true }, 200, cookie);
