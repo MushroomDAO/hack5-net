@@ -223,14 +223,27 @@ export async function createParticipantRepo(env: RepoBotEnv, rawName: string, op
   };
 }
 
-// Mint the repo-scoped, short-lived PUSH token (B2). Secret — use only at the push boundary.
+// Mint the repo-scoped PUSH token (B2). Secret — use only at the push boundary, never log it.
+// Order: offline mock → GitHub App installation token (preferred: repo-scoped + short-lived) →
+// a repo-scoped fine-grained bot PAT via GITHUB_BOT_TOKEN (A8 联调 fallback, "PAT 不用 App").
 export async function mintRepoScopedPushToken(env: RepoBotEnv, repoName: string): Promise<RepoPushToken> {
   const check = validateRepoName(repoName);
   if (!check.ok || !check.name) throw new Error(check.error || "invalid repo name");
-  if (repoBotMockEnabled(env) || !env.GITHUB_APP_ID) {
-    return { token: `mock-push-token-${check.name}`, expiresAt: new Date(0).toISOString(), repository: check.name, mock: true };
+  const name = check.name;
+  // Offline mock (WORKBENCH_MOCK=1 or no bot credential): fake token, no real secret.
+  if (repoBotMockEnabled(env)) {
+    return { token: `mock-push-token-${name}`, expiresAt: new Date(0).toISOString(), repository: name, mock: true };
   }
-  return mintInstallationToken(env, check.name);
+  // Preferred: GitHub App installation token scoped to this one repo.
+  if (env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY && env.GITHUB_APP_INSTALLATION_ID) {
+    return mintInstallationToken(env, name);
+  }
+  // Fallback: a repo-scoped fine-grained bot PAT supplied via GITHUB_BOT_TOKEN. MUST be repo-scoped
+  // (never account-level, per B2). Reaching here means WORKBENCH_MOCK is off and GITHUB_BOT_TOKEN is set.
+  if (env.GITHUB_BOT_TOKEN) {
+    return { token: env.GITHUB_BOT_TOKEN, expiresAt: "", repository: name };
+  }
+  throw new Error("no push credential: configure a GitHub App or a repo-scoped GITHUB_BOT_TOKEN");
 }
 
 // Delete a repo (used for one-off provisioning self-tests). Needs delete permission on the bot token.
