@@ -2,7 +2,6 @@ import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
 import { createWorkbench, workbenchMockEnabled, mintScopedChatToken } from "./workbench";
 import { createParticipantRepo, mintRepoScopedPushToken, deleteParticipantRepo, validateRepoName, repoBotMockEnabled } from "./participant-repo";
-import { creditsEnabled, getBalance as getCreditBalance } from "./credits";
 
 interface Env {
   DB: D1Database;
@@ -63,6 +62,7 @@ interface Env {
   CREDIT_USD_VALUE?: string; // dollars per credit (default 0.02)
   CREDITS_MARKUP?: string; // markup multiplier over raw model cost (default 2)
   CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
+  CREDITS_SIGNUP_GRANT?: string; // credits granted to a new participant on first registration (default 300)
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
@@ -866,15 +866,16 @@ async function participantMe(request: Request, env: Env, tenant: Tenant | null, 
 // Scaffolding for the token-billing design (docs/credits-billing-design.md): when CREDITS_ENABLED is
 // off / unconfigured it returns {enabled:false} and nothing else changes. Balance is never held here.
 async function miniCreditsBalance(request: Request, env: Env, tid: string | null): Promise<Response> {
-  if (!creditsEnabled(env)) return json({ enabled: false });
   const me = await getParticipant(request, env, tid);
-  if (!me || !tid) return json({ enabled: true, email: null, credits: null });
-  // Financial data: only a #47 email-verified session may read the balance. An unverified (registration-
-  // issued / legacy) session only proves the browser typed an email, not that it owns it — otherwise
-  // anyone could read a victim's credits by registering under their email (same class as #49/#50).
-  if (me.verified !== true) return json({ enabled: true, email: me.email, credits: null, verified: false });
-  const credits = await getCreditBalance(env, me.email);
-  return json({ enabled: true, email: me.email, credits });
+  if (!me || !tid) return json({ email: null, credits: null });
+  // Financial data: only a #47 email-verified session may read the balance (same rule as participantMe).
+  // An unverified/legacy session only proves the browser typed an email, not that it owns it — otherwise
+  // anyone could read a victim's balance by registering under their email (same class as #49/#50).
+  if (me.verified !== true) return json({ email: me.email, credits: null, verified: false });
+  const row = await env.DB.prepare("SELECT credits, granted FROM participant_credits WHERE email = ?")
+    .bind(me.email)
+    .first<{ credits: number; granted: number }>();
+  return json({ email: me.email, verified: true, credits: row?.credits ?? 0, granted: row?.granted ?? 0 });
 }
 
 // Auto-pick a clean subdomain for mini's 5-minute flow (only the name is asked). Prefer the bare
@@ -1257,6 +1258,14 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
     "INSERT OR IGNORE INTO registrations (id, tenant_id, name, email, note, created_at, request_ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
   )
     .bind(crypto.randomUUID(), tenant.id, name, email, note, now, ip)
+    .run();
+  // Seed the participant's local credits account on first sight of this email (global across events).
+  // INSERT OR IGNORE → granted exactly once per email; a repeat / cross-event registration never re-grants.
+  const grant = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "300")) || 300);
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO participant_credits (email, credits, granted, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+  )
+    .bind(email, grant, grant, now, now)
     .run();
   // Registering establishes an UNVERIFIED participant session (hv_part, verified:false): this browser
   // typed an email but has not proven it owns that inbox, so the session may unlock 开始开发 (which needs
