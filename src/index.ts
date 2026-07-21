@@ -3882,7 +3882,19 @@ const APP_HTML = String.raw`<!doctype html>
       if(!email||(!isMini&&!name)){ setMsg('rgMsg', isMini?t('请填写邮箱','Email required'):t('请填写姓名和邮箱','Name and email required'), true); return; }
       $('#rgBtn').disabled=true;
       try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note}});
-        $('#regForm').innerHTML='<div class="notice ok">'+(r.already?t('你已经报名过了 ✓','You are already registered ✓'):t('报名成功!到时见 🎉','Registered! See you there 🎉'))+'</div>';
+        const done = r.already ? t('你已经报名过了 ✓','You are already registered ✓') : t('报名成功!🎉','Registered! 🎉');
+        let next;
+        if(isMini){
+          next = '<p style="margin:10px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
+            + '<div class="row" style="gap:8px;flex-wrap:wrap"><button onclick="go(\'/submit\')">'+t('提交作品','Submit your work')+'</button>'
+            + '<button class="ghost" onclick="go(\'/make\')">✨ '+t('AI 做成应用','Build with AI')+'</button></div>'
+            + '<p class="muted" style="margin-top:8px;font-size:13px">'+t('贴上你的作品链接即可参赛,或让 AI 把想法做成能跑的应用。请收藏本页 —— 活动都在这里,系统不会给你发邮件。','Submit a link to your work, or let AI turn your idea into a working app. Bookmark this page — everything happens here and no email is sent.')+'</p>';
+        } else {
+          next = '<p style="margin:10px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
+            + '<p class="muted" style="font-size:13px">'+t('主办方会把你的参赛邀请码发给你(微信 / 邮件 / 群)。拿到后,到「提交作品」填邀请码提交。请收藏本页 —— 系统不会给你发邮件。','The organizer will send you an invite code (WeChat / email / group). Once you have it, go to Submit and enter it. Bookmark this page — no email is sent by the system.')+'</p>'
+            + '<div class="row" style="margin-top:6px"><button onclick="go(\'/submit\')">'+t('去提交作品','Go to Submit')+'</button></div>';
+        }
+        $('#regForm').innerHTML='<div class="notice ok">'+done+'</div>'+next;
       }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; }
     });
   }
