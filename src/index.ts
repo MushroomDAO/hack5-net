@@ -1025,6 +1025,59 @@ async function sendHackathonReadyEmail(env: Env, email: string, name: string, ur
   }
 }
 
+// Registration confirmation — mini has no login password, so without this a participant leaves with
+// no record of what they signed up for. Best-effort (never throws): a mail failure must not fail the
+// registration itself, which already succeeded on-screen. Only sent on a NEW registration (the caller
+// gates on changes===1), so a repeat submit of the same email does not re-send.
+async function sendRegistrationConfirmEmail(
+  env: Env,
+  email: string,
+  hackathonName: string,
+  url: string,
+  mode: string,
+  when: string,
+): Promise<void> {
+  if (!env.RESEND_API_KEY) return;
+  const isMini = mode === "mini";
+  const nextText = isMini
+    ? `接下来你可以:\n· 提交作品(贴链接即可参赛):${url}/submit\n· 让 AI 把想法做成能跑的应用:${url}/make`
+    : `接下来:主办方会把参赛邀请码发给你(微信 / 邮件 / 群),拿到后到「提交作品」填码提交:${url}/submit`;
+  const text = `你已成功报名「${hackathonName}」🎉\n报名时间:${when}\n活动主页:${url}\n\n${nextText}\n\n请收藏活动主页,随时回来查看进度。${isMini ? "Mini 黑客松无需登录密码 —— 凭本邮件与主页即可参与。" : ""}\n\nYou are registered for "${hackathonName}". Site: ${url}\n\n— hack5.net`;
+  const nextHtml = isMini
+    ? `<a href="${url}/submit" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:10px 18px;border-radius:9px;margin:4px 6px 4px 0">提交作品 · Submit</a>` +
+      `<a href="${url}/make" style="display:inline-block;background:#0f9d6b;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:10px 18px;border-radius:9px;margin:4px 0">✨ AI 做成应用</a>`
+    : `<a href="${url}/submit" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:10px 18px;border-radius:9px">去提交作品 · Submit</a>`;
+  const nextNote = isMini
+    ? "贴上作品链接即可参赛,或让 AI 把想法做成能跑的应用。Mini 无需登录密码,请收藏本页。"
+    : "主办方会把参赛邀请码发给你,拿到后到「提交作品」填码提交。请收藏本页。";
+  const html =
+    `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
+    `<table role="presentation" width="460" cellpadding="0" cellspacing="0" style="max-width:460px;width:100%">` +
+    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#0a0e0a;border-radius:11px;color:#25ff86;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14161c;vertical-align:middle;padding-left:10px">hack5</span></td></tr>` +
+    `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
+    `<h1 style="font-size:20px;margin:0 0 6px;color:#14161c">${escapeHtml(hackathonName)} <span style="color:#0f9d6b">✓</span></h1>` +
+    `<p style="color:#5f6675;font-size:15px;margin:0 0 14px">报名成功 · You are registered</p>` +
+    `<p style="margin:0 0 4px;color:#5f6675;font-size:14px">报名时间 · Registered at</p>` +
+    `<p style="margin:0 0 16px;font-size:15px;font-weight:700;color:#14161c">${escapeHtml(when)}</p>` +
+    `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:0 0 16px">${nextNote}</p>` +
+    `${nextHtml}` +
+    `</td></tr>` +
+    `<tr><td align="center" style="padding:16px 0 8px"><a href="${url}" style="font-size:13px;color:#5b4be6;text-decoration:none">🔖 ${url}</a></td></tr>` +
+    `<tr><td align="center" style="color:#9aa1ac;font-size:12px;line-height:1.7;padding-top:10px">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks</td></tr>` +
+    `</table></td></tr></table></div>`;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 报名成功 · ${hackathonName}`, text, html }),
+    });
+    if (!res.ok) console.log("register-confirm send failed", res.status, (await res.text().catch(() => "")).slice(0, 200));
+  } catch (err) {
+    console.log("register-confirm fetch error", String(err));
+  }
+}
+
 // Create a proxied CNAME <sub>.hack5.net -> hack5.net so the wildcard Worker route serves it.
 // Returns null on success (or when not configured, e.g. dev/preview), else an error message.
 async function createSubdomainDns(env: Env, sub: string): Promise<string | null> {
@@ -1144,7 +1197,7 @@ function parseAgenda(raw: string | null | undefined): { time: string; title: str
 
 async function registerParticipant(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
   if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
-  const body = await request.json<{ name?: string; email?: string; note?: string }>().catch(() => null);
+  const body = await request.json<{ name?: string; email?: string; note?: string; turnstileToken?: string }>().catch(() => null);
   const email = normalizeEmail(body?.email);
   if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
   const note = String(body?.note ?? "").trim().slice(0, 300) || null;
@@ -1156,6 +1209,13 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
 
   const now = unixNow();
   const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  // Same anti-abuse gate as the email-code login flow: registration is an open endpoint that now sends
+  // a confirmation email to any address in the body, so — like login — require a Turnstile token to stop
+  // it being scripted as an email amplifier. No-ops (passes) when Turnstile isn't configured, so mini
+  // registration stays frictionless until an operator turns Turnstile on.
+  if (!(await verifyTurnstile(env, body?.turnstileToken, ip))) {
+    return json({ error: "人机验证失败,请重试 / Verification failed" }, 403);
+  }
   // Per-tenant capacity cap: stop unbounded DB growth from a single event.
   const total = await env.DB.prepare("SELECT COUNT(*) AS c FROM registrations WHERE tenant_id = ?")
     .bind(tenant.id)
@@ -1181,6 +1241,12 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
   const token = await signParticipant(env, { email, tenant: tenant.id, exp: now + 30 * 24 * 60 * 60, verified: false });
   const cookie = { "Set-Cookie": participantCookie(request, token, 30 * 24 * 60 * 60) };
   if (res.meta.changes !== 1) return json({ ok: true, already: true }, 200, cookie); // idempotent: already registered
+  // New registration only: send a best-effort confirmation so the participant has a record (mini has
+  // no login password). Beijing time computed by offset (avoids relying on Intl tz support); awaited
+  // best-effort — sendRegistrationConfirmEmail never throws, so a mail hiccup can't fail the signup.
+  const site = new URL(request.url).origin;
+  const when = new Date((now + 8 * 3600) * 1000).toISOString().slice(0, 16).replace("T", " ") + " (北京时间)";
+  await sendRegistrationConfirmEmail(env, email, tenant.name, site, tenant.mode || "open", when);
   return json({ ok: true }, 200, cookie);
 }
 
@@ -4079,27 +4145,35 @@ const APP_HTML = String.raw`<!doctype html>
       + '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
       + (isMini ? '<p class="muted" style="margin:6px 0 0;font-size:13px">'+t('用户名将自动取自邮箱','Your display name is taken from your email')+'</p>' : '')
       + '<label>'+t('想法 / 找队友(可选)','Idea / looking for a team (optional)')+'</label><textarea id="rgNote" maxlength="300"></textarea>'
+      + (CONFIG.turnstileSiteKey ? '<div id="rgts" style="margin-top:12px"></div>' : '')
       + '<div class="row" style="margin-top:14px"><button id="rgBtn">'+t('提交报名','Register')+'</button></div>'
       + '<div id="rgMsg"></div></div></div>';
+    let rgTs = null;
+    if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ rgTs = window.turnstile.render('#rgts', {sitekey: CONFIG.turnstileSiteKey}); }catch(e){} });
     $('#rgBtn').addEventListener('click', async ()=>{
       const nameEl=$('#rgName'); const name=nameEl?nameEl.value.trim():''; const email=$('#rgEmail').value.trim(), note=$('#rgNote').value.trim();
       if(!email||(!isMini&&!name)){ setMsg('rgMsg', isMini?t('请填写邮箱','Email required'):t('请填写姓名和邮箱','Name and email required'), true); return; }
+      let turnstileToken;
+      if(CONFIG.turnstileSiteKey){
+        turnstileToken = (window.turnstile && rgTs!=null) ? window.turnstile.getResponse(rgTs) : '';
+        if(!turnstileToken){ setMsg('rgMsg', t('请先完成人机验证','Please complete the check'), true); return; }
+      }
       $('#rgBtn').disabled=true;
-      try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note}});
+      try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note,turnstileToken}});
         const done = r.already ? t('你已经报名过了 ✓','You are already registered ✓') : t('报名成功!🎉','Registered! 🎉');
         let next;
         if(isMini){
           next = '<p style="margin:10px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
             + '<div class="row" style="gap:8px;flex-wrap:wrap"><button onclick="go(\'/submit\')">'+t('提交作品','Submit your work')+'</button>'
             + '<button class="ghost" onclick="go(\'/make\')">✨ '+t('AI 做成应用','Build with AI')+'</button></div>'
-            + '<p class="muted" style="margin-top:8px;font-size:13px">'+t('贴上你的作品链接即可参赛,或让 AI 把想法做成能跑的应用。请收藏本页 —— 活动都在这里,系统不会给你发邮件。','Submit a link to your work, or let AI turn your idea into a working app. Bookmark this page — everything happens here and no email is sent.')+'</p>';
+            + '<p class="muted" style="margin-top:8px;font-size:13px">'+t('报名确认邮件已发到你的邮箱 📩(没收到看下垃圾箱)。贴上作品链接即可参赛,或让 AI 把想法做成能跑的应用。建议收藏本页 —— mini 无需登录密码,活动都在这里。','A confirmation email is on its way 📩 (check spam if you don’t see it). Submit a link to your work, or let AI turn your idea into a working app. Bookmark this page — mini needs no password, everything happens here.')+'</p>';
         } else {
           next = '<p style="margin:10px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
-            + '<p class="muted" style="font-size:13px">'+t('主办方会把你的参赛邀请码发给你(微信 / 邮件 / 群)。拿到后,到「提交作品」填邀请码提交。请收藏本页 —— 系统不会给你发邮件。','The organizer will send you an invite code (WeChat / email / group). Once you have it, go to Submit and enter it. Bookmark this page — no email is sent by the system.')+'</p>'
+            + '<p class="muted" style="font-size:13px">'+t('报名确认邮件已发到你的邮箱 📩(没收到看下垃圾箱)。主办方会把你的参赛邀请码发给你(微信 / 邮件 / 群),拿到后到「提交作品」填邀请码提交。建议收藏本页。','A confirmation email is on its way 📩 (check spam if you don’t see it). The organizer will send you an invite code (WeChat / email / group); once you have it, go to Submit and enter it. Bookmark this page.')+'</p>'
             + '<div class="row" style="margin-top:6px"><button onclick="go(\'/submit\')">'+t('去提交作品','Go to Submit')+'</button></div>';
         }
         $('#regForm').innerHTML='<div class="notice ok">'+done+'</div>'+next;
-      }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; }
+      }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; if(window.turnstile && rgTs!=null) try{ window.turnstile.reset(rgTs); }catch(_){} }
     });
   }
 
