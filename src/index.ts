@@ -61,6 +61,7 @@ type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string
 
 const AUTH_COOKIE = "hv_auth";
 const USER_COOKIE = "hv_user";
+const PARTICIPANT_COOKIE = "hv_part"; // per-tenant participant session (email-verified), distinct from organizer USER_COOKIE
 const RESERVED_SUBDOMAINS = new Set(["www", "api", "app", "admin", "demo", "mail", "static", "assets", "cdn", "hack5", "mycelium"]);
 const DIMS = ["innovation", "technical", "completeness", "presentation"] as const;
 type Dim = (typeof DIMS)[number];
@@ -132,6 +133,12 @@ export default {
 
       // ---- tenant homepage (admin) ----
       if (path === "/api/tenant/homepage" && method === "POST") return updateHomepage(request, env, tenant);
+
+      // ---- participant session (email-verified, per-tenant) ----
+      if (path === "/api/tenant/participant/login/request" && method === "POST") return participantLoginRequest(request, env, tenant);
+      if (path === "/api/tenant/participant/login/verify" && method === "POST") return participantLoginVerify(request, env, tenant, tid);
+      if (path === "/api/tenant/participant/logout" && method === "POST") return participantLogout(request);
+      if (path === "/api/tenant/me" && method === "GET") return participantMe(request, env, tenant, tid);
 
       // ---- participant registration ----
       if (path === "/api/tenant/register" && method === "POST") return registerParticipant(request, env, tenant);
@@ -709,6 +716,128 @@ function platformLogout(request: Request): Response {
 function userCookie(request: Request, token: string, maxAge: number): string {
   const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
   return `${USER_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+// ---- Participant session (email-verified, per-tenant) ---------------------------------------------
+// A participant of a hackathon proves email ownership via a one-time code (reusing the email_codes
+// table + Resend), and gets an HMAC-signed cookie scoped to THIS tenant. It grants no organizer
+// abilities — it is only an identity so the client can show "your" registration/submission state.
+// The cookie is host-only (no Domain attr) so it never leaks across subdomains; the claim also pins
+// the tenant id as defence in depth.
+type ParticipantAuth = { email: string; tenant: string; exp: number };
+
+async function signParticipant(env: Env, payload: ParticipantAuth): Promise<string> {
+  const body = b64urlEncode(JSON.stringify(payload));
+  const sig = await hmacHex(utf8(env.AUTH_SECRET), body);
+  return `${body}.${sig}`;
+}
+
+function participantCookie(request: Request, token: string, maxAge: number): string {
+  const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
+  return `${PARTICIPANT_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+async function getParticipant(request: Request, env: Env, tid: string | null): Promise<ParticipantAuth | null> {
+  const raw = parseCookies(request.headers.get("cookie"))[PARTICIPANT_COOKIE];
+  if (!raw || !tid) return null;
+  const dot = raw.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const body = raw.slice(0, dot);
+  const expected = await hmacHex(utf8(env.AUTH_SECRET), body);
+  if (!timingSafeEqual(raw.slice(dot + 1), expected)) return null;
+  try {
+    const payload = JSON.parse(b64urlDecode(body)) as ParticipantAuth;
+    if (!payload?.email || payload.tenant !== tid || typeof payload.exp !== "number" || payload.exp < unixNow()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function participantLoginRequest(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  const body = await request.json<{ email?: string; turnstileToken?: string }>().catch(() => null);
+  const email = normalizeEmail(body?.email);
+  if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
+  const reqIp = request.headers.get("cf-connecting-ip") ?? "local";
+  if (!(await verifyTurnstile(env, body?.turnstileToken, reqIp))) {
+    return json({ error: "人机验证失败,请重试 / Verification failed" }, 403);
+  }
+  const now = unixNow();
+  const recent = await env.DB.prepare("SELECT COUNT(*) AS c FROM email_codes WHERE email = ? AND created_at > ?")
+    .bind(email, now - 15 * 60)
+    .first<{ c: number }>();
+  if ((recent?.c ?? 0) >= 5) return json({ error: "请求过于频繁,请稍后再试 / Too many requests" }, 429);
+  const code = generateCode();
+  await env.DB.prepare(
+    "INSERT INTO email_codes (id, email, code_hash, request_ip, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+  )
+    .bind(crypto.randomUUID(), email, await hashSecret(env, `${email}:${code}`), reqIp, now, now + 10 * 60)
+    .run();
+  const sent = await sendEmailCode(env, email, code);
+  if (!sent) {
+    if (isDevHost(request)) return json({ ok: true, debugCode: code });
+    return json({ error: "验证码发送失败,请稍后重试 / Could not send the code, please try again" }, 503);
+  }
+  return json({ ok: true });
+}
+
+async function participantLoginVerify(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || !tid) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  const body = await request.json<{ email?: string; code?: string }>().catch(() => null);
+  const email = normalizeEmail(body?.email);
+  const code = String(body?.code ?? "").replace(/\D/g, "");
+  if (!email || code.length !== 6) return json({ error: "邮箱或验证码无效 / Invalid email or code" }, 400);
+  const now = unixNow();
+  const rows = await env.DB.prepare(
+    "SELECT id, code_hash, attempts FROM email_codes WHERE email = ? AND used_at IS NULL AND expires_at >= ? ORDER BY created_at DESC LIMIT 5",
+  )
+    .bind(email, now)
+    .all<{ id: string; code_hash: string; attempts: number }>();
+  const totalAttempts = rows.results.reduce((a, r) => a + Number(r.attempts || 0), 0);
+  if (totalAttempts >= 10) return json({ error: "尝试过多,请重新获取验证码 / Too many attempts" }, 429);
+  const expected = await hashSecret(env, `${email}:${code}`);
+  const match = rows.results.find((r) => timingSafeEqual(r.code_hash, expected));
+  if (!match) {
+    if (rows.results[0]) {
+      await env.DB.prepare("UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?").bind(rows.results[0].id).run();
+    }
+    return json({ error: "验证码错误或已过期 / Invalid or expired code" }, 401);
+  }
+  const consumed = await env.DB.prepare("UPDATE email_codes SET used_at = ? WHERE id = ? AND used_at IS NULL")
+    .bind(now, match.id)
+    .run();
+  if (consumed.meta.changes !== 1) return json({ error: "验证码已被使用 / Code already used" }, 401);
+  await env.DB.prepare("UPDATE email_codes SET used_at = ? WHERE email = ? AND used_at IS NULL").bind(now, email).run();
+  // Participant session only — NO users insert (that would grant organizer abilities).
+  const token = await signParticipant(env, { email, tenant: tid, exp: now + 30 * 24 * 60 * 60 });
+  return json({ ok: true, email }, 200, { "Set-Cookie": participantCookie(request, token, 30 * 24 * 60 * 60) });
+}
+
+function participantLogout(request: Request): Response {
+  return json({ ok: true }, 200, { "Set-Cookie": participantCookie(request, "", 0) });
+}
+
+// The logged-in participant's own state on this tenant: are they registered, and their submission.
+async function participantMe(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  const me = await getParticipant(request, env, tid);
+  if (!me || !tid) return json({ email: null });
+  const reg = await env.DB.prepare("SELECT name, note, created_at FROM registrations WHERE tenant_id = ? AND email = ? LIMIT 1")
+    .bind(tid, me.email)
+    .first<{ name: string; note: string | null; created_at: number }>();
+  const sub = await env.DB.prepare(
+    "SELECT id, project_name, repo_url, link_url, build_state, share_token, created_at FROM submissions WHERE tenant_id = ? AND email = ? ORDER BY created_at DESC LIMIT 1",
+  )
+    .bind(tid, me.email)
+    .first<{ id: string; project_name: string; repo_url: string | null; link_url: string | null; build_state: string | null; share_token: string; created_at: number }>();
+  return json({
+    email: me.email,
+    registered: Boolean(reg),
+    registration: reg ? { name: reg.name, note: reg.note, at: reg.created_at } : null,
+    submission: sub
+      ? { id: sub.id, projectName: sub.project_name, repoUrl: sub.repo_url, linkUrl: sub.link_url, buildState: sub.build_state, viewUrl: `/s/${sub.id}`, at: sub.created_at }
+      : null,
+  });
 }
 
 // Auto-pick a clean subdomain for mini's 5-minute flow (only the name is asked). Prefer the bare
