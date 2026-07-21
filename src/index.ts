@@ -19,6 +19,7 @@ interface Env {
   SUBMIT_PASSCODE: string;
   JUDGE_PASSCODE: string;
   ADMIN_PASSCODE: string;
+  PLATFORM_ADMIN_EMAILS?: string; // comma/space-separated platform operator emails (can set user plan)
   GITHUB_TOKEN?: string;
   RESEND_API_KEY?: string;
   MAIL_FROM?: string;
@@ -111,6 +112,8 @@ export default {
       if (path === "/api/platform/login/verify" && method === "POST") return platformLoginVerify(request, env);
       if (path === "/api/platform/logout" && method === "POST") return platformLogout(request);
       if (path === "/api/platform/hackathons" && method === "POST") return createHackathon(request, env);
+      if (path === "/api/platform/admin/users" && method === "GET") return adminListUsers(request, env);
+      if (path === "/api/platform/admin/set-plan" && method === "POST") return adminSetPlan(request, env);
       if (path === "/api/platform/org" && method === "GET") return getOrgProfile(request, env);
       if (path === "/api/platform/org" && method === "POST") return saveOrgProfile(request, env);
       const orgLogo = path.match(/^\/org-logo\/([a-z0-9-]+)$/);
@@ -484,9 +487,65 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
     email: user.email,
     quota,
     plan: row?.plan ?? "free",
+    isOperator: isOperatorEmail(env, user.email),
     used: list.results.length,
     hackathons: list.results.map((h) => ({ subdomain: h.subdomain, name: h.name, url: `https://${h.subdomain}.hack5.net` })),
   });
+}
+
+// hack5 platform operator (运营方) — emails listed in PLATFORM_ADMIN_EMAILS. NOT a per-hackathon
+// admin; this is the top-level operator who can grant/revoke paid accounts.
+function isOperatorEmail(env: Env, email: string | null | undefined): boolean {
+  if (!email) return false;
+  const list = (env.PLATFORM_ADMIN_EMAILS ?? "").split(/[,\s]+/).map((e) => e.trim().toLowerCase()).filter(Boolean);
+  return list.includes(email.toLowerCase());
+}
+
+// Operator: list platform users with their plan/quota + active hackathon counts.
+async function adminListUsers(request: Request, env: Env): Promise<Response> {
+  const user = await getUser(request, env);
+  if (!isOperatorEmail(env, user?.email)) return json({ error: "运营方专用 / Operator only" }, 403);
+  const rows = await env.DB.prepare("SELECT email, plan, quota, created_at FROM users ORDER BY created_at DESC LIMIT 500").all<{ email: string; plan: string; quota: number; created_at: number }>();
+  const counts = await env.DB.prepare(
+    "SELECT owner_email, COUNT(*) AS c, SUM(CASE WHEN mode = 'mini' THEN 1 ELSE 0 END) AS mini FROM tenants WHERE status = 'active' AND owner_email IS NOT NULL GROUP BY owner_email",
+  ).all<{ owner_email: string; c: number; mini: number }>();
+  const cmap: Record<string, { c: number; mini: number }> = {};
+  for (const r of counts.results) cmap[r.owner_email] = { c: Number(r.c), mini: Number(r.mini) };
+  return json({
+    users: rows.results.map((u) => ({
+      email: u.email,
+      plan: u.plan,
+      quota: u.quota,
+      createdAt: u.created_at,
+      hackathons: cmap[u.email]?.c ?? 0,
+      mini: cmap[u.email]?.mini ?? 0,
+    })),
+  });
+}
+
+// Operator: set a user's plan (free|paid) and optionally quota. Upserts so a plan can be granted
+// before the user's first login. This is the entry that replaces manual `UPDATE users SET plan=...`.
+async function adminSetPlan(request: Request, env: Env): Promise<Response> {
+  const user = await getUser(request, env);
+  if (!isOperatorEmail(env, user?.email)) return json({ error: "运营方专用 / Operator only" }, 403);
+  const body = await request.json<{ email?: string; plan?: string; quota?: number }>().catch(() => null);
+  const email = normalizeEmail(body?.email);
+  if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
+  const plan = body?.plan === "paid" ? "paid" : body?.plan === "free" ? "free" : null;
+  if (!plan) return json({ error: "plan 只能是 free 或 paid / plan must be free or paid" }, 400);
+  const now = unixNow();
+  if (body?.quota != null && Number.isFinite(Number(body.quota))) {
+    const q = Math.max(0, Math.min(100000, Math.floor(Number(body.quota))));
+    await env.DB.prepare("INSERT INTO users (email, quota, plan, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET plan = excluded.plan, quota = excluded.quota")
+      .bind(email, q, plan, now)
+      .run();
+  } else {
+    await env.DB.prepare("INSERT INTO users (email, quota, plan, created_at) VALUES (?, 1, ?, ?) ON CONFLICT(email) DO UPDATE SET plan = excluded.plan")
+      .bind(email, plan, now)
+      .run();
+  }
+  const updated = await env.DB.prepare("SELECT email, plan, quota FROM users WHERE email = ?").bind(email).first<{ email: string; plan: string; quota: number }>();
+  return json({ ok: true, user: updated });
 }
 
 // Organizer (host) org profile — account-level, reused across all their hackathons.
@@ -2968,6 +3027,7 @@ const APP_HTML = String.raw`<!doctype html>
       if(ME_USER.email){
         hp += '<button onclick="go(\'/dashboard\')">'+t('我的黑客松','My hackathons')+'</button>'
             + '<button class="ghost" onclick="go(\'/settings\')">'+t('我的设置','Settings')+'</button>'
+            + (ME_USER.isOperator?'<button class="ghost" onclick="go(\'/operator\')">'+t('运营','Operator')+'</button>':'')
             + '<span class="who">'+esc(ME_USER.email)+'</span>'
             + '<button class="ghost" onclick="userLogout()">'+t('退出','Logout')+'</button>';
       } else {
@@ -3010,6 +3070,7 @@ const APP_HTML = String.raw`<!doctype html>
       if(p === '/pricing') return renderPricing();
       if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
       if(p === '/settings') return ME_USER.email ? renderSettings() : renderPlatformLogin();
+      if(p === '/operator') return ME_USER.isOperator ? renderOperator() : (ME_USER.email ? renderDashboard() : renderPlatformLogin());
       return renderPlatformLanding();
     }
     // Secret tenant, not yet unlocked: show the access gate for everything except judge login.
@@ -3206,6 +3267,50 @@ const APP_HTML = String.raw`<!doctype html>
       + '</div>';
   }
 
+  // B — hack5 运营方(operator)账户管理:按 email 设 paid/free(+可选额度),替代手敲 SQL。
+  async function renderOperator(){
+    app.innerHTML = '<h1>'+t('运营 · 账户管理','Operator · Accounts')+'</h1>'
+      + '<div class="notice">'+t('把用户设为 paid → 无限开企业私密 + mini + 常规;free → 走免费额度(企业私密免费不可开、mini 每人首场免费)。','Set a user to paid for unlimited secret + mini + regular; free uses the free tiers.')+'</div>'
+      + '<div class="panel" style="max-width:560px">'
+      + '<label>'+t('用户邮箱','User email')+'</label><input id="opEmail" type="email" placeholder="user@example.com">'
+      + '<div class="row" style="gap:8px;margin-top:8px;align-items:center">'
+      + '<select id="opPlan"><option value="paid">paid</option><option value="free">free</option></select>'
+      + '<input id="opQuota" type="number" min="0" placeholder="'+t('额度(可选)','quota (optional)')+'" style="width:150px">'
+      + '<button id="opSet">'+t('设置','Set')+'</button></div>'
+      + '<div id="opMsg" class="muted" style="margin-top:6px"></div>'
+      + '</div>'
+      + '<h2 style="margin-top:20px">'+t('用户列表','Users')+'</h2>'
+      + '<div id="opList" class="panel"><p class="muted">'+t('加载中…','Loading…')+'</p></div>';
+    async function setPlan(email, plan, quota){
+      setMsg('opMsg', t('设置中…','Saving…'));
+      try{
+        const body={email:email, plan:plan}; if(quota!=null && quota!=='') body.quota=Number(quota);
+        const r=await api('/api/platform/admin/set-plan',{method:'POST',body:body});
+        setMsg('opMsg', '✓ '+esc(r.user.email)+' → '+esc(r.user.plan)+' · quota '+r.user.quota); load();
+      }catch(e){ setMsg('opMsg', e.message, true); }
+    }
+    async function load(){
+      try{
+        const d = await api('/api/platform/admin/users');
+        const rows = (d.users||[]).map(u=>{
+          const c = u.plan==='paid'?'#16a34a':'#6b7280';
+          const to = u.plan==='paid'?'free':'paid';
+          return '<tr><td>'+esc(u.email)+'</td>'
+            + '<td><span class="chip" style="border-color:'+c+';color:'+c+'">'+esc(u.plan)+'</span></td>'
+            + '<td style="text-align:right">'+u.quota+'</td>'
+            + '<td style="text-align:right">'+u.hackathons+' ('+u.mini+' mini)</td>'
+            + '<td style="text-align:right"><button class="ghost" data-e="'+esc(u.email)+'" data-p="'+to+'">→ '+to+'</button></td></tr>';
+        }).join('');
+        $('#opList').innerHTML = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
+          + '<th style="text-align:left">'+t('邮箱','Email')+'</th><th style="text-align:left">plan</th>'
+          + '<th style="text-align:right">'+t('额度','Quota')+'</th><th style="text-align:right">'+t('黑客松','Hackathons')+'</th><th></th></tr></thead><tbody>'
+          + (rows||'<tr><td colspan="5" class="muted">'+t('暂无用户','No users')+'</td></tr>')+'</tbody></table>';
+        $('#opList').querySelectorAll('button[data-e]').forEach(b=>b.addEventListener('click',()=>setPlan(b.dataset.e, b.dataset.p)));
+      }catch(e){ $('#opList').innerHTML='<p class="muted">'+esc(e.message)+'</p>'; }
+    }
+    $('#opSet').addEventListener('click', ()=>{ const email=$('#opEmail').value.trim(); if(!email){ setMsg('opMsg', t('请填邮箱','Enter an email'), true); return; } setPlan(email, $('#opPlan').value, $('#opQuota').value); });
+    load();
+  }
   function renderStart(){
     app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('发起黑客松','Start a hackathon')+'</h1>'
       + '<p class="guide-sub">'+t('登录 → 取名 → 一键部署','log in → name it → deploy')+'</p></div>'
