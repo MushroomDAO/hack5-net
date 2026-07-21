@@ -22,6 +22,7 @@ export interface WorkbenchEnv {
   WORKBENCH_SCOPED_SECRET?: string; // shared HMAC key for scoped chat tokens (B3); must equal WorkBench's
   WORKBENCH_MOCK?: string; // "1" forces the offline mock
   AUTH_SECRET?: string; // fallback signing key for scoped chat tokens when WORKBENCH_SCOPED_SECRET unset
+  WORKBENCH_TIMEOUT_MS?: string; // per-call upstream timeout (default 45000) — bounds a hung WorkBench
 }
 
 // ---------------------------------------------------------------------------
@@ -215,14 +216,27 @@ function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
   const loopBase = String(env.WORKBENCH_LOOP_URL ?? env.WORKBENCH_BASE_URL ?? "").replace(/\/+$/, "");
   const adminToken = env.WORKBENCH_TOKEN ?? "";
 
+  const timeoutMs = Number(env.WORKBENCH_TIMEOUT_MS) > 0 ? Number(env.WORKBENCH_TIMEOUT_MS) : 45000;
+
   async function call<T>(host: string, method: string, path: string, body?: unknown, token?: string): Promise<T> {
     const headers: Record<string, string> = { "x-workbench-token": token ?? adminToken };
     if (body !== undefined) headers["content-type"] = "application/json";
-    const res = await fetch(`${host}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    // Bound the request: a hung/slow upstream (e.g. a chat turn that never returns) must not make the
+    // hack5 Worker hang until the platform kills it — abort and surface a clean 504 instead.
+    let res: Response;
+    try {
+      res = await fetch(`${host}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      if (e instanceof Error && e.name === "TimeoutError") {
+        throw new HttpError(`WorkBench ${method} ${path} timed out after ${timeoutMs}ms`, 504, "");
+      }
+      throw e;
+    }
     const text = await res.text();
     if (!res.ok) throw new HttpError(`WorkBench ${method} ${path} -> ${res.status}`, res.status, text.slice(0, 500));
     return (text ? JSON.parse(text) : {}) as T;
