@@ -1161,8 +1161,13 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
   )
     .bind(crypto.randomUUID(), tenant.id, name, email, note, now, ip)
     .run();
-  if (res.meta.changes !== 1) return json({ ok: true, already: true }); // idempotent: already registered
-  return json({ ok: true });
+  // Registering also establishes a participant session (hv_part) so this browser is now a known
+  // participant: 「我的黑客松」can show registration/submission status and unlock 开始开发 without a
+  // separate login step. Same cookie whether the row was newly inserted or already present.
+  const token = await signParticipant(env, { email, tenant: tenant.id, exp: now + 30 * 24 * 60 * 60 });
+  const cookie = { "Set-Cookie": participantCookie(request, token, 30 * 24 * 60 * 60) };
+  if (res.meta.changes !== 1) return json({ ok: true, already: true }, 200, cookie); // idempotent: already registered
+  return json({ ok: true }, 200, cookie);
 }
 
 async function listRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
@@ -3231,13 +3236,11 @@ const APP_HTML = String.raw`<!doctype html>
       hp += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
       n.innerHTML = hp; return;
     }
+    // Participant-facing nav is intentionally minimal: the public gallery plus a single
+    // "我的黑客松" hub. The personal actions (报名/组队/提交作品/开始开发) and the
+    // secondary pages (照片墙/分享/关于) all live inside /mine, contextual to this hackathon.
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
-          + '<button class="ghost" onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
-          + '<button class="ghost" onclick="go(\'/teams\')">'+t('组队','Teams')+'</button>'
-          + '<button class="ghost" onclick="go(\'/photos\')">'+t('照片墙','Photos')+'</button>'
-          + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
-          + '<button class="ghost" onclick="go(\'/share\')">'+t('分享','Share')+'</button>'
-          + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
+          + '<button class="ghost" onclick="go(\'/mine\')">'+t('我的黑客松','My hackathon')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
          + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/manage\')">'+t('首页','Homepage')+'</button><button class="ghost" onclick="go(\'/poster\')">'+t('海报','Poster')+'</button><button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
@@ -3271,6 +3274,7 @@ const APP_HTML = String.raw`<!doctype html>
     // Secret tenant, not yet unlocked: show the access gate for everything except judge login.
     if(CONFIG.tenant && CONFIG.tenant.gated && p !== '/judge') return renderGate();
     if(p === '/' || p === '') return renderWall();
+    if(p === '/mine') return renderMine();
     if(p === '/submit') return renderSubmit();
     if(p === '/make') return renderMiniMakeApp(); // A3 — mini「做成应用」
     if(p === '/judge') return renderJudge();
@@ -3316,6 +3320,58 @@ const APP_HTML = String.raw`<!doctype html>
     });
     $('#gCode').addEventListener('keydown', e=>{ if(e.key==='Enter') $('#gBtn').click(); });
   }
+  // "我的黑客松" — the participant hub for THIS hackathon. Hosts the personal actions that used
+  // to sit in the top nav (报名/组队/提交作品 + mini「开始开发」) plus the secondary pages
+  // (照片墙/分享/关于). Reads /api/tenant/me to surface registration + submission status; the
+  // logged-out branch is a friendly hint (participant login UI lands in a later PR).
+  async function renderMine(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    const isMini = !!(CONFIG.tenant && CONFIG.tenant.mode==='mini');
+    const name = esc((CONFIG.tenant&&CONFIG.tenant.name)||'');
+    app.innerHTML = '<h1>'+t('我的黑客松','My hackathon')+'</h1>'
+      + (name ? '<p class="muted">'+name+'</p>' : '')
+      + '<div id="mineStatus" class="panel" style="max-width:560px">'+t('加载中…','Loading…')+'</div>'
+      + '<h3 style="margin:18px 0 8px">'+t('参与','Take part')+'</h3>'
+      + '<div class="row" id="mineActions" style="gap:10px;flex-wrap:wrap">'
+      +   '<button onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
+      +   '<button class="ghost" onclick="go(\'/teams\')">'+t('组队 · 找队友','Find teammates')+'</button>'
+      +   '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
+      + '</div>'
+      + '<h3 style="margin:18px 0 8px">'+t('更多','More')+'</h3>'
+      + '<div class="row" style="gap:10px;flex-wrap:wrap">'
+      +   '<button class="ghost" onclick="go(\'/photos\')">'+t('照片墙','Photos')+'</button>'
+      +   '<button class="ghost" onclick="go(\'/share\')">'+t('分享','Share')+'</button>'
+      +   '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>'
+      + '</div>';
+    try{
+      const me = await api('/api/tenant/me');
+      // 开始开发(make)在报名后才解锁 —— 报名会种下参赛者会话(hv_part),me.registered=true 即注入按钮。
+      if(isMini && me && me.registered){
+        const acts = document.getElementById('mineActions');
+        if(acts && !document.getElementById('mineMakeBtn')){
+          const b = document.createElement('button');
+          b.id = 'mineMakeBtn'; b.textContent = t('✨ 开始开发','✨ Build with AI');
+          b.onclick = function(){ go('/make'); };
+          acts.appendChild(b);
+        }
+      }
+      const s = document.getElementById('mineStatus'); if(!s) return;
+      if(!me || !me.email){
+        s.innerHTML = t('先「报名」即可参与这场黑客松。报名后,你的状态会显示在这里,并解锁「开始开发」。','Register below to take part. Once you register, your status shows up here and 开始开发 unlocks.');
+        return;
+      }
+      let html = '<b>'+esc(me.email)+'</b><div style="margin-top:8px">'
+               + (me.registered ? '✅ '+t('已报名','Registered') : '⚪ '+t('未报名','Not registered yet'));
+      if(me.submission){
+        const bs = me.submission.buildState ? ' · '+esc(me.submission.buildState) : '';
+        html += '<br>📦 '+t('作品','Project')+': <a href="'+esc(me.submission.viewUrl)+'">'+esc(me.submission.projectName||t('查看','view'))+'</a>'+bs;
+      } else {
+        html += '<br>⚪ '+t('还没有提交作品','No project submitted yet');
+      }
+      s.innerHTML = html + '</div>';
+    }catch(e){}
+  }
+
   async function renderWall(){
     app.innerHTML = tenantHero()
       + '<h1>'+esc((CONFIG.tenant&&CONFIG.tenant.name)||CONFIG.eventName)+' · '+t('作品墙','Gallery')+'</h1>'
