@@ -3038,7 +3038,7 @@ const APP_HTML = String.raw`<!doctype html>
              + '<button class="ghost" onclick="go(\'/media\')">'+t('媒体','Media')+'</button>'
              + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
       if(ME_USER.email){
-        hp += '<button onclick="go(\'/dashboard\')">'+t('我的黑客松','My hackathons')+'</button>'
+        hp += '<button onclick="go(\'/dashboard\')">'+t('我组织的黑客松','Hackathons I organize')+'</button>'
             + '<button class="ghost" onclick="go(\'/settings\')">'+t('我的设置','Settings')+'</button>'
             + (ME_USER.isOperator?'<button class="ghost" onclick="go(\'/operator\')">'+t('运营','Operator')+'</button>':'')
             + '<span class="who">'+esc(ME_USER.email)+'</span>'
@@ -3456,7 +3456,7 @@ const APP_HTML = String.raw`<!doctype html>
     const modeLabel = cm==='mini'?t('✨ Mini(5 分钟)','✨ Mini'):cm==='secret'?t('🔒 企业私密','🔒 Enterprise'):t('⚡ 常规','⚡ Regular');
     // Mini has its own free allowance; regular/secret share the quota. canCreate never blocks mini here.
     const canCreate = cm==='mini' || (ME_USER.used||0) < (ME_USER.quota||1);
-    app.innerHTML = '<div class="guide"><h1>'+t('我的黑客松','My hackathons')+'</h1>'
+    app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'
       + '<p class="muted">'+t('已用','Used')+' '+(ME_USER.used||0)+' / '+(ME_USER.quota||1)+'</p>'
       + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
