@@ -1951,12 +1951,14 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   const projectSlug = String(body?.projectSlug ?? "").trim();
   const email = normalizeEmail(body?.email);
   const idea = String(body?.idea ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
-  const projectName = (String(body?.projectName ?? "").trim().slice(0, 80) || projectSlug).slice(0, 80);
   if (!clientSlug || !projectSlug) return json({ error: "请先完成对话 / Complete the chat first" }, 400);
   if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
   const nameCheck = validateRepoName(body?.repoName);
   if (!nameCheck.ok || !nameCheck.name) return json({ error: nameCheck.error || "仓库名不合法 / Invalid repo name" }, 400);
   const repoName = nameCheck.name;
+  // The mini flow now uses ONE English name for both the repo and the display name, so projectName
+  // defaults to repoName. An explicit projectName (legacy / direct API callers) still wins if given.
+  const projectName = (String(body?.projectName ?? "").trim().slice(0, 80) || repoName).slice(0, 80);
 
   // Identity-independent abuse caps. `email` below is attacker-controllable and unverified, so the
   // per-email free quota alone can't bound how many real GitHub repos + coding-loop runs get created
@@ -4508,9 +4510,10 @@ const APP_HTML = String.raw`<!doctype html>
       if(r.loop_ready && !ready){ ready=true; showLaunch(); }
     }
     function showLaunch(){
-      $('#launchBox').innerHTML = '<div class="notice ok">'+t('规格已就绪!给作品起个仓库名(小写字母/数字/连字符),AI 就开始建仓 + 编码。','Spec ready! Pick a repo name (lowercase, digits, hyphens) and it will provision + code.')+'</div>'
-        + '<label>'+t('仓库名','Repo name')+' *</label><input id="mkRepo" maxlength="39" placeholder="my-cool-app">'
-        + '<label>'+t('作品名称','Project name')+'</label><input id="mkName" maxlength="80">'
+      // One English name only — it is used as BOTH the project name and the public repo name, so it
+      // must satisfy the repo-name charset (lowercase / digits / hyphens). No separate display-name field.
+      $('#launchBox').innerHTML = '<div class="notice ok">'+t('规格已就绪!给作品起个英文名(小写字母/数字/连字符)—— 它同时用作作品名和公有仓库名,AI 就开始建仓 + 编码。','Spec ready! Give it an English name (lowercase, digits, hyphens) — used as both the project name and the public repo — and it will provision + code.')+'</div>'
+        + '<label>'+t('作品名称','Project name')+' * <span class="muted">'+t('(英文,将同时作为仓库名)','(English — also used as the repo name)')+'</span></label><input id="mkRepo" maxlength="39" placeholder="my-cool-app">'
         + '<label>'+t('联系邮箱','Contact email')+' *</label><input id="mkEmail" type="email" maxlength="254" placeholder="you@example.com">'
         + '<div class="row" style="margin-top:12px"><button id="mkGo">🚀 '+t('开始生成','Build it')+'</button></div><div id="mkMsg"></div>';
       $('#mkGo').addEventListener('click', doLaunch);
@@ -4529,11 +4532,12 @@ const APP_HTML = String.raw`<!doctype html>
       $('#chatSend').disabled=false;
     }
     async function doLaunch(){
-      const repoName=$('#mkRepo').value.trim(), email=$('#mkEmail').value.trim(), projectName=$('#mkName').value.trim();
-      if(!repoName||!email){ setMsg('mkMsg', t('请填仓库名和邮箱','Repo name and email required'), true); return; }
+      // The single English name is the repo name AND the project (display) name.
+      const repoName=$('#mkRepo').value.trim(), email=$('#mkEmail').value.trim();
+      if(!repoName||!email){ setMsg('mkMsg', t('请填作品名称和邮箱','Project name and email required'), true); return; }
       $('#mkGo').disabled=true; setMsg('mkMsg', t('建仓 + 触发编码中…','Provisioning…'));
       try{
-        const r=await api('/api/tenant/mini/app/launch',{method:'POST',body:{clientSlug,projectSlug,repoName,email,projectName,idea:lastIdea}});
+        const r=await api('/api/tenant/mini/app/launch',{method:'POST',body:{clientSlug,projectSlug,repoName,email,projectName:repoName,idea:lastIdea}});
         $('#launchBox').innerHTML = '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+' '+t('队列位','Queue')+' #'+(r.queuePos||1)+'<br>'
           + t('公有仓库','Repo')+': <a href="'+esc(r.repoUrl)+'" target="_blank" rel="noopener">'+esc(r.repoUrl)+'</a ><br>'
           + '<a href="'+esc(r.viewUrl)+'" onclick="go(\''+esc(r.viewUrl)+'\');return false">'+t('查看作品详情 →','View project →')+'</a > · '+t('编辑令牌','Edit token')+': <code>'+esc(r.editToken)+'</code></div>';
