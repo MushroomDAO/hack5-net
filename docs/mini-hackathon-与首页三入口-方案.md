@@ -144,4 +144,19 @@ ALTER TABLE submissions ADD COLUMN link_url TEXT;   -- mini:任意作品链接(n
 
 ---
 
+## 10. AI 驱动的模型策略(核心方式)
+
+Mini 的定位是 **AI 驱动**:非开发者一句想法 → 自动做成能跑的应用。这条链路的算力来自:
+
+- **轻量辅助(hack5 直连)**:AI 起名 / AI 写简介(`miniName` / `miniAssist`),便宜的文本模型即可。
+- **重活「想法→应用」(经 WorkBench loop-engineer)**:`/make` 触发的 plan→code→review→commit 编码闭环,模型由 WorkBench 侧 `loop-engineer.config.json` 决定:
+  - **主用 HiLinkup**(kimi-k2.5,OpenAI 兼容)——已充值,足够使用。
+  - **备份 DeepSeek**(`api.deepseek.com/anthropic`,Anthropic 兼容)——作为主用不可用时的回退。
+  - planner 用 Claude 订阅;coder/reviewer 在上述两家之间按实际可用情况选。
+- **自建部署可切本地**:把这一套 clone 到自己机器后,可把 loop-engineer 改为调**本地 CLI / 自己的 key**,不依赖我方托管的模型账号。
+
+> 公开页面只强调「AI 驱动」这一定位,不暴露具体厂商 key(内部实现)。如需在页面挂「powered by …」再单独定。
+
+---
+
 *设计稿。首页三入口可先做(常规/私密已就绪,Mini 待建);Mini 待你在 §7 拍板后进入实现(照旧开 PR)。底层复用、逻辑隔离贯穿。hack5 · Mycelium。*
