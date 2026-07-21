@@ -1,6 +1,12 @@
 # 积分 / Token 计费设计(mini「做成应用」)
 
-> 目标:mini 参赛者用 `/make` 建应用会消耗 AI token。免费额度用完后,按 **token → 积分** 实时扣费继续。积分余额由**外部积分系统**持有(按 email 查询/扣减),hack5 不发放积分、只做**计量 + 实时扣费 + 门禁**。核心红线:**实时扣、防透支**。
+> 目标:mini 参赛者用 `/make` 建应用会消耗 AI token。免费额度用完后,按 **token → 积分** 实时扣费继续。核心红线:**实时扣、防透支**。
+
+## 0. 现阶段:本地积分(phase 1b,已实现)
+
+**先不接外部积分 API,hack5 自己持有余额** —— 每个参赛者 email 一个本地积分账户(`participant_credits` 表,全局跨活动),**注册时默认发 `CREDITS_SIGNUP_GRANT`(默认 300)积分**,`INSERT OR IGNORE` 保证每 email 只发一次。`GET /api/tenant/mini/credits`(#47 验证会话)读本地余额。充值成本 / 充值入口待定。
+
+> 下面第 2 节的**外部积分 API**是后续可选路径(若积分要跨系统流通再接);现阶段 hack5 本地库即权威。扣费(spending)待 WorkBench 回传每 job `costUsd` 后接(见 §5)。
 
 ## 1. 概念
 
