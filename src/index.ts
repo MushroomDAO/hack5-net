@@ -740,22 +740,30 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(subdomain).first();
   if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
 
-  const urow = await env.DB.prepare("SELECT quota FROM users WHERE email = ?").bind(user.email).first<{ quota: number }>();
+  const urow = await env.DB.prepare("SELECT quota, plan FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string }>();
   const quota = urow?.quota ?? 1;
-  if (mode === "mini") {
-    // Mini has its own free allowance (1 per person), separate from the regular quota. Post-paid after.
-    const miniUsed = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND mode = 'mini' AND status = 'active'")
-      .bind(user.email)
-      .first<{ c: number }>();
-    if ((miniUsed?.c ?? 0) >= 1) {
-      return json({ error: "mini 免费额度已用完(每人 1 场)。充值或由赞助商代付后可继续 / Free mini used — top up or get a sponsor", upgrade: true }, 402);
-    }
-  } else {
-    const used = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode != 'mini'")
-      .bind(user.email)
-      .first<{ c: number }>();
-    if ((used?.c ?? 0) >= quota) {
-      return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached — upgrade for 100`, upgrade: true }, 402);
+  // Paid accounts (grant manually via `UPDATE users SET plan='paid' WHERE email=?`) bypass every free-tier
+  // limit: unlimited secret + mini + regular. Free accounts keep the free tiers below.
+  const paid = urow?.plan === "paid";
+  if (!paid) {
+    if (mode === "secret") {
+      // Enterprise secret hackathon is paid-only — no free tier.
+      return json({ error: "企业私密黑客松需付费账户,请购买后开通 / Enterprise secret hackathon requires a paid account", upgrade: true }, 402);
+    } else if (mode === "mini") {
+      // Mini has its own free allowance (1 per person), separate from the regular quota. Post-paid after.
+      const miniUsed = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND mode = 'mini' AND status = 'active'")
+        .bind(user.email)
+        .first<{ c: number }>();
+      if ((miniUsed?.c ?? 0) >= 1) {
+        return json({ error: "mini 免费额度已用完(每人 1 场)。充值或由赞助商代付后可继续 / Free mini used — top up or get a sponsor", upgrade: true }, 402);
+      }
+    } else {
+      const used = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode != 'mini'")
+        .bind(user.email)
+        .first<{ c: number }>();
+      if ((used?.c ?? 0) >= quota) {
+        return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached — upgrade for 100`, upgrade: true }, 402);
+      }
     }
   }
 
@@ -770,7 +778,10 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
 
   // Close the quota race deterministically: recount after insert and roll back if a concurrent
   // create pushed this one past the limit (regular/secret share the quota; mini has its own free=1).
-  if (mode === "mini") {
+  // Paid accounts have no limit, so nothing to roll back.
+  if (paid) {
+    // no-op: unlimited
+  } else if (mode === "mini") {
     const mine = await env.DB.prepare(
       "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'mini' ORDER BY created_at ASC, id ASC",
     )
