@@ -4777,7 +4777,10 @@ const APP_HTML = String.raw`<!doctype html>
     catch(e){ app.innerHTML = '<div class="panel"><p class="notice err">'+esc(e.message)+'</p></div>'; return; }
     const isMini = CONFIG.tenant && CONFIG.tenant.mode==='mini';
     const embed = videoEmbed(s.videoUrl);
-    const videoHtml = embed
+    // No video for mini AI builds (the live preview is the demo) — don't render an empty/broken video box.
+    const videoHtml = !s.videoUrl
+      ? ''
+      : embed
       ? '<div class="videobox"><iframe src="'+embed+'" allow="accelerometer;autoplay;encrypted-media;gyroscope;picture-in-picture;fullscreen" allowfullscreen scrolling="no"></iframe></div>'
       : (s.videoUrl.match(/\.(mp4|webm|mov)(\?|$)/i) || s.videoUrl.startsWith('/media/')
           ? '<div class="videobox"><video controls playsinline src="'+esc(s.videoUrl)+'"></video></div>'
@@ -4831,10 +4834,15 @@ const APP_HTML = String.raw`<!doctype html>
       + (s.secret && s.demoUrl?'<div class="kv"><span>'+t('在线 Demo','Live demo')+'</span><b><a href="'+esc(s.demoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
       + (s.secret && s.demoUser?'<div class="kv"><span>'+t('Demo 账号','Demo user')+'</span><b>'+esc(s.demoUser)+'</b></div>':'')
       + (s.secret && s.demoPass?'<div class="kv"><span>'+t('Demo 密码','Demo pass')+'</span><b>'+esc(s.demoPass)+'</b></div>':'')
-      + (s.linkUrl
+      // Show a work/repo row only when it adds something: a genuine external link distinct from the repo,
+      // or (for non-build submissions) the repo itself. For mini AI builds the repo is already shown in the
+      // build block above (公有仓库) and linkUrl == repoUrl, so don't repeat it here.
+      + (s.linkUrl && s.linkUrl !== s.repoUrl
           ? '<div class="kv"><span>'+t('作品链接','Work link')+'</span><b><a href="'+esc(s.linkUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>'
-          : '<div class="kv"><span>'+(s.secret?t('私有仓库','Private repo'):t('仓库','Repo'))+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
-            + (s.secret?'<div class="muted" style="font-size:12px">'+t('作为协作者可 clone 评估','Clone it as a collaborator to review')+'</div>':''))
+          : ((s.buildState||s.appUrl||s.wbClient)
+              ? ''
+              : '<div class="kv"><span>'+(s.secret?t('私有仓库','Private repo'):t('仓库','Repo'))+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
+                + (s.secret?'<div class="muted" style="font-size:12px">'+t('作为协作者可 clone 评估','Clone it as a collaborator to review')+'</div>':'')))
       + (s.linkUrl?'<div class="kv"><span>👍 '+t('点赞','Likes')+'</span><b><button class="likebtn" id="dLike" data-id="'+esc(s.id)+'">♥ <span>'+(s.likes||0)+'</span></button></b></div>':'')
       + '<div id="ghMeta"></div>'
       + (s.lockedSha?'<div class="kv"><span>'+t('评审版本','Reviewed')+'</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
