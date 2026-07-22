@@ -1920,8 +1920,13 @@ async function settleBuildCost(env: Env, submissionId: string, email: string, te
     const wb = createWorkbench(env);
     const u = (await wb.usage(clientSlug)) as unknown as {
       perProject?: Array<{ client?: string; project?: string; usage?: { costUsd?: number; inputTokens?: number; outputTokens?: number } }>;
+      perParticipant?: Array<{ project?: string; usage?: { costUsd?: number; inputTokens?: number; outputTokens?: number } }>;
     };
-    const entry = Array.isArray(u?.perProject) ? u.perProject.find((p) => p.project === projectSlug) : undefined;
+    // WorkBench /api/usage returns per-project rows under different keys by shape: the client-scoped
+    // form (GET /api/usage?client=<c>, which wb.usage(clientSlug) hits) nests them in `perParticipant`;
+    // the no-client form uses `perProject`. Read whichever is present, else nothing matched → cost 0.
+    const rows = Array.isArray(u?.perParticipant) ? u.perParticipant : Array.isArray(u?.perProject) ? u.perProject : [];
+    const entry = rows.find((p) => p.project === projectSlug);
     const costUsd = Number(entry?.usage?.costUsd ?? 0);
     const tokens = Number(entry?.usage?.inputTokens ?? 0) + Number(entry?.usage?.outputTokens ?? 0);
     const actual = costUsdToCredits(env, costUsd);
