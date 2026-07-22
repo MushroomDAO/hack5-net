@@ -123,6 +123,20 @@ export interface PlanInput {
   projectSlug: string;
   repo: string;
 }
+export interface DeployInput {
+  clientSlug: string;
+  projectSlug: string;
+  repo: string; // the participant's GitHub remote URL (WorkBench clones its main → CF Pages)
+}
+
+// CC-56: participant "one-click deploy". WorkBench clones the work repo's main, publishes it to
+// CF Pages under its own account, returns the live URL, and also fires a `deployed` W5 callback
+// (which flips the wall badge to Live). The hosted copy auto-deletes after ~7 days.
+export interface WbDeployResult {
+  appUrl: string;
+  expiresAt?: string; // ISO — when WorkBench auto-removes the hosted copy
+  selfDeployHint?: string; // human-readable "deploy it yourself on your own CF account" guidance
+}
 
 export interface WorkbenchClient {
   readonly mock: boolean;
@@ -134,6 +148,7 @@ export interface WorkbenchClient {
   run(jobId: string): Promise<WbRunResult>;
   status(jobId: string): Promise<WbStatus>;
   usage(clientSlug?: string): Promise<WbUsage>;
+  deploy(input: DeployInput): Promise<WbDeployResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +270,7 @@ function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
     plan: (input) => call(loopBase, "POST", "/plan", input),
     run: (jobId) => call(loopBase, "POST", "/run", { jobId }),
     status: (jobId) => call(loopBase, "GET", `/status/${encodeURIComponent(jobId)}`),
+    deploy: (input) => call(loopBase, "POST", "/deploy", input),
   };
 }
 
@@ -341,6 +357,14 @@ function createMockClient(env: WorkbenchEnv): WorkbenchClient {
         perProject: { "mock-project": bucket },
         byClient: clientSlug ? { [clientSlug]: bucket } : { "mock-client": bucket },
         at: new Date(0).toISOString(),
+      };
+    },
+    async deploy(input) {
+      const name = `wb-${slugify(input.clientSlug, "c")}-${slugify(input.projectSlug, "p")}`;
+      return {
+        appUrl: `https://${name}.pages.dev`,
+        expiresAt: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+        selfDeployHint: "用你自己的 Cloudflare 账号长期自部署:wrangler pages deploy ./ 或在 CF 面板连接该 GitHub 仓库。/ Self-host on your own Cloudflare account: `wrangler pages deploy ./`, or connect the repo in the CF dashboard.",
       };
     },
   };

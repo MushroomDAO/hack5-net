@@ -198,6 +198,7 @@ export default {
       // A3 — mini「做成应用」: multi-turn chat → repo provisioning + trigger loop
       if (path === "/api/tenant/mini/app/chat" && method === "POST") return miniAppChat(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/launch" && method === "POST") return miniAppLaunch(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/app/deploy" && method === "POST") return miniAppDeploy(request, env, tenant, tid);
       // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
       if (path === "/api/wb/usage-selftest" && method === "GET") return usageSelftest(env);
       // ---- AI naming smoke test (mock only; inert in production) ----
@@ -2162,6 +2163,50 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
       .run();
   }
   return json({ ok: true, id, editToken, viewUrl: `/s/${id}`, repoUrl: repo.htmlUrl, jobId, queuePos });
+}
+
+// CC-56 — participant "one-click deploy". Once the build reached `reviewing` (coding_done: code is
+// pushed to the work repo's main), the author can publish it to a live URL. Triggers WorkBench
+// POST /deploy (clone main → CF Pages, 7-day auto-delete) and returns the live URL + self-deploy
+// hint for immediate display; WorkBench also fires a `deployed` W5 callback that flips the wall
+// badge to Live (single source of truth for app_url). Owner-gated by the email used at launch
+// (mini's identity), plus per-IP / per-tenant daily caps to bound abuse.
+async function miniAppDeploy(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const body = await request.json<{ id?: string; email?: string }>().catch(() => null);
+  const id = String(body?.id ?? "").trim();
+  const email = normalizeEmail(body?.email);
+  if (!id) return json({ error: "缺少作品 id / Missing submission id" }, 400);
+  if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
+
+  const sub = await env.DB.prepare("SELECT email, wb_client, wb_project, repo_url, build_state FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'")
+    .bind(id, tid)
+    .first<{ email: string | null; wb_client: string | null; wb_project: string | null; repo_url: string | null; build_state: string | null }>();
+  if (!sub) return json({ error: "作品不存在 / Not found" }, 404);
+  // Owner check: only the author (email used at launch) can spend WorkBench's deploy resources on it.
+  if (normalizeEmail(sub.email) !== email) return json({ error: "只有作者本人可部署(请用创建时的邮箱)/ Only the author can deploy (use the email you created it with)" }, 403);
+  if (!sub.wb_client || !sub.wb_project || !isHttpUrl(sub.repo_url ?? "")) return json({ error: "该作品不是可部署的 AI build / Not a deployable AI build" }, 400);
+  // Deployable once the code is on main. `reviewing` = coding_done (code pushed); `deployed` = redeploy.
+  if (sub.build_state !== "reviewing" && sub.build_state !== "deployed") {
+    return json({ error: "代码还没就绪,构建完成后再部署 / Build not ready yet — try again once it finishes" }, 409);
+  }
+
+  // Abuse caps (reuse the launch ceilings): bound deploys per IP / per tenant / day regardless of email.
+  const day = Math.floor(unixNow() / 86400);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `minideployip:${ip}`)).slice(0, 24);
+  if (!(await bumpDailyCap(env, `miniapp:deploy:ip:${ipHash}:${day}`, capNum(env.MINIAPP_LAUNCH_IP_CAP, 3)))) return json({ error: "今日部署次数已达上限,请明天再来 / Daily deploy limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:deploy:t:${tid}:${day}`, capNum(env.MINIAPP_LAUNCH_TENANT_CAP, 10)))) return json({ error: "本场今日部署已达上限 / Event daily deploy limit reached" }, 429);
+
+  const wb = createWorkbench(env);
+  try {
+    const d = await wb.deploy({ clientSlug: sub.wb_client, projectSlug: sub.wb_project, repo: sub.repo_url! });
+    // Don't write app_url / build_state here — the signed `deployed` callback is the single source of
+    // truth (flips the badge to Live). Return the live URL for the participant to see immediately.
+    return json({ ok: true, appUrl: d.appUrl, expiresAt: d.expiresAt ?? null, selfDeployHint: d.selfDeployHint ?? null });
+  } catch {
+    return json({ error: "部署失败,请稍后再试 / Deploy failed — try again later" }, 502);
+  }
 }
 
 // A6 — AI 起名: suggest 2–3 Chinese project names from the participant's idea (cheap gpt-4o-mini).
@@ -4730,6 +4775,7 @@ const APP_HTML = String.raw`<!doctype html>
     let s;
     try { s = (await api('/api/submissions/'+id)).submission; }
     catch(e){ app.innerHTML = '<div class="panel"><p class="notice err">'+esc(e.message)+'</p></div>'; return; }
+    const isMini = CONFIG.tenant && CONFIG.tenant.mode==='mini';
     const embed = videoEmbed(s.videoUrl);
     const videoHtml = embed
       ? '<div class="videobox"><iframe src="'+embed+'" allow="accelerometer;autoplay;encrypted-media;gyroscope;picture-in-picture;fullscreen" allowfullscreen scrolling="no"></iframe></div>'
@@ -4768,6 +4814,17 @@ const APP_HTML = String.raw`<!doctype html>
       + ((s.buildState||s.appUrl||s.wbClient) ? buildBadge(s)
           + (s.appUrl?'<div class="kv"><span>'+t('在线试用','Try it live')+'</span><b><a href="'+esc(s.appUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
           + (s.repoUrl?'<div class="kv"><span>'+t('公有仓库','Public repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
+          // CC-56 — deploy button once the code is ready (build_state==='reviewing'), before it's live.
+          + (isMini && s.buildState==='reviewing'
+              ? '<div id="deployBox" style="margin-top:10px">'
+                + '<div class="muted" style="font-size:12px;margin-bottom:6px">'+t('代码已就绪 —— 一键部署看在线效果(免费托管,7 天后自动清理)。','Code is ready — deploy for a live preview (free hosting, auto-removed after 7 days).')+'</div>'
+                + '<div id="deployForm" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+                + '<input id="deployEmail" type="email" placeholder="'+t('创建时用的邮箱','the email you created it with')+'" style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--line,#333);border-radius:8px;background:transparent;color:inherit">'
+                + '<button id="dDeploy">🚀 '+t('部署上线','Deploy live')+'</button>'
+                + '</div>'
+                + '<div id="deployMsg" style="margin-top:8px"></div>'
+                + '</div>'
+              : '')
         : '')
       + (s.secret && s.demoUrl?'<div class="kv"><span>'+t('在线 Demo','Live demo')+'</span><b><a href="'+esc(s.demoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
       + (s.secret && s.demoUser?'<div class="kv"><span>'+t('Demo 账号','Demo user')+'</span><b>'+esc(s.demoUser)+'</b></div>':'')
@@ -4791,6 +4848,21 @@ const APP_HTML = String.raw`<!doctype html>
     const dl=$('#dLike'); if(dl) dl.addEventListener('click', async ()=>{ try{ const r=await api('/api/submissions/'+s.id+'/like',{method:'POST',body:{}}); dl.querySelector('span').textContent=r.likes; dl.classList.add('liked'); }catch(e){} });
     // share (A5) — native share sheet, fallback to clipboard copy of the /s/<id> link
     const sh=$('#dShare'); if(sh) sh.addEventListener('click', async ()=>{ const url=location.origin+'/s/'+s.id; try{ if(navigator.share){ await navigator.share({title:s.projectName,url}); } else { await navigator.clipboard.writeText(url); const o=sh.textContent; sh.textContent='✓ '+t('已复制','Copied'); setTimeout(()=>{sh.textContent=o;},1500); } }catch(e){} });
+    // CC-56 — one-click deploy (author-only, email-gated). Triggers WorkBench /deploy → live URL.
+    const dep=$('#dDeploy'); if(dep) dep.addEventListener('click', async ()=>{
+      const em=($('#deployEmail')&&$('#deployEmail').value||'').trim();
+      const msg=$('#deployMsg');
+      if(!em){ msg.innerHTML='<div class="notice err">'+t('请填写创建时用的邮箱','Enter the email you created it with')+'</div>'; return; }
+      dep.disabled=true; const o=dep.textContent; dep.textContent='⏳ '+t('部署中…','Deploying…');
+      msg.innerHTML='<div class="muted" style="font-size:12px">'+t('正在部署到 Cloudflare Pages,约需数十秒…','Publishing to Cloudflare Pages, this takes tens of seconds…')+'</div>';
+      try{
+        const r=await api('/api/tenant/mini/app/deploy',{method:'POST',body:{id:s.id,email:em}});
+        const df=$('#deployForm'); if(df) df.style.display='none';
+        msg.innerHTML='<div class="notice">✅ '+t('已部署','Deployed')+' — <a href="'+esc(r.appUrl)+'" target="_blank" rel="noopener">'+esc(r.appUrl)+' ↗</a ></div>'
+          + (r.selfDeployHint?'<div class="muted" style="font-size:12px;margin-top:6px">'+esc(r.selfDeployHint)+'</div>':'')
+          + '<div class="muted" style="font-size:12px;margin-top:4px">'+t('此托管 7 天后自动删除;用你自己的 Cloudflare 账号可长期自部署。','This hosting is auto-removed after 7 days; self-deploy on your own Cloudflare account to keep it.')+'</div>';
+      }catch(e){ msg.innerHTML='<div class="notice err">'+esc(e.message)+'</div>'; dep.disabled=false; dep.textContent=o; }
+    });
     // github meta — skipped for secret (private repo) and mini (no repo)
     if(!s.secret && !s.linkUrl) api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
       $('#ghMeta').innerHTML =
