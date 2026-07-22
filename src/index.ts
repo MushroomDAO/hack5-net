@@ -4813,6 +4813,8 @@ const APP_HTML = String.raw`<!doctype html>
       // A5 — WorkBench build block: status badge + 在线试用(app_url)+ 公有仓库(repo_url), only when set.
       + ((s.buildState||s.appUrl||s.wbClient) ? buildBadge(s)
           + (s.appUrl?'<div class="kv"><span>'+t('在线试用','Try it live')+'</span><b><a href="'+esc(s.appUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
+          // The hosted CF Pages preview auto-clears after ~7 days; the GitHub code is permanent + self-deployable.
+          + (s.appUrl?'<div class="muted" style="font-size:12px;margin:-4px 0 6px">'+t('⏳ 在线托管约 7 天后自动清理 · 代码永久保留在 GitHub,可随时自行部署','⏳ Hosted preview auto-clears in ~7 days · code kept on GitHub, redeploy anytime')+'</div>':'')
           + (s.repoUrl?'<div class="kv"><span>'+t('公有仓库','Public repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
           // CC-56 — deploy button once the code is ready (build_state==='reviewing'), before it's live.
           + (isMini && s.buildState==='reviewing'
