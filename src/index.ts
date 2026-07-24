@@ -3973,7 +3973,7 @@ const APP_HTML = String.raw`<!doctype html>
         hp += '<button onclick="go(\'/dashboard\')">'+t('我组织的黑客松','Hackathons I organize')+'</button>'
             + '<button class="ghost" onclick="go(\'/settings\')">'+t('我的设置','Settings')+'</button>'
             + (ME_USER.isOperator?'<button class="ghost" onclick="go(\'/operator\')">'+t('运营','Operator')+'</button>':'')
-            + '<span class="who">'+esc(ME_USER.email)+'</span>'
+            + '<span class="who" title="'+esc(ME_USER.email)+'">'+esc(maskEmail(ME_USER.email))+'</span>'
             + '<button class="ghost" onclick="userLogout()">'+t('退出','Logout')+'</button>';
       } else {
         hp += '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>';
@@ -4106,7 +4106,7 @@ const APP_HTML = String.raw`<!doctype html>
         s.innerHTML = t('先「报名」即可参与这场黑客松。报名后,你的状态会显示在这里,并解锁「开始开发」。','Register below to take part. Once you register, your status shows up here and 开始开发 unlocks.');
         return;
       }
-      let html = '<b>'+esc(me.email)+'</b><div style="margin-top:8px">'
+      let html = '<b title="'+esc(me.email)+'">'+esc(maskEmail(me.email))+'</b><div style="margin-top:8px">'
                + (me.registered ? '✅ '+t('已报名','Registered') : '⚪ '+t('未报名','Not registered yet'));
       if(me.submission){
         const bs = me.submission.buildState ? ' · '+esc(me.submission.buildState) : '';
@@ -4125,7 +4125,7 @@ const APP_HTML = String.raw`<!doctype html>
     const el = $('#mineAuth'); if(!el) return;
     if(me && me.verified){
       el.innerHTML = '<div class="panel"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
-        + '<span>✅ '+t('已验证邮箱','Email verified')+' · <b>'+esc(me.email||'')+'</b></span>'
+        + '<span>✅ '+t('已验证邮箱','Email verified')+' · <b title="'+esc(me.email||'')+'">'+esc(maskEmail(me.email||''))+'</b></span>'
         + '<button class="ghost" id="mineLogout">'+t('退出登录','Log out')+'</button></div>'
         + '<div id="mineCredits" class="muted" style="margin-top:8px;font-size:13px">'+t('加载积分…','Loading credits…')+'</div></div>';
       $('#mineLogout').onclick = async ()=>{ await api('/api/tenant/participant/logout',{method:'POST',body:{}}).catch(()=>{}); renderMine(); };
@@ -5776,6 +5776,10 @@ const APP_HTML = String.raw`<!doctype html>
   }
   function fmtDate(s){ if(!s) return '-'; const d=new Date(s); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
   function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  // Mask a logged-in account email for display: keep first + last of the local part, star the middle,
+  // keep the domain. e.g. jhfnetboy@gmail.com -> j***y@gmail.com. Use only for showing your OWN account
+  // in the UI — not for editable inputs or admin contact lists that need the real value.
+  function maskEmail(e){ e=String(e==null?'':e); const at=e.indexOf('@'); if(at<1) return e; const l=e.slice(0,at), d=e.slice(at); return (l.length<=2 ? l[0]+'*' : l[0]+'***'+l[l.length-1])+d; }
   function setMsg(id,msg,err,ok){ const t=document.getElementById(id); if(!t)return; t.className='notice'+(err?' err':ok?' ok':''); t.innerHTML=msg; }
   async function api(path,opts={}){
     const res = await fetch(path,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
