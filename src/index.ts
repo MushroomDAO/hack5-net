@@ -1,6 +1,6 @@
 import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
-import { createWorkbench, workbenchMockEnabled, mintScopedChatToken } from "./workbench";
+import { createWorkbench, workbenchMockEnabled, mintScopedChatToken, type WorkbenchClient } from "./workbench";
 import { createParticipantRepo, mintRepoScopedPushToken, deleteParticipantRepo, validateRepoName, repoBotMockEnabled } from "./participant-repo";
 import { costUsdToCredits } from "./credits";
 
@@ -2020,6 +2020,39 @@ function capNum(v: string | undefined, def: number): number {
   return Number.isFinite(n) && n > 0 ? n : def;
 }
 
+// Provision (or reuse) the tenant's WorkBench client + a fresh project. The client slug is cached in KV
+// per tenant (30d). That cache can go STALE when WorkBench redeploys and resets its client store — the
+// cached slug then no longer exists and createProject fails (surfaced in CC-59 联调). So: on a
+// createProject failure, invalidate the cache, mint a brand-new client, and retry once. Errors are
+// logged (the callers' catch blocks are otherwise opaque). Returns the client + project slugs.
+async function provisionMiniWbProject(
+  env: Env,
+  wb: WorkbenchClient,
+  tid: string,
+  tenant: Tenant,
+  baseName: string,
+): Promise<{ clientSlug: string; projectSlug: string }> {
+  const cacheKey = `miniapp:wbclient:${tid}`;
+  const mintClient = async (): Promise<string> => {
+    const c = await wb.createClient({ name: tenant.name || tenant.subdomain, background: "hack5 mini hackathon" });
+    await env.SHOTS.put(cacheKey, c.client.slug, { expirationTtl: 30 * 86400 });
+    return c.client.slug;
+  };
+  const cached = await env.SHOTS.get(cacheKey);
+  let clientSlug = cached || (await mintClient());
+  const pname = `${String(baseName).trim().slice(0, 32) || "idea"} ${randomCodeBody(4).toLowerCase()}`.slice(0, 40);
+  try {
+    const p = await wb.createProject(clientSlug, { name: pname, deliverableName: "app", deliverableType: "web" });
+    return { clientSlug, projectSlug: p.project.slug };
+  } catch (e) {
+    if (!cached) throw e; // wasn't a stale-cache case (client was just minted) — nothing to self-heal
+    console.error("miniapp createProject failed on cached WB client; invalidating + retrying with a fresh client", String(e));
+    clientSlug = await mintClient();
+    const p = await wb.createProject(clientSlug, { name: pname, deliverableName: "app", deliverableType: "web" });
+    return { clientSlug, projectSlug: p.project.slug };
+  }
+}
+
 async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
   // Public/anonymous mini: bound WorkBench LLM cost with per-IP + per-tenant daily caps.
@@ -2041,26 +2074,11 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
   let clientSlug = String(body?.clientSlug ?? "").trim();
   let projectSlug = String(body?.projectSlug ?? "").trim();
   try {
-    if (!clientSlug) {
-      // One WorkBench client per hackathon (tenant) — reuse it rather than creating one per chat.
-      const cached = await env.SHOTS.get(`miniapp:wbclient:${tid}`);
-      if (cached) {
-        clientSlug = cached;
-      } else {
-        const c = await wb.createClient({ name: tenant.name || tenant.subdomain, background: "hack5 mini hackathon" });
-        clientSlug = c.client.slug;
-        await env.SHOTS.put(`miniapp:wbclient:${tid}`, clientSlug, { expirationTtl: 30 * 86400 });
-      }
-    }
-    if (!projectSlug) {
-      // One WorkBench client is shared per hackathon, so a project name derived from the idea text
-      // collides across participants who phrase the same idea — WorkBench then 400s "already exists"
-      // and the turn 502s. Append a short random suffix so each new conversation gets its own project;
-      // the returned projectSlug is echoed back to the client and reused on subsequent turns.
-      const base = String(body?.projectName ?? input).trim().slice(0, 32) || "idea";
-      const pname = `${base} ${randomCodeBody(4).toLowerCase()}`.slice(0, 40);
-      const p = await wb.createProject(clientSlug, { name: pname, deliverableName: "app", deliverableType: "web" });
-      projectSlug = p.project.slug;
+    // First turn (no slugs yet) → provision the tenant's WB client + a fresh project (KV-cached client,
+    // self-healing on a stale cache). Later turns reuse the slugs echoed back by the client. A per-project
+    // random suffix avoids "already exists" collisions when two participants phrase the same idea.
+    if (!clientSlug || !projectSlug) {
+      ({ clientSlug, projectSlug } = await provisionMiniWbProject(env, wb, tid, tenant, String(body?.projectName ?? input)));
     }
     const scoped = await mintScopedChatToken(env, clientSlug, projectSlug);
     const res = await wb.chat({ clientSlug, projectSlug, input, lang }, { scopedToken: scoped });
@@ -2070,7 +2088,8 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
     // never break the chat turn.
     await persistMakeTurn(env, tid, request, clientSlug, projectSlug, input, reply, res.result.readiness).catch(() => {});
     return json({ ok: true, clientSlug, projectSlug, readiness: res.result.readiness, reply });
-  } catch {
+  } catch (e) {
+    console.error("miniAppChat failed", String(e));
     return json({ error: "WorkBench 暂不可用,请稍后再试 / WorkBench unavailable" }, 502);
   }
 }
@@ -2250,9 +2269,15 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
     await wb.commit({ clientSlug, projectSlug, push: true, repo: repo.cloneUrl, pushToken: push.token });
     jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl })).jobId;
     queuePos = (await wb.run(jobId)).queuePos;
-  } catch {
+  } catch (e) {
     // Provisioning failed before any real work — release the reserved hold so credits aren't lost.
     if (creditHold > 0) await releaseBuildHold(env, clientSlug, projectSlug).catch(() => {});
+    const msg = String(e);
+    console.error("miniAppLaunch provisioning failed", msg);
+    // The repo name is pre-validated, so a 422 from GitHub's repo-create means the name is already taken.
+    if (/repo create failed: 422/.test(msg)) {
+      return json({ error: "这个作品名已被占用,换一个再试 / That project name is already taken — pick another" }, 409);
+    }
     return json({ error: "建仓或触发编码失败,请稍后再试 / Provisioning failed" }, 502);
   }
   // Count this build against the participant's quota only after successful provisioning.
@@ -2312,21 +2337,12 @@ async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | nu
   if (!(await bumpDailyCap(env, `miniapp:launch:global:${day}`, capNum(env.MINIAPP_LAUNCH_GLOBAL_CAP, 30)))) return json({ error: "系统今日生成已达上限,请明天再来 / Service daily build limit reached" }, 429);
 
   const wb = createWorkbench(env);
-  // No prior chat → provision the WorkBench client (one per tenant, cached) + a fresh project here.
+  // No prior chat → provision the WorkBench client (one per tenant, cached, self-healing) + a fresh project.
   let clientSlug: string, projectSlug: string;
   try {
-    const cached = await env.SHOTS.get(`miniapp:wbclient:${tid}`);
-    if (cached) {
-      clientSlug = cached;
-    } else {
-      const c = await wb.createClient({ name: tenant.name || tenant.subdomain, background: "hack5 mini hackathon" });
-      clientSlug = c.client.slug;
-      await env.SHOTS.put(`miniapp:wbclient:${tid}`, clientSlug, { expirationTtl: 30 * 86400 });
-    }
-    const pname = `${repoName} ${randomCodeBody(4).toLowerCase()}`.slice(0, 40);
-    const p = await wb.createProject(clientSlug, { name: pname, deliverableName: "app", deliverableType: "web" });
-    projectSlug = p.project.slug;
-  } catch {
+    ({ clientSlug, projectSlug } = await provisionMiniWbProject(env, wb, tid, tenant, repoName));
+  } catch (e) {
+    console.error("miniAppLaunchSpec WB client/project provisioning failed", String(e));
     return json({ error: "WorkBench 暂不可用,请稍后再试 / WorkBench unavailable" }, 502);
   }
 
@@ -2364,8 +2380,14 @@ async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | nu
     // SPEC.md in its own container and runs plan→build directly. No fde-copilot commit, no /run; push
     // to loop/integration is handled loop-side via the admin token.
     jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl, spec })).jobId;
-  } catch {
+  } catch (e) {
     if (creditHold > 0) await releaseBuildHold(env, clientSlug, projectSlug).catch(() => {});
+    const msg = String(e);
+    console.error("miniAppLaunchSpec build provisioning failed", msg);
+    // The repo name is pre-validated, so a 422 from GitHub's repo-create means the name is already taken.
+    if (/repo create failed: 422/.test(msg)) {
+      return json({ error: "这个作品名已被占用,换一个再试 / That project name is already taken — pick another" }, 409);
+    }
     return json({ error: "建仓或触发构建失败,请稍后再试 / Provisioning failed" }, 502);
   }
   await env.SHOTS.put(launchKey, String(launched + 1), { expirationTtl: 400 * 86400 });
