@@ -80,6 +80,10 @@ export interface WbStatus {
   jobId?: string;
   prUrl?: string;
   appUrl?: string;
+  // CC-59 /status also reports fine-grained progress + the task list + running cost.
+  progress?: { total?: number; done?: number; percent?: number; current?: string };
+  tasks?: unknown[];
+  costUsd?: number;
 }
 
 export interface WbUsageBucket {
