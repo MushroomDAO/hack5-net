@@ -203,6 +203,7 @@ export default {
       if (path === "/api/tenant/mini/app/launch-spec" && method === "POST") return miniAppLaunchSpec(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/deploy" && method === "POST") return miniAppDeploy(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/build-status" && method === "GET") return miniAppBuildStatus(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/app/estimate" && method === "POST") return miniAppEstimate(request, env, tenant, tid);
       // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
       if (path === "/api/wb/usage-selftest" && method === "GET") return usageSelftest(env);
       // ---- AI naming smoke test (mock only; inert in production) ----
@@ -1942,6 +1943,34 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
     }
   }
   return json({ ok: true, id: row.id, state: advance ? state : current, applied: advance });
+}
+
+// CC-61 pre-estimate proxy: hand the idea/spec to loop's /estimate (admin token; free, no job) to get a
+// credit range, and attach the caller's local balance so the client can show "预计 X · 余额 N" before a
+// build. Test phase: display only — no hard block.
+async function miniAppEstimate(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const body = await request.json<{ idea?: string; spec?: string }>().catch(() => null);
+  const idea = String(body?.idea ?? "").trim().slice(0, 4000);
+  const spec = String(body?.spec ?? "").slice(0, 512 * 1024);
+  if (!idea && !spec.trim()) return json({ error: "need idea or spec" }, 400);
+  // Light per-IP daily cap — the estimate is cheap/free, this just bounds spam.
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
+  await bumpDailyCap(env, `miniapp:estimate:ip:${ipHash}:${Math.floor(unixNow() / 86400)}`, 200);
+  // The logged-in participant's local credit balance (null if anonymous).
+  let balance: number | null = null;
+  const me = await getParticipant(request, env, tid);
+  if (me?.email) {
+    const row = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(me.email).first<{ credits: number }>();
+    balance = row?.credits ?? 0;
+  }
+  try {
+    const est = await createWorkbench(env).estimate(spec.trim() ? { spec } : { idea });
+    return json({ tier: est.tier ?? null, creditsLow: est.creditsLow ?? null, creditsHigh: est.creditsHigh ?? null, note: est.note ?? null, balance });
+  } catch {
+    return json({ error: "estimate unavailable", balance }, 502);
+  }
 }
 
 // Build-status proxy (fine progress): the client holds the jobId from launch; this reads loop's
@@ -5429,8 +5458,23 @@ const APP_HTML = String.raw`<!doctype html>
       $('#launchBox').innerHTML = '<div class="notice ok">'+t('规格已就绪!给作品起个英文名(小写字母/数字/连字符)—— 它同时用作作品名和公有仓库名,AI 就开始建仓 + 编码。','Spec ready! Give it an English name (lowercase, digits, hyphens) — used as both the project name and the public repo — and it will provision + code.')+'</div>'
         + '<label>'+t('作品名称','Project name')+' * <span class="muted">'+t('(英文,将同时作为仓库名)','(English — also used as the repo name)')+'</span></label><input id="mkRepo" maxlength="39" placeholder="my-cool-app">'
         + '<label>'+t('联系邮箱','Contact email')+' '+(myEmail?'<span class="muted">'+t('(已用你的登录邮箱)','(using your account email)')+'</span>':'*')+'</label><input id="mkEmail" type="email" maxlength="254" placeholder="you@example.com" value="'+esc(myEmail)+'">'
+        + '<div id="mkEst" class="muted" style="font-size:13px;margin-top:6px"></div>'
         + '<div class="row" style="margin-top:12px"><button id="mkGo">🚀 '+t('开始生成','Build it')+'</button></div><div id="mkMsg"></div>';
       $('#mkGo').addEventListener('click', doLaunch);
+      showEstimate('mkEst', {idea:lastIdea});
+    }
+    // CC-61 — show a pre-build credit estimate + your balance (test phase: display only, no hard block).
+    async function showEstimate(elId, payload){
+      const el=$('#'+elId); if(!el) return;
+      el.textContent=t('估算积分中…','Estimating credits…');
+      try{
+        const e=await api('/api/tenant/mini/app/estimate',{method:'POST',body:payload});
+        const rng=(e.creditsLow!=null&&e.creditsHigh!=null)?(e.creditsLow+'–'+e.creditsHigh):(e.creditsHigh!=null?('~'+e.creditsHigh):'—');
+        const bal=(e.balance!=null)?(' · '+t('你的余额','balance')+' '+e.balance):'';
+        const short=(e.balance!=null&&e.creditsHigh!=null&&e.balance<e.creditsHigh);
+        el.innerHTML='💳 '+t('预计','Est.')+' <b>'+esc(rng)+'</b> '+t('积分','credits')+(e.tier?' ('+esc(e.tier)+')':'')+bal
+          +(short?' <span style="color:#d97706">'+t('· 余额可能不够,建议先充值','· may be short')+'</span>':'');
+      }catch(err){ el.textContent=''; }
     }
     async function send(){
       const input=$('#chatIn').value.trim();
@@ -5551,7 +5595,9 @@ const APP_HTML = String.raw`<!doctype html>
         $('#specForm').innerHTML =
             '<label>'+t('作品名称','Project name')+' * <span class="muted">'+t('(英文,将同时作为仓库名)','(English — also the repo name)')+'</span></label><input id="specRepo" maxlength="39" placeholder="my-cool-app">'
           + '<label>'+t('联系邮箱','Contact email')+' '+(myEmail?'<span class="muted">'+t('(已用你的登录邮箱)','(using your account email)')+'</span>':'*')+'</label><input id="specEmail" type="email" maxlength="254" placeholder="you@example.com" value="'+esc(myEmail)+'">'
+          + '<div id="specEst" class="muted" style="font-size:13px;margin-top:6px"></div>'
           + '<div class="row" style="margin-top:10px"><button id="specGo">🚀 '+t('用这份 spec 构建','Build from this spec')+'</button></div>';
+        showEstimate('specEst', {spec:uploadedSpec});
         $('#specGo').addEventListener('click', async ()=>{
           const repoName=$('#specRepo').value.trim(), email=$('#specEmail').value.trim();
           if(!repoName){ setMsg('specMsg', t('请填作品名称','Project name required'), true); return; }

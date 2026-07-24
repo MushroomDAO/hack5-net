@@ -146,6 +146,15 @@ export interface WbDeployResult {
   selfDeployHint?: string; // human-readable "deploy it yourself on your own CF account" guidance
 }
 
+// CC-61: build-cost pre-estimate (lightweight heuristic, no job/token cost). Returns a CREDIT range.
+export interface WbEstimate {
+  tier?: string;
+  creditsLow?: number;
+  creditsHigh?: number;
+  note?: string;
+  signals?: Record<string, unknown>;
+}
+
 export interface WorkbenchClient {
   readonly mock: boolean;
   createClient(input: CreateClientInput): Promise<{ client: WbClient }>;
@@ -157,6 +166,7 @@ export interface WorkbenchClient {
   status(jobId: string): Promise<WbStatus>;
   usage(clientSlug?: string): Promise<WbUsage>;
   deploy(input: DeployInput): Promise<WbDeployResult>;
+  estimate(input: { idea?: string; spec?: string }): Promise<WbEstimate>;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +289,7 @@ function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
     run: (jobId) => call(loopBase, "POST", "/run", { jobId }),
     status: (jobId) => call(loopBase, "GET", `/status/${encodeURIComponent(jobId)}`),
     deploy: (input) => call(loopBase, "POST", "/deploy", input),
+    estimate: (input) => call(loopBase, "POST", "/estimate", input),
   };
 }
 
@@ -374,6 +385,9 @@ function createMockClient(env: WorkbenchEnv): WorkbenchClient {
         expiresAt: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
         selfDeployHint: "用你自己的 Cloudflare 账号长期自部署:wrangler pages deploy ./ 或在 CF 面板连接该 GitHub 仓库。/ Self-host on your own Cloudflare account: `wrangler pages deploy ./`, or connect the repo in the CF dashboard.",
       };
+    },
+    async estimate() {
+      return { tier: "S", creditsLow: 5, creditsHigh: 15, note: "mock estimate", signals: {} };
     },
   };
 }
