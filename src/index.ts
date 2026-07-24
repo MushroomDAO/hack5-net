@@ -56,6 +56,7 @@ interface Env {
   MINIAPP_LAUNCH_IP_CAP?: string; // per-IP daily build ceiling — default 3
   MINIAPP_LAUNCH_TENANT_CAP?: string; // per-tenant daily build ceiling — default 10
   MINIAPP_LAUNCH_GLOBAL_CAP?: string; // all-tenant daily build ceiling — default 30
+  MINIAPP_AUTO_DEPLOY?: string; // "off" disables auto-deploy on coding_done (default: on)
   // ---- Credits / token billing (mini /make) — see docs/credits-billing-design.md ----
   CREDITS_ENABLED?: string; // "1"/"true" turns the feature on; off = current free-quota behaviour
   CREDITS_API_URL?: string; // external credits API base (balance/reserve/settle/release, keyed by email)
@@ -201,6 +202,7 @@ export default {
       if (path === "/api/tenant/mini/app/launch" && method === "POST") return miniAppLaunch(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/launch-spec" && method === "POST") return miniAppLaunchSpec(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/deploy" && method === "POST") return miniAppDeploy(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/app/build-status" && method === "GET") return miniAppBuildStatus(request, env, tenant, tid);
       // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
       if (path === "/api/wb/usage-selftest" && method === "GET") return usageSelftest(env);
       // ---- AI naming smoke test (mock only; inert in production) ----
@@ -1923,7 +1925,45 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
   } else if (state === "failed") {
     await releaseBuildHold(env, clientSlug, projectSlug);
   }
+  // Auto-deploy: when the code is ready (coding_done → reviewing), publish it to CF Pages automatically
+  // so the participant gets a live URL without a manual click. Best-effort — the manual Deploy button
+  // still works if this fails. The subsequent `deployed` callback remains the source of truth for
+  // app_url + credit settle. Set MINIAPP_AUTO_DEPLOY=off to disable.
+  if (advance && state === "reviewing" && env.MINIAPP_AUTO_DEPLOY !== "off") {
+    const full = await env.DB.prepare("SELECT wb_client, wb_project, repo_url FROM submissions WHERE id = ?")
+      .bind(row.id)
+      .first<{ wb_client: string | null; wb_project: string | null; repo_url: string | null }>();
+    if (full?.wb_client && full.wb_project && isHttpUrl(full.repo_url ?? "")) {
+      try {
+        await createWorkbench(env).deploy({ clientSlug: full.wb_client, projectSlug: full.wb_project, repo: full.repo_url! });
+      } catch (e) {
+        console.error("auto-deploy failed (manual Deploy still available)", String(e));
+      }
+    }
+  }
   return json({ ok: true, id: row.id, state: advance ? state : current, applied: advance });
+}
+
+// Build-status proxy (fine progress): the client holds the jobId from launch; this reads loop's
+// /status with the admin token (client can't) and returns the state + %/current-task + live URL.
+async function miniAppBuildStatus(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const jobId = String(new URL(request.url).searchParams.get("jobId") ?? "").trim();
+  if (!jobId) return json({ error: "missing jobId" }, 400);
+  try {
+    const s = await createWorkbench(env).status(jobId);
+    const p = s.progress || {};
+    return json({
+      state: s.state,
+      percent: typeof p.percent === "number" ? p.percent : (p.total ? Math.round(((p.done ?? 0) / p.total) * 100) : null),
+      current: p.current ?? null,
+      total: p.total ?? null,
+      done: p.done ?? null,
+      appUrl: s.appUrl ?? null,
+    });
+  } catch {
+    return json({ error: "status unavailable" }, 502);
+  }
 }
 
 // Settle a finished build: read its real USD cost from WorkBench /api/usage, convert to credits
@@ -5439,12 +5479,15 @@ const APP_HTML = String.raw`<!doctype html>
     }
     // Live build progress: a labelled bar that maps build_state → step + %. Failure shows the reason
     // (once WorkBench sends one in the W5 callback; otherwise a "not reported yet" note).
-    function buildProgressLine(st, extra){
+    function buildProgressLine(st, extra, pct, current){
       const map={queued:['⏳',t('排队中','Queued'),15],planning:['🛠',t('规划中','Planning'),35],coding:['🛠',t('编码中','Coding'),60],reviewing:['🔍',t('审查中','Reviewing'),85],deployed:['✅',t('已上线','Live'),100],failed:['⚠️',t('构建失败','Build failed'),100]};
       const m=map[st]||['📦',esc(st||''),10];
       const col = st==='failed'?'#dc2626':(st==='deployed'?'#16a34a':'#d97706');
-      return '<div class="muted" style="font-size:13px;margin-bottom:4px">'+m[0]+' '+m[1]+(extra||'')+'</div>'
-        +'<div style="height:8px;border-radius:4px;background:var(--line,#333);overflow:hidden"><div style="height:100%;width:'+m[2]+'%;background:'+col+'"></div></div>';
+      // Prefer loop's real percent (from /status) when available; else the per-stage bucket width.
+      const width = (st==='deployed'||st==='failed') ? 100 : (typeof pct==='number' && pct>=0 ? Math.max(5,Math.min(99,pct)) : m[2]);
+      const cur = current ? ' <span style="opacity:.75">· '+esc(current)+'</span>' : '';
+      return '<div class="muted" style="font-size:13px;margin-bottom:4px">'+m[0]+' '+m[1]+cur+(extra||'')+'</div>'
+        +'<div style="height:8px;border-radius:4px;background:var(--line,#333);overflow:hidden"><div style="height:100%;width:'+width+'%;background:'+col+';transition:width .4s"></div></div>';
     }
     function launchReceipt(r){
       return '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+'<br>'
@@ -5462,10 +5505,17 @@ const APP_HTML = String.raw`<!doctype html>
         if(!stEl || !document.body.contains(stEl)) return; // navigated away
         let s; try{ s=(await api('/api/submissions/'+id)).submission; }catch(e){ continue; }
         const st=s.buildState||'queued';
+        // Fine progress from loop's /status (via the server proxy, using the jobId from launch). Best-effort:
+        // the jobId can vanish after a container restart, so fall back to the coarse per-stage bar.
+        let pct=null, current=null;
+        if(r.jobId && st!=='deployed' && st!=='failed'){
+          try{ const bs=await api('/api/tenant/mini/app/build-status?jobId='+encodeURIComponent(r.jobId)); if(bs){ if(typeof bs.percent==='number') pct=bs.percent; current=bs.current||null; } }catch(e){}
+        }
         let extra='';
-        if(st==='deployed' && s.appUrl) extra=' · <a href="'+esc(s.appUrl)+'" target="_blank" rel="noopener">'+t('打开应用','Open app')+'</a >';
+        if(st==='deployed' && s.appUrl) extra=' · <a href="'+esc(s.appUrl)+'" target="_blank" rel="noopener">🔗 '+t('打开应用(CF)','Open app (CF)')+'</a >';
+        if(st==='reviewing') extra=' · <span class="muted">'+t('自动部署中…','auto-deploying…')+'</span>';
         if(st==='failed') extra='<br><span style="color:#dc2626;font-size:12px">'+esc(s.buildError||t('原因暂无(WorkBench 未回传失败详情)','no failure reason reported yet'))+'</span>';
-        if(document.body.contains(stEl)) stEl.innerHTML=buildProgressLine(st, extra);
+        if(document.body.contains(stEl)) stEl.innerHTML=buildProgressLine(st, extra, pct, current);
         if(st==='deployed'||st==='failed') return;
       }
     }
