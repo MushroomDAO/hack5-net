@@ -1671,7 +1671,7 @@ async function getSubmission(request: Request, env: Env, tenant: Tenant | null, 
   if (!tid) return json({ error: "Not found" }, 404);
   if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
   const row = await env.DB.prepare(
-    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md, link_url, likes, wb_client, wb_project, app_url, build_state FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
+    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md, link_url, likes, wb_client, wb_project, app_url, build_state, build_error FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
   )
     .bind(id, tid)
     .first<Record<string, unknown>>();
@@ -1706,6 +1706,7 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean,
     wbProject: row.wb_project ?? null,
     appUrl: row.app_url ?? null,
     buildState: row.build_state ?? null,
+    buildError: row.build_error ?? null,
     // Secret fields only appear for secret tenants (open-mode responses stay unchanged). Online
     // demo + README show to anyone past the gate; credentials are judges/admin only (like contact).
     ...(secret
@@ -1883,7 +1884,7 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
   if (!provided || !timingSafeEqual(provided.toLowerCase(), expected)) return json({ error: "bad signature" }, 401);
   const body = (() => {
     try {
-      return JSON.parse(raw) as { event?: string; clientSlug?: string; projectSlug?: string; repo?: string; appUrl?: string };
+      return JSON.parse(raw) as { event?: string; clientSlug?: string; projectSlug?: string; repo?: string; appUrl?: string; reason?: string; error?: string };
     } catch {
       return null;
     }
@@ -1906,8 +1907,11 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
     // Signed (trusted) source, but validate scheme as defense-in-depth so only http(s) URLs are stored/rendered.
     const appUrl = body.appUrl && isHttpUrl(body.appUrl) ? body.appUrl : null;
     const repo = body.repo && isHttpUrl(body.repo) ? body.repo : "";
-    await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, updated_at = ? WHERE id = ?")
-      .bind(state, appUrl, repo, repo, unixNow(), row.id)
+    // On failure, capture the reason (if WorkBench sent one) so the UI can show *why*; on any other
+    // (forward) transition, clear a previous error. COALESCE keeps the old value if this event omits it.
+    const buildError = state === "failed" ? String(body.reason || body.error || "").trim().slice(0, 500) || null : "";
+    await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, build_error = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, build_error) END, updated_at = ? WHERE id = ?")
+      .bind(state, appUrl, repo, repo, state === "failed" ? "f" : "", buildError, unixNow(), row.id)
       .run();
   }
   // The coding loop finished — reconcile credits. On `deployed`, settle the reserved hold to the build's
@@ -2195,6 +2199,35 @@ async function miniAppHistory(request: Request, env: Env, tenant: Tenant | null,
   return json({ authed: true, conversation, launched });
 }
 
+// Email the participant their build receipt after a launch: the public repo, the project page, and
+// the EDIT TOKEN — which is otherwise only shown once on screen and lost on refresh. Best-effort.
+async function sendBuildQueuedEmail(
+  env: Env,
+  email: string,
+  info: { projectName: string; repoUrl: string; viewUrl: string; editToken: string },
+): Promise<void> {
+  if (!env.RESEND_API_KEY) return;
+  const { projectName, repoUrl, viewUrl, editToken } = info;
+  const text =
+    `你的作品「${projectName}」已排队构建 ✨\n\n` +
+    `公有仓库:${repoUrl}\n作品详情(含实时构建进度):${viewUrl}\n\n` +
+    `编辑令牌(请妥善保存,用于日后编辑作品):${editToken}\n\n— Hack5`;
+  const badge = `<span style="display:inline-block;width:40px;height:40px;line-height:38px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span>`;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;color:#14161c">` +
+    `<div style="text-align:center;padding:8px 0 16px">${badge}<span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></div>` +
+    `<p style="font-size:16px">你的作品 <b>${escapeHtml(projectName)}</b> 已排队构建 ✨</p>` +
+    `<p style="font-size:14px;color:#3c4250">公有仓库:<a href="${escapeHtml(repoUrl)}">${escapeHtml(repoUrl)}</a><br>` +
+    `作品详情(含实时构建进度):<a href="${escapeHtml(viewUrl)}">${escapeHtml(viewUrl)}</a></p>` +
+    `<p style="font-size:14px;color:#3c4250">编辑令牌(请妥善保存,用于日后编辑作品):<br><code style="font-size:15px;background:#f6f7fb;border:1px solid #e2e6ee;border-radius:6px;padding:4px 8px;display:inline-block;margin-top:4px">${escapeHtml(editToken)}</code></p>` +
+    `</div>`;
+  await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: env.MAIL_FROM || "Hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 构建已排队 · ${projectName}`, text, html }),
+  }).catch(() => {});
+}
+
 // Once the spec is loop_ready: create the participant's public repo (B2), push the spec, and
 // enqueue the coding loop. Records/refreshes the participant's submission (email-hash identity)
 // with the WorkBench link + build_state='queued' so it appears on the wall with a build badge.
@@ -2203,7 +2236,9 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   const body = await request.json<{ clientSlug?: string; projectSlug?: string; repoName?: string; projectName?: string; email?: string; idea?: string }>().catch(() => null);
   const clientSlug = String(body?.clientSlug ?? "").trim();
   const projectSlug = String(body?.projectSlug ?? "").trim();
-  const email = normalizeEmail(body?.email);
+  let email = normalizeEmail(body?.email);
+  // Logged-in participant → don't make them re-type their email: fall back to the signed session's address.
+  if (!email) { const me = await getParticipant(request, env, tid); email = normalizeEmail(me?.email); }
   const idea = String(body?.idea ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
   if (!clientSlug || !projectSlug) return json({ error: "请先完成对话 / Complete the chat first" }, 400);
   if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
@@ -2304,6 +2339,7 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
       .bind(id, tid, projectName, email, owner, repoKey, repo.htmlUrl, idea, shareToken, editToken, repo.htmlUrl, now, now, clientSlug, projectSlug)
       .run();
   }
+  await sendBuildQueuedEmail(env, email, { projectName, repoUrl: repo.htmlUrl, viewUrl: `https://${tenant.subdomain}.hack5.net/s/${id}`, editToken }).catch(() => {});
   return json({ ok: true, id, editToken, viewUrl: `/s/${id}`, repoUrl: repo.htmlUrl, jobId, queuePos });
 }
 
@@ -2316,7 +2352,9 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
 async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
   const body = await request.json<{ repoName?: string; email?: string; projectName?: string; spec?: string }>().catch(() => null);
-  const email = normalizeEmail(body?.email);
+  let email = normalizeEmail(body?.email);
+  // Logged-in participant → don't make them re-type their email: fall back to the signed session's address.
+  if (!email) { const me = await getParticipant(request, env, tid); email = normalizeEmail(me?.email); }
   const spec = String(body?.spec ?? "");
   if (!spec.trim()) return json({ error: "请上传 spec(markdown 全文) / Upload a spec (full markdown)" }, 400);
   // Match loop-engineer's 512KB cap, measured in UTF-8 bytes (a Chinese spec is ~3 bytes/char).
@@ -2413,6 +2451,7 @@ async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | nu
       .bind(id, tid, projectName, email, owner, repoKey, repo.htmlUrl, idea, shareToken, editToken, repo.htmlUrl, now, now, clientSlug, projectSlug)
       .run();
   }
+  await sendBuildQueuedEmail(env, email, { projectName, repoUrl: repo.htmlUrl, viewUrl: `https://${tenant.subdomain}.hack5.net/s/${id}`, editToken }).catch(() => {});
   return json({ ok: true, id, editToken, viewUrl: `/s/${id}`, repoUrl: repo.htmlUrl, jobId });
 }
 
@@ -5002,6 +5041,10 @@ const APP_HTML = String.raw`<!doctype html>
     if(st==='deployed' && s.appUrl){
       badge += ' <a class="chip" href="'+esc(s.appUrl)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()">🔗 '+t('试用','Try it')+'</a>';
     }
+    // Failure reason (only present on the detail API, so wall cards stay compact).
+    if(st==='failed' && s.buildError){
+      return '<div class="card-build" style="margin-top:6px;display:flex;flex-direction:column;gap:4px"><div style="display:flex;gap:6px;flex-wrap:wrap">'+badge+'</div><div style="font-size:12px;color:#dc2626;white-space:pre-wrap">'+esc(s.buildError)+'</div></div>';
+    }
     return '<div class="card-build" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">'+badge+'</div>';
   }
   function card(s){
@@ -5281,7 +5324,7 @@ const APP_HTML = String.raw`<!doctype html>
   // A3 — mini「做成应用」: multi-turn chat → provision repo + trigger loop, then it appears on the wall.
   async function renderMiniMakeApp(){
     if(!CONFIG.tenant || CONFIG.tenant.mode!=='mini'){ go('/'); return; }
-    let clientSlug='', projectSlug='', ready=false, lastIdea='', msgs=[], lastReadiness=null;
+    let clientSlug='', projectSlug='', ready=false, lastIdea='', msgs=[], lastReadiness=null, myEmail='';
     // The /make chat only lived in memory, so a reload lost it. Persist the conversation to this
     // browser's localStorage (per tenant) and restore it on return; the user can download it or start
     // over (with a warning). Nothing is stored server-side — download is the way to keep a copy.
@@ -5345,7 +5388,7 @@ const APP_HTML = String.raw`<!doctype html>
       // must satisfy the repo-name charset (lowercase / digits / hyphens). No separate display-name field.
       $('#launchBox').innerHTML = '<div class="notice ok">'+t('规格已就绪!给作品起个英文名(小写字母/数字/连字符)—— 它同时用作作品名和公有仓库名,AI 就开始建仓 + 编码。','Spec ready! Give it an English name (lowercase, digits, hyphens) — used as both the project name and the public repo — and it will provision + code.')+'</div>'
         + '<label>'+t('作品名称','Project name')+' * <span class="muted">'+t('(英文,将同时作为仓库名)','(English — also used as the repo name)')+'</span></label><input id="mkRepo" maxlength="39" placeholder="my-cool-app">'
-        + '<label>'+t('联系邮箱','Contact email')+' *</label><input id="mkEmail" type="email" maxlength="254" placeholder="you@example.com">'
+        + '<label>'+t('联系邮箱','Contact email')+' '+(myEmail?'<span class="muted">'+t('(已用你的登录邮箱)','(using your account email)')+'</span>':'*')+'</label><input id="mkEmail" type="email" maxlength="254" placeholder="you@example.com" value="'+esc(myEmail)+'">'
         + '<div class="row" style="margin-top:12px"><button id="mkGo">🚀 '+t('开始生成','Build it')+'</button></div><div id="mkMsg"></div>';
       $('#mkGo').addEventListener('click', doLaunch);
     }
@@ -5365,16 +5408,16 @@ const APP_HTML = String.raw`<!doctype html>
       $('#chatSend').disabled=false;
     }
     async function doLaunch(){
-      // The single English name is the repo name AND the project (display) name.
+      // The single English name is the repo name AND the project (display) name. Email is optional when
+      // logged in — the server falls back to your session address.
       const repoName=$('#mkRepo').value.trim(), email=$('#mkEmail').value.trim();
-      if(!repoName||!email){ setMsg('mkMsg', t('请填作品名称和邮箱','Project name and email required'), true); return; }
+      if(!repoName){ setMsg('mkMsg', t('请填作品名称','Project name required'), true); return; }
       $('#mkGo').disabled=true; setMsg('mkMsg', t('建仓 + 触发编码中…','Provisioning…'));
       try{
         const r=await api('/api/tenant/mini/app/launch',{method:'POST',body:{clientSlug,projectSlug,repoName,email,projectName:repoName,idea:lastIdea}});
-        $('#launchBox').innerHTML = '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+' '+t('队列位','Queue')+' #'+(r.queuePos||1)+'<br>'
-          + t('公有仓库','Repo')+': <a href="'+esc(r.repoUrl)+'" target="_blank" rel="noopener">'+esc(r.repoUrl)+'</a ><br>'
-          + '<a href="'+esc(r.viewUrl)+'" onclick="go(\''+esc(r.viewUrl)+'\');return false">'+t('查看作品详情 →','View project →')+'</a > · '+t('编辑令牌','Edit token')+': <code>'+esc(r.editToken)+'</code></div>';
+        setMsg('mkMsg','');
         clearDraft(); // build is queued and the repo is the artifact now — drop the saved chat draft
+        await pollBuild(r.id, $('#launchBox'), r);
       }catch(e){ setMsg('mkMsg', e.message, true); $('#mkGo').disabled=false; }
     }
     function hydrateFromDraft(d){
@@ -5394,10 +5437,43 @@ const APP_HTML = String.raw`<!doctype html>
         +(l.viewUrl?' · <a href="'+esc(l.viewUrl)+'" onclick="go(\''+esc(l.viewUrl)+'\');return false">'+t('作品详情','Details')+'</a >':'')
         +'</div>';
     }
+    // Live build progress: a labelled bar that maps build_state → step + %. Failure shows the reason
+    // (once WorkBench sends one in the W5 callback; otherwise a "not reported yet" note).
+    function buildProgressLine(st, extra){
+      const map={queued:['⏳',t('排队中','Queued'),15],planning:['🛠',t('规划中','Planning'),35],coding:['🛠',t('编码中','Coding'),60],reviewing:['🔍',t('审查中','Reviewing'),85],deployed:['✅',t('已上线','Live'),100],failed:['⚠️',t('构建失败','Build failed'),100]};
+      const m=map[st]||['📦',esc(st||''),10];
+      const col = st==='failed'?'#dc2626':(st==='deployed'?'#16a34a':'#d97706');
+      return '<div class="muted" style="font-size:13px;margin-bottom:4px">'+m[0]+' '+m[1]+(extra||'')+'</div>'
+        +'<div style="height:8px;border-radius:4px;background:var(--line,#333);overflow:hidden"><div style="height:100%;width:'+m[2]+'%;background:'+col+'"></div></div>';
+    }
+    function launchReceipt(r){
+      return '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+'<br>'
+        + t('公有仓库','Repo')+': <a href="'+esc(r.repoUrl)+'" target="_blank" rel="noopener">'+esc(r.repoUrl)+'</a ><br>'
+        + '<a href="'+esc(r.viewUrl)+'" onclick="go(\''+esc(r.viewUrl)+'\');return false">'+t('查看作品详情 →','View project →')+'</a > · '+t('编辑令牌','Edit token')+': <code>'+esc(r.editToken)+'</code>'
+        + '<br><span class="muted" style="font-size:12px">'+t('仓库链接和编辑令牌已发到你的邮箱 📩(没收到看下垃圾箱)','Repo link + edit token emailed to you 📩')+'</span>'
+        + '</div><div id="bldStat" style="margin-top:10px">'+buildProgressLine('queued')+'</div>';
+    }
+    // Render the receipt + poll the submission's build_state until it deploys or fails, updating the bar.
+    async function pollBuild(id, box, r){
+      box.innerHTML = launchReceipt(r);
+      const stEl = box.querySelector('#bldStat');
+      for(let i=0;i<75;i++){
+        await new Promise(res=>setTimeout(res,4000));
+        if(!stEl || !document.body.contains(stEl)) return; // navigated away
+        let s; try{ s=(await api('/api/submissions/'+id)).submission; }catch(e){ continue; }
+        const st=s.buildState||'queued';
+        let extra='';
+        if(st==='deployed' && s.appUrl) extra=' · <a href="'+esc(s.appUrl)+'" target="_blank" rel="noopener">'+t('打开应用','Open app')+'</a >';
+        if(st==='failed') extra='<br><span style="color:#dc2626;font-size:12px">'+esc(s.buildError||t('原因暂无(WorkBench 未回传失败详情)','no failure reason reported yet'))+'</span>';
+        if(document.body.contains(stEl)) stEl.innerHTML=buildProgressLine(st, extra);
+        if(st==='deployed'||st==='failed') return;
+      }
+    }
     // Prefer server-side history (cross-browser, and it survives the localStorage clear on launch) for a
     // returning registered participant; fall back to this-browser localStorage for anonymous users. If
     // the participant already launched a build, show its live status/links.
     (async ()=>{
+      try{ const meNow=await api('/api/tenant/me'); if(meNow && meNow.email) myEmail=meNow.email; }catch(e){}
       let hydrated=false, launchedInfo=null;
       try{
         const h=await api('/api/tenant/mini/app/history');
@@ -5424,18 +5500,16 @@ const APP_HTML = String.raw`<!doctype html>
         setMsg('specMsg', t('已读取 ','Loaded ')+Math.max(1,Math.round(uploadedSpec.length/1024))+'KB · '+f.name);
         $('#specForm').innerHTML =
             '<label>'+t('作品名称','Project name')+' * <span class="muted">'+t('(英文,将同时作为仓库名)','(English — also the repo name)')+'</span></label><input id="specRepo" maxlength="39" placeholder="my-cool-app">'
-          + '<label>'+t('联系邮箱','Contact email')+' *</label><input id="specEmail" type="email" maxlength="254" placeholder="you@example.com">'
+          + '<label>'+t('联系邮箱','Contact email')+' '+(myEmail?'<span class="muted">'+t('(已用你的登录邮箱)','(using your account email)')+'</span>':'*')+'</label><input id="specEmail" type="email" maxlength="254" placeholder="you@example.com" value="'+esc(myEmail)+'">'
           + '<div class="row" style="margin-top:10px"><button id="specGo">🚀 '+t('用这份 spec 构建','Build from this spec')+'</button></div>';
         $('#specGo').addEventListener('click', async ()=>{
           const repoName=$('#specRepo').value.trim(), email=$('#specEmail').value.trim();
-          if(!repoName||!email){ setMsg('specMsg', t('请填作品名称和邮箱','Project name and email required'), true); return; }
+          if(!repoName){ setMsg('specMsg', t('请填作品名称','Project name required'), true); return; }
           $('#specGo').disabled=true; setMsg('specMsg', t('建仓 + 触发构建中…','Provisioning…'));
           try{
             const r=await api('/api/tenant/mini/app/launch-spec',{method:'POST',body:{repoName,email,projectName:repoName,spec:uploadedSpec}});
-            $('#specForm').innerHTML = '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+'<br>'
-              + t('公有仓库','Repo')+': <a href="'+esc(r.repoUrl)+'" target="_blank" rel="noopener">'+esc(r.repoUrl)+'</a ><br>'
-              + '<a href="'+esc(r.viewUrl)+'" onclick="go(\''+esc(r.viewUrl)+'\');return false">'+t('查看作品详情 →','View project →')+'</a > · '+t('编辑令牌','Edit token')+': <code>'+esc(r.editToken)+'</code></div>';
             setMsg('specMsg','');
+            await pollBuild(r.id, $('#specForm'), r);
           }catch(e){ setMsg('specMsg', e.message, true); $('#specGo').disabled=false; }
         });
       }catch(e){ setMsg('specMsg', t('读取失败','Read failed'), true); }
