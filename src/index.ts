@@ -1125,7 +1125,7 @@ async function createSubdomainDns(env: Env, sub: string): Promise<string | null>
 }
 
 async function sendEmailCode(env: Env, email: string, code: string): Promise<boolean> {
-  const text = `hack5 登录验证码:${code}(10 分钟内有效)\nYour hack5 login code: ${code} (expires in 10 minutes)\n\n🚀 10 分钟发起你的黑客松 · Launch your hackathon in 10 minutes — https://hack5.net`;
+  const text = `Hack5 登录验证码:${code}(10 分钟内有效)\nYour Hack5 login code: ${code} (expires in 10 minutes)\n\n🚀 10 分钟发起你的黑客松 · Launch your hackathon in 10 minutes — https://hack5.net`;
   const html =
     `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
@@ -1135,7 +1135,7 @@ async function sendEmailCode(env: Env, email: string, code: string): Promise<boo
     `<span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span>` +
     `</td></tr>` +
     `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
-    `<p style="color:#5f6675;font-size:15px;margin:0 0 10px">你的 hack5 登录验证码 · Your login code</p>` +
+    `<p style="color:#5f6675;font-size:15px;margin:0 0 10px">你的 Hack5 登录验证码 · Your login code</p>` +
     `<div style="font-size:38px;font-weight:800;letter-spacing:10px;color:#14161c;background:#f2f0fe;border-radius:10px;padding:18px 0;text-align:center;margin:6px 0 14px">${code}</div>` +
     `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:0">10 分钟内有效。若非本人操作,请忽略此邮件。<br>Expires in 10 minutes. Ignore this email if it was not you.</p>` +
     `</td></tr>` +
@@ -3539,7 +3539,7 @@ const APP_HTML = String.raw`<!doctype html>
     '发起黑客松 →':'เริ่มจัดแฮกกาธอน →',
     '登录 → 取名 → 一键部署':'เข้าสู่ระบบ → ตั้งชื่อ → ดีพลอยคลิกเดียว',
     '一键发起功能正在上线中 —— 你将能在 10 分钟内拥有一个独立域名的黑客松站点。':'ฟีเจอร์เริ่มงานคลิกเดียวกำลังจะมา — คุณจะมีเว็บแฮกกาธอนพร้อมโดเมนของตัวเองได้ใน 10 นาที',
-    '← 了解 hack5':'← รู้จัก hack5', '三步 · 10 分钟':'3 ขั้นตอน · 10 นาที',
+    '← 了解 Hack5':'← รู้จัก Hack5', '三步 · 10 分钟':'3 ขั้นตอน · 10 นาที',
     '登录 → 取名 → 一键部署你专属的黑客松站点。':'เข้าสู่ระบบ → ตั้งชื่อ → ดีพลอยคลิกเดียวได้เว็บแฮกกาธอนของคุณ',
     'Hack5 隶属于 Mycelium,为开放的创造者社区而建。':'Hack5 อยู่ภายใต้ Mycelium สร้างเพื่อคอมมิวนิตี้ผู้สร้างแบบเปิด',
     '三种规模,一键发起 · 独立域名 · 首场免费':'สามขนาด เริ่มคลิกเดียว · โดเมนของตัวเอง · งานแรกฟรี',
