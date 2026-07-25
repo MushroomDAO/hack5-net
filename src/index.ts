@@ -35,7 +35,8 @@ interface Env {
   R2_BUCKET_NAME?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
-  OPENAI_API_KEY?: string; // premium: AI text-to-image poster (gpt-image-1)
+  AI?: Ai; // Cloudflare Workers AI binding — primary AI poster backend (flux-1-schnell), native, no key
+  OPENAI_API_KEY?: string; // fallback AI poster backend (gpt-image-1) when the AI binding isn't configured
   SIGNED_UPLOAD_EXPIRES_SECONDS?: string;
   // ---- WorkBench (Mini × fde-copilot/loop-engineer) — contract §5 v2, CC-51 ----
   WORKBENCH_BASE_URL?: string; // fde-copilot base URL (clients/projects/chat/commit/usage); unset → mock
@@ -1448,7 +1449,7 @@ async function getPosterQuota(request: Request, env: Env, tid: string | null): P
   const usedFree = Number((await env.SHOTS.get(freeCapKey(tid))) ?? "0");
   const usedCustom = Number((await env.SHOTS.get(customCapKey(tid))) ?? "0");
   return json({
-    aiEnabled: Boolean(env.OPENAI_API_KEY),
+    aiEnabled: Boolean(env.AI || env.OPENAI_API_KEY),
     free: Math.max(0, AI_POSTER_FREE_CAP - usedFree),
     custom: Math.max(0, AI_POSTER_CUSTOM_CAP - usedCustom),
     freeCap: AI_POSTER_FREE_CAP,
@@ -1459,7 +1460,7 @@ async function getPosterQuota(request: Request, env: Env, tid: string | null): P
 async function generateAiPoster(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth || !tenant) return json({ error: "Admin only" }, 403);
-  if (!env.OPENAI_API_KEY) return json({ error: "AI 海报未开通 / AI poster not enabled" }, 503);
+  if (!env.AI && !env.OPENAI_API_KEY) return json({ error: "AI 海报未开通 / AI poster not enabled" }, 503);
 
   const body = await request.json<{ prompt?: string; mode?: string }>().catch(() => null);
   const mode = body?.mode === "free" ? "free" : "custom";
@@ -1498,35 +1499,43 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
         ` IMPORTANT: render NO text, NO letters, NO words, NO numbers and NO logos anywhere in the image;` +
         ` keep the lower third calmer and slightly darker so text can be overlaid on top.`;
 
-  let resp: Response;
+  // Generate the BACKGROUND. Prefer Cloudflare Workers AI (flux-1-schnell — native to this Worker, cheap,
+  // no external key, no cold-start vendor); fall back to OpenAI gpt-image-1 only if the AI binding is absent.
+  let rawB64 = "";
+  let contentType = "image/jpeg";
   try {
-    resp = await fetch("https://api.openai.com/v1/images/generations", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "gpt-image-1", prompt, size: "1024x1536", quality: "medium", n: 1 }),
-    });
-  } catch {
+    if (env.AI) {
+      const out = (await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt, steps: 6 })) as { image?: string };
+      rawB64 = String(out?.image ?? "");
+      contentType = "image/jpeg";
+    } else {
+      const resp = await fetch("https://api.openai.com/v1/images/generations", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "gpt-image-1", prompt, size: "1024x1536", quality: "medium", n: 1 }),
+      });
+      if (!resp.ok) {
+        console.log("gpt-image-1 error", resp.status, (await resp.text().catch(() => "")).slice(0, 300));
+        await refund();
+        return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
+      }
+      const data = await resp.json<{ data?: { b64_json?: string }[] }>().catch(() => null);
+      rawB64 = String(data?.data?.[0]?.b64_json ?? "");
+      contentType = "image/png";
+    }
+  } catch (e) {
+    console.log("ai poster error", String(e));
     await refund();
     return json({ error: "AI 服务暂不可用 / AI service unavailable" }, 502);
   }
-  if (!resp.ok) {
-    const detail = await resp.text().catch(() => "");
-    console.log("gpt-image-1 error", resp.status, detail.slice(0, 300));
-    await refund();
-    return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
-  }
-  const data = await resp.json<{ data?: { b64_json?: string }[] }>().catch(() => null);
-  const rawB64 = data?.data?.[0]?.b64_json;
-  if (!rawB64) {
+  // Defensive: guarantee pure base64 so it can't break out of the SVG <image href="..."> attribute.
+  const b64 = rawB64.replace(/[^A-Za-z0-9+/=]/g, "");
+  if (!b64) {
     await refund();
     return json({ error: "生成失败 / Generation failed" }, 502);
   }
-  // Defensive: guarantee the value is pure base64 so it can't break out of the SVG <image href="...">
-  // attribute when the client concatenates it into markup.
-  const b64 = rawB64.replace(/[^A-Za-z0-9+/=]/g, "");
-
   // Credit already reserved up-front; success keeps the charge.
-  return json({ image: `data:image/png;base64,${b64}`, mode, remaining: cap - used - 1 });
+  return json({ image: `data:${contentType};base64,${b64}`, mode, remaining: cap - used - 1 });
 }
 
 // ============================ photo wall ============================
@@ -4566,17 +4575,14 @@ const APP_HTML = String.raw`<!doctype html>
       +'<p class="guide-sub">'+t('Hack5 · Mycelium 触达开源开发者社区的自有渠道','How Hack5 · Mycelium reaches the open-source developer community')+'</p></div>'
       +'<div class="panel" style="overflow-x:auto"><table class="media-table"><thead><tr><th>'+t('渠道','Channel')+'</th><th>'+t('触达','Reach')+'</th><th>'+t('主要话题','Topics')+'</th><th>'+t('链接','Link')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
       +'<p class="muted" style="margin:12px 2px 0;font-size:12px">'+t('每个参加过黑客松的开发者都留下 email —— 这是我们随每场活动持续增长的社区基础。','Every hackathon participant leaves an email — a community base that grows with each event.')+'</p></div>'
+      + mediaKitHtml()
       +'<div class="panel guide-cta" style="margin-top:20px"><h2>'+t('成为赞助商','Become a sponsor')+'</h2>'
       +'<p style="color:rgba(255,255,255,.88)">'+t('$1500 / 年 · 限 4 席。你的 logo 出现在所有 Hack5 组织的黑客松页脚,并通过上面的渠道与订阅用户一起转发,触达开源开发者社区。所得用于覆盖平台成本、反哺更多数字公共物品。','$1500 / year · 4 seats. Your logo in the footer of every Hack5 hackathon, amplified across the channels above.')+'</p>'
       +'<a href="https://blog.mushroom.cv/" target="_blank" rel="noopener"><button>'+t('了解 Mycelium →','About Mycelium →')+'</button></a></div></div>';
   }
-  function renderAbout(){
-    const feats = [
-      ['⚡', t('10 分钟发起','Live in 10 minutes'), t('三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。','Three steps: log in → name it → deploy your own hackathon site on its own domain.')],
-      ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
-      ['🌱', t('数字公共物品','A digital public good'), t('Hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','Hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
-    ];
-    // Brand marks, inlined so the media kit renders without a fetch: 墨绿 (ink-green, for light) + bright-green (for dark).
+  // Reusable media kit (shown on /about and /media): two-color logo lockups + downloads (full lockup as
+  // displayed + mark-only + PNG) + usage note. Marks inlined so it renders without a fetch.
+  function mediaKitHtml(){
     const dgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
       +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
       +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
@@ -4586,18 +4592,7 @@ const APP_HTML = String.raw`<!doctype html>
       +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
       +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
       +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text></svg>';
-    app.innerHTML = '<div class="guide">'
-      + '<div class="guide-hero"><h1>'+t('关于 Hack5','About Hack5')+'</h1>'
-      + '<p class="guide-sub">'+t('人人可办的黑客松平台','a hackathon platform anyone can run')+'</p></div>'
-      + '<div class="panel" style="font-size:16px;line-height:1.8;color:var(--ink2)">'
-      + t('<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它让任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点:<b>第一场免费</b>、记录永久保留;想办更多场次、或用上动态海报、一键转发、开发者社区 Bot 等高级功能,可订阅付费。',
-          '<b>hack5.net</b> is part of <b>Mycelium</b> — a Digital Public Goods organization. Anyone can spin up their own hackathon site in <b>10 minutes</b>: your <b>first event is free</b> with records kept forever; hosting more events or unlocking premium features (dynamic posters, one-click sharing, a developer-community bot) comes with a subscription.')
-      + '</div>'
-      + '<div class="guide-steps" style="margin-top:20px">'
-      + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
-      + '</div>'
-      // ---- media kit: 墨绿/亮绿 logo 展示 + 下载 + Hack5 / hack5.net 标识 ----
-      + '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
+    return '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
       + '<div class="panel">'
       +   '<div style="display:flex;gap:16px;flex-wrap:wrap">'
       +     '<div style="flex:1;min-width:210px;background:#fff;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px">'
@@ -4611,13 +4606,37 @@ const APP_HTML = String.raw`<!doctype html>
       +       '<div style="font-size:13px;color:#25ff86;opacity:.72">hack5.net</div></div>'
       +     '</div>'
       +   '</div>'
-      +   '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:14px">'
-      +     '<a href="/brand/hack5-logo-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿 Logo','Ink-green')+' (SVG)</button></a>'
-      +     '<a href="/brand/hack5-logo-green.svg" download><button class="ghost">⬇ '+t('亮绿 Logo','Bright-green')+' (SVG)</button></a>'
-      +     '<a href="/brand/hack5-logo.png" download><button class="ghost">⬇ Logo (PNG)</button></a>'
+      +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识(字符标 + 字标,即上图):','Full lockup (mark + wordmark, as shown):')+'</div>'
+      +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
+      +     '<a href="/brand/hack5-lockup-green.svg" download><button class="ghost">⬇ '+t('亮绿完整版','Bright-green lockup')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-lockup-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿完整版','Ink-green lockup')+' (SVG)</button></a>'
+      +   '</div>'
+      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt; / 位图:','Mark only / bitmap:')+'</div>'
+      +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
+      +     '<a href="/brand/hack5-logo-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿标','Ink-green mark')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-logo-green.svg" download><button class="ghost">⬇ '+t('亮绿标','Bright-green mark')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-logo.png" download><button class="ghost">⬇ PNG</button></a>'
       +   '</div>'
       +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('主色:墨绿 #14532D(浅底)· 亮绿 #25FF86(深底)。标识 = &lt;5&gt; 字符标 + 「Hack5」字标,域名 hack5.net。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Primary: ink-green #14532D on light · bright-green #25FF86 on dark. The mark is the &lt;5&gt; glyph + the “Hack5” wordmark; domain hack5.net. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
+      + '</div>';
+  }
+  function renderAbout(){
+    const feats = [
+      ['⚡', t('10 分钟发起','Live in 10 minutes'), t('三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。','Three steps: log in → name it → deploy your own hackathon site on its own domain.')],
+      ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
+      ['🌱', t('数字公共物品','A digital public good'), t('Hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','Hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
+    ];
+    app.innerHTML = '<div class="guide">'
+      + '<div class="guide-hero"><h1>'+t('关于 Hack5','About Hack5')+'</h1>'
+      + '<p class="guide-sub">'+t('人人可办的黑客松平台','a hackathon platform anyone can run')+'</p></div>'
+      + '<div class="panel" style="font-size:16px;line-height:1.8;color:var(--ink2)">'
+      + t('<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它让任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点:<b>第一场免费</b>、记录永久保留;想办更多场次、或用上动态海报、一键转发、开发者社区 Bot 等高级功能,可订阅付费。',
+          '<b>hack5.net</b> is part of <b>Mycelium</b> — a Digital Public Goods organization. Anyone can spin up their own hackathon site in <b>10 minutes</b>: your <b>first event is free</b> with records kept forever; hosting more events or unlocking premium features (dynamic posters, one-click sharing, a developer-community bot) comes with a subscription.')
       + '</div>'
+      + '<div class="guide-steps" style="margin-top:20px">'
+      + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
+      + '</div>'
+      + mediaKitHtml()
       + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><button onclick="go(\'/start\')">'+t('发起黑客松 →','Start a hackathon →')+'</button></div>'
       + '</div>';
   }
@@ -5160,7 +5179,7 @@ const APP_HTML = String.raw`<!doctype html>
     let q; try{ q=await api('/api/tenant/poster/quota'); }catch(e){ box.innerHTML='<span class="muted">'+t('AI 海报加载失败','AI panel failed')+'</span>'; return; }
     if(!q.aiEnabled){ box.innerHTML='<b>'+t('AI 海报','AI poster')+'</b><p class="muted">'+t('暂未开通','Not enabled yet')+'</p>'; return; }
     box.innerHTML =
-       '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报','AI poster')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">gpt-image-1</span></div>'
+       '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报','AI poster')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">FLUX · Cloudflare</span></div>'
       +'<div class="row" style="gap:10px;margin:12px 0 4px;align-items:center"><button id="aiFree">'+t('🎨 免费生成(固定风格)','🎨 Free (fixed style)')+'</button><span class="muted">'+t('剩','left')+' '+q.free+'/'+q.freeCap+'</span></div>'
       +'<p class="muted" style="margin:0 0 4px;font-size:12px">'+t('免费:用你的活动名/简介 + 品牌固定画风生成背景。','Free: a fixed on-brand style built from your event name/intro.')+'</p>'
       +'<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">'
@@ -5177,7 +5196,7 @@ const APP_HTML = String.raw`<!doctype html>
     const btn = mode==='free'?$('#aiFree'):$('#aiCustom');
     if(btn) btn.disabled=true; setMsg('aiMsg', t('生成中,约 15-30 秒…','Generating, ~15-30s…'));
     try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{mode,prompt}});
-      if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
+      if(!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
       paint(r.image);
       await loadAiPanel(); setMsg('aiMsg', t('完成 ✓ 剩 ','Done ✓ left ')+r.remaining);
     }catch(e){ setMsg('aiMsg', e.message, true); if(btn) btn.disabled=false; }

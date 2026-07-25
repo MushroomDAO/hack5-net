@@ -30,6 +30,8 @@
       "id": "40e7013edb944d319a071229c1a1d805"
     }
   ],
+  // Workers AI — native model inference (flux-1-schnell for the /poster AI backgrounds). No external key.
+  "ai": { "binding": "AI" },
   "vars": {
     "APP_NAME": "Hack5",
     "EVENT_NAME": "Hackathon",
