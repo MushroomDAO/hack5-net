@@ -288,6 +288,8 @@ type Tenant = {
   admin_pass_hash: string;
   intro?: string;
   event_time?: string;
+  start_at?: number;
+  end_at?: number;
   location?: string;
   duration?: string;
   address?: string;
@@ -321,7 +323,7 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
-    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.location, t.duration, t.address, t.map_query, t.agenda, t.banner, t.mode, t.access_days,
+    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.start_at, t.end_at, t.location, t.duration, t.address, t.map_query, t.agenda, t.banner, t.mode, t.access_days,
        u.org_name AS org_name, u.org_url AS org_url,
        CASE WHEN u.org_logo IS NOT NULL AND u.org_logo <> '' THEN 1 ELSE 0 END AS org_has_logo
      FROM tenants t LEFT JOIN users u ON u.email = t.owner_email
@@ -355,6 +357,8 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
           gated: false,
           intro: tctx.tenant.intro ?? "",
           eventTime: tctx.tenant.event_time ?? "",
+          startAt: tctx.tenant.start_at ?? null,
+          endAt: tctx.tenant.end_at ?? null,
           location: tctx.tenant.location ?? "",
           duration: tctx.tenant.duration ?? "",
           address: tctx.tenant.address ?? "",
@@ -1074,10 +1078,21 @@ async function grantSignupCredits(env: Env, email: string, now: number): Promise
     .run();
 }
 
+// Validate event start/end (unix seconds). Mirrors the client rules (create + /manage); "" = ok.
+function eventDatesErrorSrv(startAt: number, endAt: number): string {
+  if (!startAt || !endAt) return "请选择起止时间 / Pick a start & end time";
+  if (startAt < unixNow() - 300) return "开始时间不能早于现在 / Start can't be in the past";
+  if (endAt <= startAt) return "结束时间必须晚于开始 / End must be after start";
+  const dur = endAt - startAt;
+  if (dur < 4 * 3600) return "至少持续 4 小时 / Must last at least 4 hours";
+  if (dur > 92 * 24 * 3600) return "最长 3 个月 / At most 3 months";
+  return "";
+}
+
 async function createHackathon(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ error: "请先登录 / Please log in" }, 401);
-  const body = await request.json<{ name?: string; subdomain?: string; intro?: string; eventTime?: string; location?: string; banner?: string; mode?: string; accessDays?: number }>().catch(() => null);
+  const body = await request.json<{ name?: string; subdomain?: string; intro?: string; eventTime?: string; startAt?: number; endAt?: number; location?: string; banner?: string; mode?: string; accessDays?: number }>().catch(() => null);
   const name = String(body?.name ?? "").trim().slice(0, 60);
   const mode = body?.mode === "secret" ? "secret" : body?.mode === "mini" ? "mini" : "open";
   // Mini is a 5-minute flow: auto-generate a subdomain from the name if none given.
@@ -1087,8 +1102,14 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     subdomain = await pickAvailableSubdomain(env, slug);
   }
   const intro = String(body?.intro ?? "").trim().slice(0, 2000);
-  const eventTime = String(body?.eventTime ?? "").trim().slice(0, 120); // start/end date-time — shown on the poster & homepage
+  const eventTime = String(body?.eventTime ?? "").trim().slice(0, 120); // start/end date-time (display string) — shown on the poster & homepage
   const location = String(body?.location ?? "").trim().slice(0, 120);
+  const startAt = Math.max(0, Math.floor(Number(body?.startAt) || 0));
+  const endAt = Math.max(0, Math.floor(Number(body?.endAt) || 0));
+  if (startAt || endAt) {
+    const de = eventDatesErrorSrv(startAt, endAt);
+    if (de) return json({ error: de }, 400);
+  }
   const accessDays = mode === "secret" ? Math.min(90, Math.max(1, Math.floor(Number(body?.accessDays) || 7))) : 7;
   if (!name) return json({ error: "请填写黑客松名称 / Name required" }, 400);
   if (!/^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(subdomain)) {
@@ -1157,9 +1178,9 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const id = crypto.randomUUID();
   try {
     await env.DB.prepare(
-      "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, event_time, location, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+      "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, event_time, start_at, end_at, location, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
     )
-      .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, eventTime, location, mode, accessDays, now, now)
+      .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, eventTime, startAt || null, endAt || null, location, mode, accessDays, now, now)
       .run();
   } catch {
     // Subdomain UNIQUE race (taken between the check above and here) or any insert failure → refund + 409.
@@ -1396,16 +1417,24 @@ async function updateHomepage(request: Request, env: Env, tenant: Tenant | null)
   const auth = await requireRole(request, env, tenant.id, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const body = await request
-    .json<{ intro?: string; eventTime?: string; location?: string; duration?: string; address?: string; mapQuery?: string; agenda?: string }>()
+    .json<{ intro?: string; eventTime?: string; startAt?: number; endAt?: number; location?: string; duration?: string; address?: string; mapQuery?: string; agenda?: string }>()
     .catch(() => null);
   if (!body) return json({ error: "Invalid JSON" }, 400);
   const clip = (v: unknown, n: number) => String(v ?? "").trim().slice(0, n) || null;
+  const startAt = Math.max(0, Math.floor(Number(body.startAt) || 0));
+  const endAt = Math.max(0, Math.floor(Number(body.endAt) || 0));
+  if (startAt || endAt) {
+    const de = eventDatesErrorSrv(startAt, endAt);
+    if (de) return json({ error: de }, 400);
+  }
   await env.DB.prepare(
-    "UPDATE tenants SET intro = ?, event_time = ?, location = ?, duration = ?, address = ?, map_query = ?, agenda = ?, updated_at = ? WHERE id = ?",
+    "UPDATE tenants SET intro = ?, event_time = ?, start_at = ?, end_at = ?, location = ?, duration = ?, address = ?, map_query = ?, agenda = ?, updated_at = ? WHERE id = ?",
   )
     .bind(
       clip(body.intro, 2000),
       clip(body.eventTime, 120),
+      startAt || null,
+      endAt || null,
       clip(body.location, 120),
       clip(body.duration, 120),
       clip(body.address, 200),
@@ -1705,22 +1734,26 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
       .run();
   }
 
-  const name = (tenant.name ?? "Hackathon").slice(0, 80);
+  // BACKGROUND ONLY — never put the event name/words in the prompt (that makes FLUX render text). All
+  // text/logo/QR is composited later in SVG (posterSvg). intro is used only as abstract mood, not literal.
   const intro = (tenant.intro ?? "").replace(/\s+/g, " ").slice(0, 160);
+  const noText =
+    ` ABSOLUTELY NO text, no letters, no words, no numbers, no captions, no titles, no watermark, no logos,` +
+    ` no typography and no signage anywhere in the image — a purely abstract, completely textless background.`;
   const prompt =
     mode === "free"
-      ? `Abstract poster BACKGROUND for a hackathon called "${name}".` +
-        (intro ? ` Theme: ${intro}.` : "") +
+      ? `Abstract hackathon poster BACKGROUND, textless.` +
+        (intro ? ` Mood/theme only (do not render as words): ${intro}.` : "") +
         ` Style: deep indigo-to-black vertical gradient with luminous violet and emerald-green glows,` +
         ` subtle glowing mycelium / network filaments, clean modern, cinematic, high detail, professional.` +
-        ` Vertical A4 portrait. IMPORTANT: NO text, letters, numbers or logos anywhere;` +
-        ` keep the lower third calmer and darker for text overlay.`
-      : `Poster BACKGROUND artwork for a hackathon called "${name}".` +
-        (intro ? ` Event theme: ${intro}.` : "") +
+        ` Vertical A4 portrait. Keep the lower third calmer and darker for text overlay.` +
+        noText
+      : `Hackathon poster BACKGROUND artwork, abstract and textless.` +
+        (intro ? ` Event mood/theme only (do not render as words): ${intro}.` : "") +
         ` Art direction from the organizer: ${style}.` +
         ` Vertical A4 portrait composition, cinematic, high detail, vivid, professional event-poster quality.` +
-        ` IMPORTANT: render NO text, NO letters, NO words, NO numbers and NO logos anywhere in the image;` +
-        ` keep the lower third calmer and slightly darker so text can be overlaid on top.`;
+        ` Keep the lower third calmer and slightly darker so text can be overlaid on top.` +
+        noText;
 
   // Generate the BACKGROUND. Prefer Cloudflare Workers AI (flux-1-schnell — native to this Worker, cheap,
   // no external key, no cold-start vendor); fall back to OpenAI gpt-image-1 only if the AI binding is absent.
@@ -4451,6 +4484,21 @@ const APP_HTML = String.raw`<!doctype html>
   function themeBtn(){ return '<button class="ghost" onclick="toggleTheme()" title="'+t('深色 / 浅色','Dark / Light')+'">'+(document.documentElement.dataset.theme==='dark'?'☀️':'🌙')+'</button>'; }
 
   function go(path){ history.pushState(null, '', path); route(); }
+  // ---- event date/time helpers (create + /manage) ----
+  function eventDatesError(startMs, endMs){
+    if(!startMs || !endMs) return t('请选择起止时间','Pick a start & end time');
+    if(startMs < Date.now() - 5*60*1000) return t('开始时间不能早于现在','Start time can’t be in the past');
+    if(endMs <= startMs) return t('结束时间必须晚于开始','End must be after start');
+    const dur = endMs - startMs;
+    if(dur < 4*3600*1000) return t('至少持续 4 小时(可同一天,时间不同)','Must last at least 4 hours');
+    if(dur > 92*24*3600*1000) return t('最长 3 个月','At most 3 months');
+    return '';
+  }
+  function pad2(n){ return String(n).padStart(2,'0'); }
+  function toLocalInput(unixSec){ if(!unixSec) return ''; const d=new Date(unixSec*1000); return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate())+'T'+pad2(d.getHours())+':'+pad2(d.getMinutes()); }
+  function fmtRange(startSec,endSec){ if(!startSec||!endSec) return ''; const d=new Date(startSec*1000),e=new Date(endSec*1000); const dt=x=>x.getFullYear()+'-'+pad2(x.getMonth()+1)+'-'+pad2(x.getDate())+' '+pad2(x.getHours())+':'+pad2(x.getMinutes()); const sameDay=d.toDateString()===e.toDateString(); return dt(d)+' ~ '+(sameDay?(pad2(e.getHours())+':'+pad2(e.getMinutes())):dt(e)); }
+  // Open an external map to look up a place: Baidu in Chinese UI, Google otherwise. Lightweight (no API key).
+  function openMapPick(query){ const q=encodeURIComponent(String(query||'').trim()||(LANG==='zh'?'黑客松地点':'hackathon venue')); const url = LANG==='zh' ? ('https://map.baidu.com/search/'+q) : ('https://www.google.com/maps/search/'+q); window.open(url,'_blank','noopener'); }
   window.addEventListener('popstate', route);
   window.go = go;
   window.startMode = (m)=>{ window.__createMode = m; go('/start'); };
@@ -5148,7 +5196,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(ghp){ history.replaceState(null,'','/start'); }
     app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'+ghNote
       + '<p class="muted">💳 '+t('积分余额','Credits')+' <b>'+bal+'</b> · '+t('普通 80 / 企业 300 / mini 50 积分一场','open 80 / secret 300 / mini 50 per event')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('赚更多积分 →','Earn more →')+'</a></p>'
-      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
+      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/manage"><button class="ghost" title="'+t('管理/编辑','Manage')+'">⚙️</button></a ><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
       + modeSel
       + (canCreate
@@ -5157,8 +5205,10 @@ const APP_HTML = String.raw`<!doctype html>
             + (cm==='mini'
                 ? '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">'+t('(可选)','(optional)')+'</span></label><input id="hIntro" maxlength="2000" placeholder="'+t('这是一场关于…的 mini 黑客松','A mini hackathon about…')+'">'
                 : '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…','A hackathon about… for…')+'"></textarea>')
-            + '<label>'+t('起止时间','Date & time')+' <span class="muted">'+t('(显示在海报/首页)','(on poster & homepage)')+'</span></label><input id="hTime" maxlength="120" placeholder="'+t('例:2026-08-15 10:00 ~ 08-17 18:00','e.g. Aug 15–17, 2026')+'">'
-            + '<label>'+t('地点','Location')+' <span class="muted">'+t('(显示在海报/首页)','(on poster & homepage)')+'</span></label><input id="hLoc" maxlength="120" placeholder="'+t('例:上海·徐汇 / 线上','e.g. Shanghai / Online')+'">'
+            + '<label>'+t('起止时间','Date & time')+' <span class="muted">'+t('(至少 4 小时,最长 3 个月,不能选过去)','(≥4h, ≤3 months, not in the past)')+'</span></label>'
+            + '<div class="row" style="gap:8px;flex-wrap:wrap"><input id="hStart" type="datetime-local" style="flex:1;min-width:150px"><span class="muted" style="align-self:center">→</span><input id="hEnd" type="datetime-local" style="flex:1;min-width:150px"></div>'
+            + '<label>'+t('地点','Location')+' <span class="muted">'+t('(显示在海报/首页)','(on poster & homepage)')+'</span></label>'
+            + '<div class="row" style="gap:8px;flex-wrap:wrap"><input id="hLoc" maxlength="120" placeholder="'+t('例:上海·徐汇 / 线上','e.g. Shanghai / Online')+'" style="flex:1;min-width:180px"><button type="button" class="ghost" id="hMap" style="white-space:nowrap">🗺 '+t('地图选点','Pick on map')+'</button></div>'
             + (cm==='mini' ? '' : '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款)','(optional — default used)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>')
             + (cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
             + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b> · '+t('余额','balance')+' '+bal+'</div>'
@@ -5175,21 +5225,26 @@ const APP_HTML = String.raw`<!doctype html>
         try{ window.__hBanner=await compressBanner(f); $('#hBannerPrev').innerHTML='<img src="'+window.__hBanner+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;margin-top:8px;border:1px solid var(--line)">'; }
         catch(e){ setMsg('hMsg', t('图片处理失败','Image error')+': '+e.message, true); }
       });
+      const hMapBtn=$('#hMap'); if(hMapBtn) hMapBtn.addEventListener('click', ()=>openMapPick($('#hLoc')?$('#hLoc').value:''));
       $('#hCreate').addEventListener('click', async ()=>{
         const name=$('#hName').value.trim();
         const subdomain = $('#hSub') ? $('#hSub').value.trim().toLowerCase() : '';
         const intro = $('#hIntro') ? $('#hIntro').value.trim() : '';
-        const eventTime = $('#hTime') ? $('#hTime').value.trim() : '';
         const location = $('#hLoc') ? $('#hLoc').value.trim() : '';
         if(!name){ setMsg('hMsg', t('请填写名称','Enter a name'), true); return; }
         if(cm!=='mini' && !subdomain){ setMsg('hMsg', t('请填写子域名','Enter a subdomain'), true); return; }
         if(cm!=='mini' && intro.length<10){ setMsg('hMsg', t('请写至少 10 字的简介','Add a 10+ character intro'), true); return; }
+        const hsV=$('#hStart'), heV=$('#hEnd');
+        const startMs=(hsV&&hsV.value)?new Date(hsV.value).getTime():0;
+        const endMs=(heV&&heV.value)?new Date(heV.value).getTime():0;
+        let startAt=0,endAt=0,eventTime='';
+        if(startMs||endMs){ const de=eventDatesError(startMs,endMs); if(de){ setMsg('hMsg', de, true); return; } startAt=Math.floor(startMs/1000); endAt=Math.floor(endMs/1000); eventTime=fmtRange(startAt,endAt); }
         const secretChecked = $('#hSecret') && $('#hSecret').checked;
         const mode = cm==='mini' ? 'mini' : (cm==='secret' || secretChecked) ? 'secret' : 'open';
         const accessDays = (mode==='secret' && $('#hDays')) ? Number($('#hDays').value)||7 : 7;
         $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
         try {
-          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,eventTime,location,banner:window.__hBanner,mode,accessDays}});
+          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,eventTime,startAt,endAt,location,banner:window.__hBanner,mode,accessDays}});
           window.__hBanner='';
           const pw = r.adminPassword;
           const masked = pw.length>7 ? (pw.slice(0,-5)+'****'+pw.slice(-2)) : pw;
@@ -5259,18 +5314,24 @@ const APP_HTML = String.raw`<!doctype html>
       + '<label>'+t('首页 Banner','Homepage banner')+' <span class="muted">'+t('(宽幅,自动裁 ~2.9:1 并压 ≤120KB;不设则用默认款)','(wide ~2.9:1, ≤120KB; a default is used if unset)')+'</span></label>'
       + '<div id="fBannerPrev">'+(tn.hasBanner?'<img src="/banner/'+esc(tn.subdomain||'')+'?t='+Date.now()+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;border:1px solid var(--line);display:block;margin-bottom:8px">':'')+'</div>'
       + '<input id="fBanner" type="file" accept="image/*"><span id="fBannerMsg" class="muted"></span>'
-      + '<label>'+t('时间','Time')+'</label><input id="fTime" maxlength="120" value="'+esc(tn.eventTime||'')+'" placeholder="'+t('例:2026-08-15 ~ 08-17','e.g. Aug 15-17, 2026')+'">'
-      + '<label>'+t('地点','Location')+'</label><input id="fLoc" maxlength="120" value="'+esc(tn.location||'')+'" placeholder="'+t('例:上海·徐汇','e.g. Shanghai')+'">'
+      + '<label>'+t('起止时间','Date & time')+' <span class="muted">'+t('(至少 4 小时,最长 3 个月,不能选过去)','(≥4h, ≤3 months, not in the past)')+'</span></label>'
+      + '<div class="row" style="gap:8px;flex-wrap:wrap"><input id="fStart" type="datetime-local" value="'+esc(toLocalInput(tn.startAt))+'" style="flex:1;min-width:150px"><span class="muted" style="align-self:center">→</span><input id="fEnd" type="datetime-local" value="'+esc(toLocalInput(tn.endAt))+'" style="flex:1;min-width:150px"></div>'
+      + '<label>'+t('地点','Location')+'</label><div class="row" style="gap:8px;flex-wrap:wrap"><input id="fLoc" maxlength="120" value="'+esc(tn.location||'')+'" placeholder="'+t('例:上海·徐汇','e.g. Shanghai')+'" style="flex:1;min-width:180px"><button type="button" class="ghost" id="fMapBtn" style="white-space:nowrap">🗺 '+t('地图选点','Pick on map')+'</button></div>'
       + '<label>'+t('持续周期','Duration')+'</label><input id="fDur" maxlength="120" value="'+esc(tn.duration||'')+'" placeholder="'+t('例:48 小时','e.g. 48 hours')+'">'
       + '<label>'+t('地址(用于地图)','Address (for the map)')+'</label><input id="fAddr" maxlength="200" value="'+esc(tn.address||'')+'" placeholder="'+t('街道地址','street address')+'">'
       + '<label>'+t('地图搜索词','Map query')+' <span class="muted">'+t('(留空则用地址)','(defaults to address)')+'</span></label><input id="fMap" maxlength="200" value="'+esc(tn.mapQuery||'')+'">'
       + '<label>'+t('日程','Agenda')+' <span class="muted">'+t('(每行一项:时间 | 内容)','(one per line: time | item)')+'</span></label><textarea id="fAgenda" rows="5" maxlength="2000" placeholder="'+t('Day 1 09:00 | 开幕\\nDay 1 10:00 | 开始开发\\nDay 2 14:00 | Demo\\nDay 2 16:00 | 颁奖','Day 1 09:00 | Kickoff\\nDay 2 14:00 | Demos')+'">'+esc(agendaText)+'</textarea>'
       + '<div class="row" style="margin-top:14px"><button id="fSave">'+t('保存','Save')+'</button><button class="ghost" onclick="go(\'/\')">'+t('返回','Back')+'</button><span id="fMsg" class="muted"></span></div>'
       + '</div>';
+    const fMapBtn=$('#fMapBtn'); if(fMapBtn) fMapBtn.addEventListener('click', ()=>openMapPick($('#fLoc').value));
     $('#fSave').addEventListener('click', async ()=>{
+      const sV=$('#fStart').value, eV=$('#fEnd').value;
+      const startMs=sV?new Date(sV).getTime():0, endMs=eV?new Date(eV).getTime():0;
+      let startAt=0,endAt=0,eventTime='';
+      if(startMs||endMs){ const de=eventDatesError(startMs,endMs); if(de){ setMsg('fMsg', de, true); return; } startAt=Math.floor(startMs/1000); endAt=Math.floor(endMs/1000); eventTime=fmtRange(startAt,endAt); }
       $('#fSave').disabled=true;
       try {
-        await api('/api/tenant/homepage',{method:'POST',body:{intro:$('#fIntro').value, eventTime:$('#fTime').value, location:$('#fLoc').value, duration:$('#fDur').value, address:$('#fAddr').value, mapQuery:$('#fMap').value, agenda:$('#fAgenda').value}});
+        await api('/api/tenant/homepage',{method:'POST',body:{intro:$('#fIntro').value, eventTime, startAt, endAt, location:$('#fLoc').value, duration:$('#fDur').value, address:$('#fAddr').value, mapQuery:$('#fMap').value, agenda:$('#fAgenda').value}});
         CONFIG = await api('/api/config');
         setMsg('fMsg', t('已保存 ✓','Saved ✓'));
       } catch(e){ setMsg('fMsg', e.message, true); }
@@ -5375,7 +5436,7 @@ const APP_HTML = String.raw`<!doctype html>
     // the event's stored name is a proper noun and doesn't translate with the UI language toggle.
     const name = (opts.title!=null && String(opts.title).trim()!=='') ? String(opts.title).slice(0,60) : (tn.name || 'Hackathon');
     const nameColor = opts.nameColor || '#ffffff';   // event title
-    const logoColor = opts.logoColor || '#ffffff';   // the "Hack5" wordmark (the ‹5› mark stays branded on its cream chip)
+    const logoColor = opts.logoColor || '#2f9e5f';   // "Hack5" wordmark in brand forest-green on the dark poster (the ‹5› mark stays ink-green on its cream chip)
     const nameLines = wrapText(name, name.length>16?14:10, 3);
     const nameFs = nameLines.length>=3?56:(name.length>14?66:84);
     const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,70), 32, 2); // ≤70 chars, smaller font
