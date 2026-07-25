@@ -4798,12 +4798,21 @@ const APP_HTML = String.raw`<!doctype html>
       + '<circle cx="220" cy="105" r="32" fill="#5b4be6"/>'
       + '<path d="M220 87l6 13 14 1-11 9 4 14-13-8-13 8 4-14-11-9 14-1z" fill="#fff"/></svg>';
     const orgFeats = [
-      ['🌐', t('独立域名站点','Your own subdomain'), t('每场黑客松一个 name.hack5.net,专业又好记。','A name.hack5.net for each event — clean and memorable.')],
-      ['🖼️', t('作品墙','Work wall'), t('选手交 GitHub 链接,自动抓 star/语言/README 生成作品卡。','Teams submit a GitHub repo; cards auto-load stars, language, README.')],
-      ['🏡', t('活动首页 + 地图','Event homepage + map'), t('介绍、时间地点、周期,内嵌地图(自动适配国内外)。','Intro, time, place, duration, embedded map (China-aware).')],
+      ['🌐', t('独立域名站点','Its own domain site'), t('每场黑客松一个 name.hack5.net,专业又好记。','A name.hack5.net for each event — professional and memorable.')],
+      ['📧', t('参赛者快速注册','Participants sign up in seconds'), t('邮箱一键报名、免注册,一句想法交给 AI 就能做成作品。','One-tap email sign-up (no account); hand an idea to AI and get a working project.')],
+      ['🤖', t('Mini AI 代码 Agent','Mini AI coding agent'), t('Mini 黑客松:一句想法,AI 代码 Agent 自动做成能跑的应用。','In a Mini hackathon, one idea becomes a working app via an AI coding agent.')],
+      ['🐙', t('代码自动上 GitHub','Code auto-published to GitHub'), t('参赛作品的代码自动发布到 GitHub 仓库。','Each project’s code is auto-published to a GitHub repo.')],
+      ['☁️', t('自动部署 Cloudflare','Auto-deployed to Cloudflare'), t('参赛作品自动部署上线(内置账号,7 天自动清理)。','Projects auto-deploy live on Cloudflare — a built-in account, cleaned up after 7 days.')],
+      ['🖼️', t('作品墙','Project wall'), t('选手交 GitHub 链接,自动抓 star/语言/README 生成作品卡。','Teams submit a GitHub repo; cards auto-load stars, language, README.')],
+      ['⚖️', t('评委独立评审','Judges review independently'), t('评委登录码、四维打分、锁定评审版本,独立登录评价。','Judge login codes, four-dimension scoring, locked review versions — judges log in on their own.')],
+      ['🏆', t('作品排行榜','Project leaderboard'), t('实时排名 + CSV 导出,作品一目了然。','Live ranking with CSV export makes every project stand out.')],
+      ['🏡', t('活动首页 + 地图','Event homepage + map'), t('介绍、时间地点、周期,内嵌地图(自动适配国内外)。','Intro, date & location, schedule, with an embedded map (auto-fits China / overseas).')],
       ['📸', t('照片墙','Photo wall'), t('现场花絮瀑布流,上传自动压缩。','A masonry gallery of event moments; uploads auto-compress.')],
-      ['⚖️', t('在线评审','Online judging'), t('评委登录码、四维打分、排行榜、CSV 导出、锁定评审版本。','Judge codes, 4-axis scoring, leaderboard, CSV export, commit lock.')],
-      ['🆓', t('首场免费','First event free'), t('第一场黑客松免费,记录永久保留;更多场次与高级功能可订阅。','Your first hackathon is free with records kept forever; more events and premium features are a subscription.')],
+      ['🎨', t('海报智能生成','Smart poster generation'), t('AI 生成背景 + 自动排版 + 二维码,一键出图。','AI background + auto layout + QR — a poster in one click.')],
+      ['🎯', t('组织方多赛事管理','Multi-event management'), t('一处管理你所有的黑客松,赛事、报名、评分尽在掌握。','Run all your hackathons from one place — events, sign-ups and scoring.')],
+      ['🌏', t('中 / 英 / 泰 三语','Chinese / English / Thai'), t('全站三语切换,面向国内外社区。','Full trilingual UI for communities at home and abroad.')],
+      ['🔗', t('转发与名单','Sharing & rosters'), t('一键转发、二维码、报名名单导出。','One-click sharing, QR codes, and roster export.')],
+      ['🆓', t('首场免费','First event free'), t('第一场常规黑客松免费,记录永久保留;更多场次按积分。','Your first regular hackathon is free with records kept forever; more events run on credits.')],
     ];
     const launchSteps = [
       ['1','📧', t('邮箱登录(无需注册)','Log in with email (no signup)'), t('输入邮箱,收验证码即登录。','Enter your email, get a code, you are in.')],
@@ -5022,7 +5031,8 @@ const APP_HTML = String.raw`<!doctype html>
           ['🎨', t('海报智能生成','Smart poster generation'), t('AI 生成背景 + 自动排版 + 二维码,一键出图。','AI background + auto layout + QR — a poster in one click.')],
           ['🎯', t('组织方多赛事管理','Multi-event management'), t('一处管理你所有的黑客松,赛事、报名、评分尽在掌握。','Run all your hackathons from one place — events, sign-ups and scoring.')],
           ['🌏', t('中 / 英 / 泰 三语','Chinese / English / Thai'), t('全站三语切换,面向国内外社区。','Full trilingual UI for communities at home and abroad.')],
-          ['🔗', t('转发与名单','Sharing & rosters'), t('一键转发、二维码、报名名单导出。','One-click sharing, QR codes, and roster export.')]
+          ['🔗', t('转发与名单','Sharing & rosters'), t('一键转发、二维码、报名名单导出。','One-click sharing, QR codes, and roster export.')],
+          ['🆓', t('首场免费','First event free'), t('第一场常规黑客松免费,记录永久保留;更多场次按积分。','Your first regular hackathon is free with records kept forever; more events run on credits.')]
         ].map(function(f){return '<div class="step"><div class="num" style="font-size:19px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>';}).join('')+'</div>'
       + mediaKitHtml()
       + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><button onclick="go(\'/start\')">'+t('发起黑客松 →','Start a hackathon →')+'</button></div>'
