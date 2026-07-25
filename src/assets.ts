@@ -2,9 +2,9 @@
 // (Workers can't read repo files at runtime). Source SVG/PNG live in /assets.
 export const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
   <rect width="40" height="40" rx="11" fill="#0a0e0a"/>
-  <path d="M12 13 6.5 20 12 27" fill="none" stroke="#00ff41" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M28 13 33.5 20 28 27" fill="none" stroke="#00ff41" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#00ff41">5</text>
+  <path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text>
 </svg>`;
 
 export const OG_PNG_B64 =

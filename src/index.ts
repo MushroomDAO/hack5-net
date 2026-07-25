@@ -1269,7 +1269,7 @@ async function sendHackathonReadyEmail(env: Env, email: string, name: string, ur
     `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
     `<table role="presentation" width="460" cellpadding="0" cellspacing="0" style="max-width:460px;width:100%">` +
-    `<tr><td align="center" style="padding-bottom:20px"><span style="font-size:24px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace">Hack&#8249;5&#8250;</span></td></tr>` +
+    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></td></tr>` +
     `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
     `<h1 style="font-size:20px;margin:0 0 6px;color:#14161c">${escapeHtml(name)} ` + `<span style="color:#0f9d6b">✓</span></h1>` +
     `<p style="color:#5f6675;font-size:15px;margin:0 0 16px">你的黑客松已就绪 · Your hackathon is live</p>` +
@@ -1325,7 +1325,7 @@ async function sendRegistrationConfirmEmail(
     `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
     `<table role="presentation" width="460" cellpadding="0" cellspacing="0" style="max-width:460px;width:100%">` +
-    `<tr><td align="center" style="padding-bottom:20px"><span style="font-size:24px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace">Hack&#8249;5&#8250;</span></td></tr>` +
+    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></td></tr>` +
     `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
     `<h1 style="font-size:20px;margin:0 0 6px;color:#14161c">${escapeHtml(hackathonName)} <span style="color:#0f9d6b">✓</span></h1>` +
     `<p style="color:#5f6675;font-size:15px;margin:0 0 14px">报名成功 · You are registered</p>` +
@@ -1381,7 +1381,7 @@ async function sendEmailCode(env: Env, email: string, code: string): Promise<boo
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
     `<table role="presentation" width="440" cellpadding="0" cellspacing="0" style="max-width:440px;width:100%">` +
     `<tr><td align="center" style="padding-bottom:22px">` +
-    `<span style="font-size:24px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace">Hack&#8249;5&#8250;</span>` +
+    `<span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span>` +
     `</td></tr>` +
     `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
     `<p style="color:#5f6675;font-size:15px;margin:0 0 10px">你的 Hack5 登录验证码 · Your login code</p>` +
@@ -2702,7 +2702,7 @@ async function sendBuildQueuedEmail(
     `编辑令牌(请妥善保存,用于日后编辑作品):${editToken}\n\n— Hack5`;
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;color:#14161c">` +
-    `<div style="text-align:center;padding:8px 0 16px"><span style="font-size:24px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace">Hack&#8249;5&#8250;</span></div>` +
+    `<div style="text-align:center;padding:8px 0 16px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></div>` +
     `<p style="font-size:16px">你的作品 <b>${escapeHtml(projectName)}</b> 已排队构建 ✨</p>` +
     `<p style="font-size:14px;color:#3c4250">公有仓库:<a href="${escapeHtml(repoUrl)}">${escapeHtml(repoUrl)}</a><br>` +
     `作品详情(含实时构建进度):<a href="${escapeHtml(viewUrl)}">${escapeHtml(viewUrl)}</a></p>` +
@@ -4041,15 +4041,13 @@ const APP_HTML = String.raw`<!doctype html>
     .ghost:hover{background:var(--ghost-hover)}
     header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
     .brand{display:flex;align-items:center;gap:10px;font-weight:800;cursor:pointer}
-    #brandName{color:#14532d;font-family:Inter,ui-sans-serif,-apple-system,sans-serif;letter-spacing:-1px}
-    .brandchev{color:#14532d}
+    #brandName{color:#14532d}
     :root[data-theme="dark"] #brandName{color:#5fd39a}
-    :root[data-theme="dark"] .brandchev{color:#5fd39a}
     .langseg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;vertical-align:middle}
     .langseg button{border:0;background:transparent;color:var(--muted);font-size:11px;font-weight:600;padding:3px 7px;cursor:pointer;line-height:1.5}
     .langseg button:hover{color:var(--ink)}
     .langseg button.on{background:#14532d;color:#fff}
-    :root[data-theme="dark"] .langseg button.on{background:#00ff41;color:#0a0e0a}
+    :root[data-theme="dark"] .langseg button.on{background:#25ff86;color:#0a0e0a}
     .mark{width:30px;height:30px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
     nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     nav .who{color:var(--muted);font-size:13px;margin-right:4px}
@@ -4211,11 +4209,13 @@ const APP_HTML = String.raw`<!doctype html>
 <body>
   <header>
     <div class="brand" onclick="go('/')">
-      <span id="brandName">Hack</span><svg class="brandchev" width="37" height="24" viewBox="0 0 60 40" aria-hidden="true" style="flex:0 0 auto;margin-left:1px">
-        <path d="M17 7 9 20 17 33" fill="none" stroke="currentColor" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round"/>
-        <text x="30" y="30" text-anchor="middle" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="34" font-weight="800" fill="currentColor" letter-spacing="-1">5</text>
-        <path d="M43 7 51 20 43 33" fill="none" stroke="currentColor" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg></div>
+      <svg width="32" height="32" viewBox="0 0 40 40" aria-hidden="true" style="flex:0 0 auto">
+        <rect width="40" height="40" rx="11" fill="#f6f2e9" stroke="#14532d" stroke-opacity=".22"/>
+        <path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#14532d">5</text>
+      </svg>
+      <span id="brandName">Hack5</span></div>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>
@@ -4955,36 +4955,43 @@ const APP_HTML = String.raw`<!doctype html>
   // Reusable media kit (shown on /about and /media): two-color logo lockups + downloads (full lockup as
   // displayed + mark-only + PNG) + usage note. Marks inlined so it renders without a fetch.
   function mediaKitHtml(){
-    // Full "Hack‹5›" wordmark as one inline SVG so the ‹5› is exactly the same size as "Hack".
-    const wordmark = function(hackC,markC,h){ return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 64" height="'+(h||34)+'" role="img" aria-label="Hack5">'
-      +'<text x="0" y="51" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="52" font-weight="800" fill="'+hackC+'" letter-spacing="-2">Hack</text>'
-      +'<path d="M170 25 161 43 170 61" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<text x="196" y="51" text-anchor="middle" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="52" font-weight="800" fill="'+markC+'" letter-spacing="-1">5</text>'
-      +'<path d="M222 25 231 43 222 61" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'; };
-    const card = function(bg,hackC,markC){ return '<div style="flex:1;min-width:210px;background:'+bg+';border-radius:14px;padding:22px;border:1px solid rgba(128,128,128,.14)">'
-      +'<div style="line-height:0">'+wordmark(hackC,markC,34)+'</div>'
-      +'<div style="font-size:13px;color:'+hackC+';opacity:.65;font-family:ui-monospace,Menlo,monospace;margin-top:8px">hack5.net</div></div>'; };
+    const dgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
+      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#14532d">5</text></svg>';
+    const bgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
+      +'<rect width="40" height="40" rx="11" fill="#0a0e0a"/>'
+      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text></svg>';
     return '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
       + '<div class="panel">'
       +   '<div style="display:flex;gap:16px;flex-wrap:wrap">'
-      +     card('#f6f2e9','#0a0e0a','#14532d')   // cream: black "Hack" + ink-green ‹5›
-      +     card('#0a0e0a','#00ff41','#00ff41')   // black: all matrix green
+      +     '<div style="flex:1;min-width:210px;background:#fff;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px">'
+      +       '<span style="flex:none;line-height:0">'+dgSvg+'</span>'
+      +       '<div><div style="font-size:23px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
+      +       '<div style="font-size:13px;color:#14532d;opacity:.72">hack5.net</div></div>'
+      +     '</div>'
+      +     '<div style="flex:1;min-width:210px;background:#0a0e0a;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px;border:1px solid rgba(255,255,255,.08)">'
+      +       '<span style="flex:none;line-height:0">'+bgSvg+'</span>'
+      +       '<div><div style="font-size:23px;font-weight:800;color:#25ff86;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
+      +       '<div style="font-size:13px;color:#25ff86;opacity:.72">hack5.net</div></div>'
+      +     '</div>'
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识(字符标 + 字标 + 域名,即上图):','Full lockup (mark + wordmark + domain, as shown):')+'</div>'
+      +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识(字符标 + 字标,即上图):','Full lockup (mark + wordmark, as shown):')+'</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
-      +     '<a href="/brand/hack5-lockup-cream.png" download><button>⬇ '+t('奶白底(黑字)','Cream (black)')+' PNG</button></a>'
-      +     '<a href="/brand/hack5-lockup-cream.svg" download><button class="ghost">⬇ '+t('奶白底','Cream')+' SVG</button></a>'
-      +     '<a href="/brand/hack5-lockup-black.png" download><button>⬇ '+t('黑底(森绿)','Black (green)')+' PNG</button></a>'
-      +     '<a href="/brand/hack5-lockup-black.svg" download><button class="ghost">⬇ '+t('黑底','Black')+' SVG</button></a>'
+      +     '<a href="/brand/hack5-lockup-green.png" download><button>⬇ '+t('亮绿完整版','Bright-green lockup')+' (PNG)</button></a>'
+      +     '<a href="/brand/hack5-lockup-green.svg" download><button class="ghost">⬇ '+t('亮绿完整版','Bright-green lockup')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-lockup-darkgreen.png" download><button>⬇ '+t('墨绿完整版','Ink-green lockup')+' (PNG)</button></a>'
+      +     '<a href="/brand/hack5-lockup-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿完整版','Ink-green lockup')+' (SVG)</button></a>'
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt;:','Mark only &lt;5&gt;:')+'</div>'
+      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt; / 位图:','Mark only / bitmap:')+'</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
-      +     '<a href="/brand/hack5-mark-cream.png" download><button class="ghost">⬇ '+t('奶白底(墨绿标)','Cream (ink mark)')+' PNG</button></a>'
-      +     '<a href="/brand/hack5-mark-cream.svg" download><button class="ghost">⬇ SVG</button></a>'
-      +     '<a href="/brand/hack5-mark-black.png" download><button class="ghost">⬇ '+t('黑底(森绿标)','Black (green mark)')+' PNG</button></a>'
-      +     '<a href="/brand/hack5-mark-black.svg" download><button class="ghost">⬇ SVG</button></a>'
+      +     '<a href="/brand/hack5-logo-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿标','Ink-green mark')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-logo-green.svg" download><button class="ghost">⬇ '+t('亮绿标','Bright-green mark')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-logo.png" download><button class="ghost">⬇ PNG</button></a>'
       +   '</div>'
-      +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('配色:黑客帝国绿 #00FF41(黑底)· 墨绿 #14532D(奶白底的 ‹5›)· 黑 #0A0E0A(奶白底的 Hack)· 奶白 #F6F2E9。标识 = 「Hack‹5›」字标(‹5› 即品牌符),下方 hack5.net;另有独立 ‹5› 符号标。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Palette: Matrix-green #00FF41 (on black) · ink-green #14532D (the ‹5› on cream) · black #0A0E0A (“Hack” on cream) · cream #F6F2E9. The lockup is the “Hack‹5›” wordmark (‹5› is the brand glyph) with hack5.net below; a standalone ‹5› mark is also provided. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
+      +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('主色:墨绿 #14532D(浅底)· 亮绿 #25FF86(深底)。标识 = &lt;5&gt; 字符标 + 「Hack5」字标,域名 hack5.net。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Primary: ink-green #14532D on light · bright-green #25FF86 on dark. The mark is the &lt;5&gt; glyph + the “Hack5” wordmark; domain hack5.net. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
       + '</div>';
   }
   function renderAbout(){
@@ -5465,7 +5472,7 @@ const APP_HTML = String.raw`<!doctype html>
     // the event's stored name is a proper noun and doesn't translate with the UI language toggle.
     const name = (opts.title!=null && String(opts.title).trim()!=='') ? String(opts.title).slice(0,60) : (tn.name || 'Hackathon');
     const nameColor = opts.nameColor || '#ffffff';   // event title
-    const logoColor = opts.logoColor || '#00ff41';   // "Hack5" wordmark in brand forest-green on the dark poster (the ‹5› mark stays ink-green on its cream chip)
+    const logoColor = opts.logoColor || '#ffffff';   // poster wordmark (white on the dark poster; the ‹5› mark stays ink-green on its cream chip)
     const nameLines = wrapText(name, name.length>16?14:10, 3);
     const nameFs = nameLines.length>=3?56:(name.length>14?66:84);
     const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,70), 32, 2); // ≤70 chars, smaller font
@@ -5476,24 +5483,22 @@ const APP_HTML = String.raw`<!doctype html>
       + '<defs>'
       + '<linearGradient id="pbg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#141a2e"/><stop offset="0.55" stop-color="#0c1020"/><stop offset="1" stop-color="#080a12"/></linearGradient>'
       + '<radialGradient id="pglow" cx="0.82" cy="0.12" r="0.5"><stop offset="0" stop-color="#5b4be6" stop-opacity="0.55"/><stop offset="1" stop-color="#5b4be6" stop-opacity="0"/></radialGradient>'
-      + '<radialGradient id="pglow2" cx="0.1" cy="0.9" r="0.5"><stop offset="0" stop-color="#00ff41" stop-opacity="0.18"/><stop offset="1" stop-color="#00ff41" stop-opacity="0"/></radialGradient>'
+      + '<radialGradient id="pglow2" cx="0.1" cy="0.9" r="0.5"><stop offset="0" stop-color="#25ff86" stop-opacity="0.18"/><stop offset="1" stop-color="#25ff86" stop-opacity="0"/></radialGradient>'
       + '<linearGradient id="pcta" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6d5cf0"/><stop offset="1" stop-color="#8b7bff"/></linearGradient>'
       + '<linearGradient id="pscrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080a12" stop-opacity="0.7"/><stop offset="0.45" stop-color="#080a12" stop-opacity="0.25"/><stop offset="1" stop-color="#080a12" stop-opacity="0.92"/></linearGradient>'
       + '</defs>'
       + (bg
           ? '<rect width="794" height="1123" fill="#080a12"/><image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#pscrim)"/>'
           : '<rect width="794" height="1123" fill="url(#pbg)"/><rect width="794" height="1123" fill="url(#pglow)"/><rect width="794" height="1123" fill="url(#pglow2)"/><text x="470" y="1050" font-family="ui-monospace,monospace" font-size="520" font-weight="800" fill="#ffffff" opacity="0.03">5</text>')
-      + '<text x="64" y="104" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="30" font-weight="800" fill="'+logoColor+'" letter-spacing="-1.5">Hack</text>'
-      + '<path d="M160 88 152 104 160 120" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      + '<text x="184" y="104" text-anchor="middle" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="30" font-weight="800" fill="'+logoColor+'" letter-spacing="-1">5</text>'
-      + '<path d="M208 88 216 104 208 120" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<g transform="translate(64,74)"><rect width="52" height="52" rx="14" fill="#f6f2e9"/><rect width="52" height="52" rx="14" fill="none" stroke="#14532d" stroke-opacity="0.3"/><text x="26" y="35" text-anchor="middle" font-family="ui-monospace,monospace" font-size="23" font-weight="800" fill="#14532d">&#8249;5&#8250;</text></g>'
+      + '<text x="130" y="108" font-family="ui-monospace,monospace" font-size="27" font-weight="800" fill="'+logoColor+'" letter-spacing="0.5">Hack5</text>'
       + '<text x="730" y="105" text-anchor="end" font-family="-apple-system,sans-serif" font-size="13" fill="#8b93b5" letter-spacing="4">HACKATHON</text>';
     let y=300;
     if(eyebrow){ svg+='<text x="64" y="'+y+'" font-family="-apple-system,sans-serif" font-size="19" font-weight="600" fill="#8b7bff" letter-spacing="1.5">'+esc(eyebrow.slice(0,60))+'</text>'; y+=20; }
     y+=48;
     nameLines.forEach((ln,i)=>{ svg+='<text x="62" y="'+(y+i*(nameFs+4))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="'+nameColor+'" letter-spacing="-1">'+esc(ln)+'</text>'; });
     y = y + nameLines.length*(nameFs+4) + 18;
-    svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#00ff41"/>'; y+=44;
+    svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#25ff86"/>'; y+=44;
     introLines.forEach((ln,i)=>{ svg+='<text x="64" y="'+(y+i*34)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#aeb6cc">'+esc(ln)+'</text>'; });
     y += introLines.length*36 + 40;
     bits.forEach((b,i)=>{ svg+='<text x="64" y="'+(y+i*46)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#dbe0ee">'+b[0]+'  '+esc(String(b[1]).slice(0,40))+'</text>'; });
@@ -5525,8 +5530,8 @@ const APP_HTML = String.raw`<!doctype html>
   function qrToPng(sub){ return new Promise(function(res,rej){ const img=new Image(); img.onload=function(){ const c=document.createElement('canvas'); c.width=c.height=252; const x=c.getContext('2d'); x.fillStyle='#ffffff'; x.fillRect(0,0,252,252); x.drawImage(img,0,0,252,252); try{ res(c.toDataURL('image/png')); }catch(e){ rej(e); } }; img.onerror=function(){ rej(new Error('qr')); }; img.src='/qr/'+encodeURIComponent(sub); }); }
   // Shared poster editor state (title override + logo/name colors), read by every posterSvg() call.
   const posterOpts = { title:null, nameColor:'', logoColor:'' };
-  const NAME_COLORS = ['#ffffff','#00ff41','#8b7bff','#ffd166','#ff6b6b','#0a0e0a'];
-  const LOGO_COLORS = ['#ffffff','#00ff41','#8b7bff','#ffd166','#0a0e0a'];
+  const NAME_COLORS = ['#ffffff','#25ff86','#8b7bff','#ffd166','#ff6b6b','#0a0e0a'];
+  const LOGO_COLORS = ['#ffffff','#25ff86','#8b7bff','#ffd166','#0a0e0a'];
   // Title + color controls, reused on /poster and /share. repaint() re-renders the current preview.
   function posterControlsHtml(){
     const sw=function(c,cls){ return '<button class="'+cls+'" data-c="'+esc(c)+'" title="'+esc(c)+'" style="width:26px;height:26px;border-radius:7px;border:2px solid var(--line);background:'+esc(c)+';cursor:pointer;padding:0"></button>'; };
