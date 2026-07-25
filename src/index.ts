@@ -4033,7 +4033,9 @@ const APP_HTML = String.raw`<!doctype html>
     header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
     .brand{display:flex;align-items:center;gap:10px;font-weight:800;cursor:pointer}
     #brandName{color:#14532d}
+    .brandchev{color:#14532d}
     :root[data-theme="dark"] #brandName{color:#5fd39a}
+    :root[data-theme="dark"] .brandchev{color:#5fd39a}
     .mark{width:30px;height:30px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
     nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     nav .who{color:var(--muted);font-size:13px;margin-right:4px}
@@ -4195,10 +4197,10 @@ const APP_HTML = String.raw`<!doctype html>
 <body>
   <header>
     <div class="brand" onclick="go('/')">
-      <span id="brandName">Hack</span><svg width="27" height="27" viewBox="0 0 40 40" aria-hidden="true" style="flex:0 0 auto;margin-left:1px">
-        <path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-        <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="18" font-weight="800" fill="#14532d">5</text>
+      <span id="brandName">Hack</span><svg class="brandchev" width="42" height="25" viewBox="0 0 66 40" aria-hidden="true" style="flex:0 0 auto;margin-left:2px">
+        <path d="M9 6 3 20 9 34" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="33" y="29" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="30" font-weight="800" fill="currentColor">5</text>
+        <path d="M57 6 63 20 57 34" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
       </svg></div>
     <nav id="nav"></nav>
   </header>
@@ -4933,15 +4935,15 @@ const APP_HTML = String.raw`<!doctype html>
   // Reusable media kit (shown on /about and /media): two-color logo lockups + downloads (full lockup as
   // displayed + mark-only + PNG) + usage note. Marks inlined so it renders without a fetch.
   function mediaKitHtml(){
-    // Unified mark: ‹5› chevrons + "5", one color per theme. Cream lockup = black; black lockup = forest green.
-    // The ‹5› chevron mark, inline inside the "Hack‹5›" wordmark (no separate leading mark).
-    const mkMark = function(c,sz){ sz=sz||40; return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="'+sz+'" height="'+sz+'" aria-label="5">'
-      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="'+c+'" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="'+c+'" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="'+c+'">5</text></svg>'; };
+    // Full "Hack‹5›" wordmark as one inline SVG so the ‹5› is exactly the same size as "Hack".
+    const wordmark = function(hackC,markC,h){ return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 286 64" height="'+(h||34)+'" role="img" aria-label="Hack5">'
+      +'<text x="0" y="51" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="52" font-weight="800" fill="'+hackC+'" letter-spacing="-1">Hack</text>'
+      +'<path d="M182 24 170 43 182 62" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<text x="216" y="52" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="52" font-weight="800" fill="'+markC+'">5</text>'
+      +'<path d="M250 24 262 43 250 62" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'; };
     const card = function(bg,hackC,markC){ return '<div style="flex:1;min-width:210px;background:'+bg+';border-radius:14px;padding:22px;border:1px solid rgba(128,128,128,.14)">'
-      +'<div style="display:flex;align-items:center;gap:2px"><span style="font-size:30px;font-weight:800;color:'+hackC+';font-family:Inter,ui-sans-serif,-apple-system,sans-serif;letter-spacing:-1px;line-height:1">Hack</span><span style="line-height:0">'+mkMark(markC,42)+'</span></div>'
-      +'<div style="font-size:13px;color:'+hackC+';opacity:.65;font-family:ui-monospace,Menlo,monospace;margin-top:6px">hack5.net</div></div>'; };
+      +'<div style="line-height:0">'+wordmark(hackC,markC,34)+'</div>'
+      +'<div style="font-size:13px;color:'+hackC+';opacity:.65;font-family:ui-monospace,Menlo,monospace;margin-top:8px">hack5.net</div></div>'; };
     return '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
       + '<div class="panel">'
       +   '<div style="display:flex;gap:16px;flex-wrap:wrap">'
@@ -5451,7 +5453,9 @@ const APP_HTML = String.raw`<!doctype html>
           ? '<rect width="794" height="1123" fill="#080a12"/><image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#pscrim)"/>'
           : '<rect width="794" height="1123" fill="url(#pbg)"/><rect width="794" height="1123" fill="url(#pglow)"/><rect width="794" height="1123" fill="url(#pglow2)"/><text x="470" y="1050" font-family="ui-monospace,monospace" font-size="520" font-weight="800" fill="#ffffff" opacity="0.03">5</text>')
       + '<text x="64" y="104" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="30" font-weight="800" fill="'+logoColor+'" letter-spacing="-0.5">Hack</text>'
-      + '<g transform="translate(146,78)"><path d="M8 4 2 17 8 30" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M34 4 40 17 34 30" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><text x="21" y="25" text-anchor="middle" font-family="ui-monospace,monospace" font-size="21" font-weight="800" fill="'+logoColor+'">5</text></g>'
+      + '<path d="M171 85 162 104 171 123" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<text x="197" y="104" text-anchor="middle" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="'+logoColor+'">5</text>'
+      + '<path d="M223 85 232 104 223 123" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
       + '<text x="730" y="105" text-anchor="end" font-family="-apple-system,sans-serif" font-size="13" fill="#8b93b5" letter-spacing="4">HACKATHON</text>';
     let y=300;
     if(eyebrow){ svg+='<text x="64" y="'+y+'" font-family="-apple-system,sans-serif" font-size="19" font-weight="600" fill="#8b7bff" letter-spacing="1.5">'+esc(eyebrow.slice(0,60))+'</text>'; y+=20; }
