@@ -4995,9 +4995,14 @@ const APP_HTML = String.raw`<!doctype html>
     } else { for(let i=0;i<str.length && lines.length<maxLines;i+=per) lines.push(str.slice(i,i+per)); }
     return lines;
   }
-  function posterSvg(bg){
+  function posterSvg(bg, opts){
+    opts = opts || {};
     const tn = CONFIG.tenant || {};
-    const name = tn.name || 'Hackathon';
+    // Editable title (opts.title) so an organizer can set an English/custom name for the poster —
+    // the event's stored name is a proper noun and doesn't translate with the UI language toggle.
+    const name = (opts.title!=null && String(opts.title).trim()!=='') ? String(opts.title).slice(0,60) : (tn.name || 'Hackathon');
+    const nameColor = opts.nameColor || '#ffffff';   // event title
+    const logoColor = opts.logoColor || '#ffffff';   // the "Hack5" wordmark (the ‹5› mark stays branded on its cream chip)
     const nameLines = wrapText(name, name.length>16?14:10, 3);
     const nameFs = nameLines.length>=3?56:(name.length>14?66:84);
     const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,72), 30, 2);
@@ -5016,12 +5021,12 @@ const APP_HTML = String.raw`<!doctype html>
           ? '<rect width="794" height="1123" fill="#080a12"/><image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#pscrim)"/>'
           : '<rect width="794" height="1123" fill="url(#pbg)"/><rect width="794" height="1123" fill="url(#pglow)"/><rect width="794" height="1123" fill="url(#pglow2)"/><text x="470" y="1050" font-family="ui-monospace,monospace" font-size="520" font-weight="800" fill="#ffffff" opacity="0.03">5</text>')
       + '<g transform="translate(64,74)"><rect width="52" height="52" rx="14" fill="#f6f2e9"/><rect width="52" height="52" rx="14" fill="none" stroke="#14532d" stroke-opacity="0.3"/><text x="26" y="35" text-anchor="middle" font-family="ui-monospace,monospace" font-size="23" font-weight="800" fill="#14532d">&#8249;5&#8250;</text></g>'
-      + '<text x="130" y="108" font-family="ui-monospace,monospace" font-size="27" font-weight="800" fill="#ffffff" letter-spacing="0.5">Hack5</text>'
+      + '<text x="130" y="108" font-family="ui-monospace,monospace" font-size="27" font-weight="800" fill="'+logoColor+'" letter-spacing="0.5">Hack5</text>'
       + '<text x="730" y="105" text-anchor="end" font-family="-apple-system,sans-serif" font-size="13" fill="#8b93b5" letter-spacing="4">HACKATHON</text>';
     let y=300;
     if(eyebrow){ svg+='<text x="64" y="'+y+'" font-family="-apple-system,sans-serif" font-size="19" font-weight="600" fill="#8b7bff" letter-spacing="1.5">'+esc(eyebrow.slice(0,60))+'</text>'; y+=20; }
     y+=48;
-    nameLines.forEach((ln,i)=>{ svg+='<text x="62" y="'+(y+i*(nameFs+4))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="#ffffff" letter-spacing="-1">'+esc(ln)+'</text>'; });
+    nameLines.forEach((ln,i)=>{ svg+='<text x="62" y="'+(y+i*(nameFs+4))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="'+nameColor+'" letter-spacing="-1">'+esc(ln)+'</text>'; });
     y = y + nameLines.length*(nameFs+4) + 18;
     svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#25ff86"/>'; y+=44;
     introLines.forEach((ln,i)=>{ svg+='<text x="64" y="'+(y+i*36)+'" font-family="-apple-system,sans-serif" font-size="24" fill="#aeb6cc">'+esc(ln)+'</text>'; });
@@ -5040,10 +5045,31 @@ const APP_HTML = String.raw`<!doctype html>
   // Fetch a preset bg and return it as a data: URI, so the canvas PNG export isn't tainted by a
   // cross-origin <image href>. '' → no background (the gradient template). Throws on fetch failure.
   async function bgToDataUrl(url){ if(!url) return ''; const r=await fetch(url); if(!r.ok) throw new Error('bg '+r.status); const b=await r.blob(); return await new Promise(function(res,rej){ const fr=new FileReader(); fr.onload=function(){res(fr.result);}; fr.onerror=function(){rej(new Error('read'));}; fr.readAsDataURL(b); }); }
-  function paint(bg){ const svg=posterSvg(bg); window.__posterSvg=svg; window.__posterBg=bg||''; $('#posterBox').innerHTML=svg; }
+  // Shared poster editor state (title override + logo/name colors), read by every posterSvg() call.
+  const posterOpts = { title:null, nameColor:'', logoColor:'' };
+  const NAME_COLORS = ['#ffffff','#25ff86','#8b7bff','#ffd166','#ff6b6b','#0a0e0a'];
+  const LOGO_COLORS = ['#ffffff','#25ff86','#8b7bff','#ffd166','#0a0e0a'];
+  // Title + color controls, reused on /poster and /share. repaint() re-renders the current preview.
+  function posterControlsHtml(){
+    const sw=function(c,cls){ return '<button class="'+cls+'" data-c="'+esc(c)+'" title="'+esc(c)+'" style="width:26px;height:26px;border-radius:7px;border:2px solid var(--line);background:'+esc(c)+';cursor:pointer;padding:0"></button>'; };
+    return '<div class="panel" style="max-width:640px;margin-bottom:14px">'
+      + '<label>'+t('海报标题','Poster title')+'</label>'
+      + '<input id="poTitle" maxlength="60" placeholder="'+esc((CONFIG.tenant&&CONFIG.tenant.name)||'Hackathon')+'" value="'+esc(posterOpts.title||'')+'">'
+      + '<div class="muted" style="font-size:12px;margin-top:4px">'+t('留空=用活动名;想要英文海报就在这里填英文名。','Blank = event name; type an English name here for an English poster.')+'</div>'
+      + '<div class="row" style="gap:18px;flex-wrap:wrap;margin-top:12px">'
+      + '<div><div class="muted" style="font-size:12px;margin-bottom:5px">'+t('标题颜色','Title color')+'</div><div class="row" style="gap:6px">'+NAME_COLORS.map(function(c){return sw(c,'ponc');}).join('')+'</div></div>'
+      + '<div><div class="muted" style="font-size:12px;margin-bottom:5px">'+t('Logo 颜色','Logo color')+'</div><div class="row" style="gap:6px">'+LOGO_COLORS.map(function(c){return sw(c,'ploc');}).join('')+'</div></div>'
+      + '</div></div>';
+  }
+  function wirePosterControls(repaint){
+    const ti=$('#poTitle'); if(ti) ti.addEventListener('input',function(){ posterOpts.title=ti.value; repaint(); });
+    document.querySelectorAll('.ponc').forEach(function(b){ b.addEventListener('click',function(){ posterOpts.nameColor=b.dataset.c; repaint(); }); });
+    document.querySelectorAll('.ploc').forEach(function(b){ b.addEventListener('click',function(){ posterOpts.logoColor=b.dataset.c; repaint(); }); });
+  }
+  function paint(bg){ const svg=posterSvg(bg, posterOpts); window.__posterSvg=svg; window.__posterBg=bg||''; $('#posterBox').innerHTML=svg; }
   // Rasterize the free A4 poster to a PNG blob (for share/download).
   function posterBlob(bg){ return new Promise(function(res,rej){
-    const svg=posterSvg(bg||''); const img=new Image();
+    const svg=posterSvg(bg||'', posterOpts); const img=new Image();
     const u=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
     img.onload=function(){ const c=document.createElement('canvas'); c.width=794; c.height=1123; c.getContext('2d').drawImage(img,0,0,794,1123); URL.revokeObjectURL(u); c.toBlob(function(b){ b?res(b):rej(new Error('fail')); },'image/png'); };
     img.onerror=function(){ URL.revokeObjectURL(u); rej(new Error('fail')); }; img.src=u;
@@ -5062,6 +5088,7 @@ const APP_HTML = String.raw`<!doctype html>
       +'<p class="muted">'+t('下面是自动生成的海报和文案。复制文案 + 下载海报,发到公众号 / 小红书 / 微信群 / Telegram 群;手机可直接用系统分享。','Here are your auto-generated poster and caption. Copy the caption, download the poster, and post to your channels.')+'</p>'
       +'<div class="share-grid">'
       +'<div>'
+      + posterControlsHtml()
       +'<div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">'+POSTER_BGS.map(function(b){return '<button class="ghost shbg" data-bg="'+esc(b[0])+'" style="font-size:12px;padding:5px 10px">'+esc(t(b[1],b[2]))+'</button>';}).join('')+'</div>'
       +'<div id="shPosterBox" class="share-poster"></div>'
       +'<a target="_blank" rel="noopener" href="'+url+'/poster" style="display:inline-block;margin-top:8px;font-size:13px;font-weight:600">'+t('🎨 换成 AI 定制海报(付费)→','🎨 Make an AI poster (premium) →')+'</a></div>'
@@ -5086,9 +5113,10 @@ const APP_HTML = String.raw`<!doctype html>
       +'<div id="shMsg" class="muted" style="margin-top:8px"></div></div>'
       +'</div>';
     let shareBg='';
-    function paintShare(bg){ shareBg=bg||''; const el=$('#shPosterBox'); if(el) el.innerHTML=posterSvg(shareBg); }
+    function paintShare(bg){ shareBg=bg||''; const el=$('#shPosterBox'); if(el) el.innerHTML=posterSvg(shareBg, posterOpts); }
     paintShare(''); // instant gradient template, then swap to a nice default background (free preset)
     bgToDataUrl('/poster-bg/illustration.jpg').then(paintShare).catch(function(){});
+    wirePosterControls(function(){ paintShare(shareBg); });
     document.querySelectorAll('.shbg').forEach(function(btn){ btn.addEventListener('click', async function(){
       const u=btn.dataset.bg||''; if(!u){ paintShare(''); setMsg('shMsg',''); return; }
       const old=btn.textContent; btn.disabled=true; btn.textContent='…';
@@ -5149,9 +5177,11 @@ const APP_HTML = String.raw`<!doctype html>
       +   '</div>'
       +   '<div class="muted" style="font-size:12px;margin-top:8px">'+t('四种背景免费,或上传自己的图。AI 定制(按描述+活动信息生成)见下方,付费。','Four backgrounds free, or upload your own. AI-custom (from your description + event info) below — premium.')
       +   '</div><div id="bgMsg" class="muted" style="font-size:12px;margin-top:4px"></div></div>'
+      + posterControlsHtml()
       + (isAdmin ? '<div id="aiPanel" class="panel" style="max-width:640px;margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>' : '')
       + '<div id="posterBox" style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>';
     paint('');
+    wirePosterControls(function(){ paint(window.__posterBg||''); });
     if(isAdmin) loadAiPanel();
     // Poster background = a fetched image turned into a data URI before it goes into the SVG, so the
     // canvas PNG export stays untainted (an external <image href> would taint it). Presets are real
