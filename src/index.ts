@@ -1077,7 +1077,7 @@ async function grantSignupCredits(env: Env, email: string, now: number): Promise
 async function createHackathon(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ error: "请先登录 / Please log in" }, 401);
-  const body = await request.json<{ name?: string; subdomain?: string; intro?: string; banner?: string; mode?: string; accessDays?: number }>().catch(() => null);
+  const body = await request.json<{ name?: string; subdomain?: string; intro?: string; eventTime?: string; location?: string; banner?: string; mode?: string; accessDays?: number }>().catch(() => null);
   const name = String(body?.name ?? "").trim().slice(0, 60);
   const mode = body?.mode === "secret" ? "secret" : body?.mode === "mini" ? "mini" : "open";
   // Mini is a 5-minute flow: auto-generate a subdomain from the name if none given.
@@ -1087,6 +1087,8 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     subdomain = await pickAvailableSubdomain(env, slug);
   }
   const intro = String(body?.intro ?? "").trim().slice(0, 2000);
+  const eventTime = String(body?.eventTime ?? "").trim().slice(0, 120); // start/end date-time — shown on the poster & homepage
+  const location = String(body?.location ?? "").trim().slice(0, 120);
   const accessDays = mode === "secret" ? Math.min(90, Math.max(1, Math.floor(Number(body?.accessDays) || 7))) : 7;
   if (!name) return json({ error: "请填写黑客松名称 / Name required" }, 400);
   if (!/^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(subdomain)) {
@@ -1155,9 +1157,9 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const id = crypto.randomUUID();
   try {
     await env.DB.prepare(
-      "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+      "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, event_time, location, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
     )
-      .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, mode, accessDays, now, now)
+      .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, eventTime, location, mode, accessDays, now, now)
       .run();
   } catch {
     // Subdomain UNIQUE race (taken between the check above and here) or any insert failure → refund + 409.
@@ -1625,24 +1627,27 @@ async function deleteTeamPost(request: Request, env: Env, tenant: Tenant | null,
 
 // Premium: generate an AI poster BACKGROUND from a text prompt (gpt-image-1), overlaid with crisp
 // event text on the client. Admin-only (it costs money) and metered per tenant per day.
-// Free = fixed curated style (we absorb the cost, a few rolls per event); custom = organizer's own
-// prompt (the paid tier). Both capped per event for lifetime (KV counter, no expiry).
+// Free = fixed curated style (we absorb the cost, a few rolls per event, count-capped); custom = the
+// organizer's own prompt — the PAID tier, deducts credits per image. Both are recorded in credit_ledger
+// (kind='poster') in D1 — strongly consistent (the old KV counter read stale, so the count looked wrong)
+// and it feeds the /usage billing view.
 const AI_POSTER_FREE_CAP = 3;
-const AI_POSTER_CUSTOM_CAP = 3;
-const freeCapKey = (tid: string) => `aiposter:free:${tid}`;
-const customCapKey = (tid: string) => `aiposter:custom:${tid}`;
+const AI_POSTER_CUSTOM_CREDITS = 2; // 付费自定义海报:每张扣 N 积分(1 积分=$0.02,对齐 0.03U/张 基准)
 
 async function getPosterQuota(request: Request, env: Env, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth || !tid) return json({ error: "Admin only" }, 403);
-  const usedFree = Number((await env.SHOTS.get(freeCapKey(tid))) ?? "0");
-  const usedCustom = Number((await env.SHOTS.get(customCapKey(tid))) ?? "0");
+  const usedFree = Number((await env.DB.prepare("SELECT COUNT(*) AS c FROM credit_ledger WHERE tenant_id = ? AND kind = 'poster' AND status = 'free'").bind(tid).first<{ c: number }>())?.c ?? 0);
+  const ownerRow = await env.DB.prepare("SELECT creator_email FROM tenants WHERE id = ?").bind(tid).first<{ creator_email: string }>();
+  const balRow = ownerRow?.creator_email ? await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(ownerRow.creator_email).first<{ credits: number }>() : null;
+  const balance = balRow?.credits ?? 0;
   return json({
     aiEnabled: Boolean(env.AI || env.OPENAI_API_KEY),
     free: Math.max(0, AI_POSTER_FREE_CAP - usedFree),
-    custom: Math.max(0, AI_POSTER_CUSTOM_CAP - usedCustom),
     freeCap: AI_POSTER_FREE_CAP,
-    customCap: AI_POSTER_CUSTOM_CAP,
+    customCredits: AI_POSTER_CUSTOM_CREDITS, // paid: credits deducted per custom poster
+    balance, // organizer's credit balance
+    custom: Math.floor(balance / AI_POSTER_CUSTOM_CREDITS), // how many custom posters they can still afford
   });
 }
 
@@ -1656,20 +1661,49 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
   const style = String(body?.prompt ?? "").trim().slice(0, 500);
   if (mode === "custom" && !style) return json({ error: "请描述画风 / Describe the style" }, 400);
 
-  // Per-mode lifetime cap per event. Reserve the credit BEFORE calling OpenAI so a rapid burst
-  // can't all read used<cap and slip past (KV has no atomic increment). Refunded only when OpenAI
-  // never generated (non-2xx / network error = not billed; a success keeps the charge).
-  const cap = mode === "free" ? AI_POSTER_FREE_CAP : AI_POSTER_CUSTOM_CAP;
-  const capKey = mode === "free" ? freeCapKey(tenant.id) : customCapKey(tenant.id);
-  const used = Number((await env.SHOTS.get(capKey)) ?? "0");
-  if (used >= cap) {
-    return json(
-      { error: mode === "free" ? "免费额度已用完 / Free quota used up" : "自定义额度已用完(每场 3 次)/ Custom quota used up" },
-      429,
-    );
+  // Reserve BEFORE generating so a failed image isn't charged (refund on any non-success path). Accounting
+  // lives in credit_ledger (D1) — free = a count-capped row (credits 0), custom = a real credit deduction
+  // from the ORGANIZER's balance (the paid tier). Both show up on /usage.
+  const now0 = unixNow();
+  const ownerRow = await env.DB.prepare("SELECT creator_email FROM tenants WHERE id = ?").bind(tenant.id).first<{ creator_email: string }>();
+  const owner = ownerRow?.creator_email ?? "";
+  const ledgerId = `poster:${mode}:${tenant.id}:${crypto.randomUUID()}`;
+  let freeRemaining = AI_POSTER_FREE_CAP;
+  let refunded = false;
+  const refund = async () => {
+    if (refunded) return;
+    refunded = true;
+    if (mode === "custom" && owner) {
+      await env.DB.prepare("UPDATE participant_credits SET credits = credits + ?, updated_at = ? WHERE email = ?").bind(AI_POSTER_CUSTOM_CREDITS, unixNow(), owner).run();
+    }
+    await env.DB.prepare("DELETE FROM credit_ledger WHERE id = ?").bind(ledgerId).run();
+  };
+  if (mode === "free") {
+    // Insert-then-count: D1 is strongly consistent, so the per-event free count is accurate (the old KV
+    // counter could read stale and show the wrong remaining). Over-count race → delete this row + 429.
+    await env.DB.prepare("INSERT INTO credit_ledger (id, tenant_id, email, kind, status, tokens, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'poster', 'free', 0, 0, 'poster:free', ?, ?)")
+      .bind(ledgerId, tenant.id, owner || "organizer", now0, now0)
+      .run();
+    const cnt = Number((await env.DB.prepare("SELECT COUNT(*) AS c FROM credit_ledger WHERE tenant_id = ? AND kind = 'poster' AND status = 'free'").bind(tenant.id).first<{ c: number }>())?.c ?? 0);
+    if (cnt > AI_POSTER_FREE_CAP) {
+      await env.DB.prepare("DELETE FROM credit_ledger WHERE id = ?").bind(ledgerId).run();
+      return json({ error: `免费海报额度已用完(每场 ${AI_POSTER_FREE_CAP} 张)/ Free poster quota used up (${AI_POSTER_FREE_CAP}/event)` }, 429);
+    }
+    freeRemaining = Math.max(0, AI_POSTER_FREE_CAP - cnt);
+  } else {
+    // Custom (paid): atomically deduct credits from the organizer, then record the spend.
+    if (!owner) return json({ error: "找不到组织者账户 / Organizer account not found" }, 500);
+    const deducted = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
+      .bind(AI_POSTER_CUSTOM_CREDITS, now0, owner, AI_POSTER_CUSTOM_CREDITS)
+      .run();
+    if (deducted.meta.changes !== 1) {
+      const bal = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(owner).first<{ credits: number }>();
+      return json({ error: `自定义海报每张 ${AI_POSTER_CUSTOM_CREDITS} 积分,余额不足(当前 ${bal?.credits ?? 0})/ Custom poster costs ${AI_POSTER_CUSTOM_CREDITS} credits — not enough (${bal?.credits ?? 0})`, cost: AI_POSTER_CUSTOM_CREDITS, balance: bal?.credits ?? 0, pricingUrl: "/pricing", upgrade: true }, 402);
+    }
+    await env.DB.prepare("INSERT INTO credit_ledger (id, tenant_id, email, kind, status, tokens, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'poster', 'spent', 0, ?, 'poster:custom', ?, ?)")
+      .bind(ledgerId, tenant.id, owner, AI_POSTER_CUSTOM_CREDITS, now0, now0)
+      .run();
   }
-  await env.SHOTS.put(capKey, String(used + 1));
-  const refund = () => env.SHOTS.put(capKey, String(used));
 
   const name = (tenant.name ?? "Hackathon").slice(0, 80);
   const intro = (tenant.intro ?? "").replace(/\s+/g, " ").slice(0, 160);
@@ -1723,8 +1757,10 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
     await refund();
     return json({ error: "生成失败 / Generation failed" }, 502);
   }
-  // Credit already reserved up-front; success keeps the charge.
-  return json({ image: `data:${contentType};base64,${b64}`, mode, remaining: cap - used - 1 });
+  // Reserved up-front; success keeps the charge. Report fresh free-remaining / balance for the panel.
+  let balance = 0;
+  if (owner) balance = Number((await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(owner).first<{ credits: number }>())?.credits ?? 0);
+  return json({ image: `data:${contentType};base64,${b64}`, mode, remaining: mode === "free" ? freeRemaining : Math.floor(balance / AI_POSTER_CUSTOM_CREDITS), balance, charged: mode === "custom" ? AI_POSTER_CUSTOM_CREDITS : 0 });
 }
 
 // ============================ photo wall ============================
@@ -3033,7 +3069,19 @@ async function miniUsage(request: Request, env: Env, tenant: Tenant | null, tid:
   } catch {
     return json({ error: "用量暂不可用 / usage unavailable" }, 502);
   }
-  return json({ ok: true, mock: wb.mock, ...shapeMiniUsage(usage) });
+  // Credit view: organizer balance + this event's spend records (builds + posters) + total used.
+  const ownerRow = await env.DB.prepare("SELECT creator_email FROM tenants WHERE id = ?").bind(tid).first<{ creator_email: string }>();
+  const balRow = ownerRow?.creator_email ? await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(ownerRow.creator_email).first<{ credits: number }>() : null;
+  const led = await env.DB.prepare("SELECT email, kind, status, credits, tokens, created_at FROM credit_ledger WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 100").bind(tid).all<{ email: string; kind: string; status: string; credits: number; tokens: number; created_at: number }>();
+  // Total actually consumed = settled builds + spent posters + the hackathon-create charge (exclude pending
+  // reserves and released holds, and free posters which are 0 anyway).
+  const totalUsed = (led.results ?? []).filter((r) => ["settled", "recorded", "spent"].includes(r.status)).reduce((a, r) => a + Number(r.credits || 0), 0);
+  const records = (led.results ?? []).map((r) => {
+    const at = (r.email ?? "").indexOf("@");
+    const who = at < 1 ? (r.email ?? "") : (r.email.slice(0, at).length <= 2 ? r.email[0] + "*" : r.email[0] + "***" + r.email[at - 1]) + r.email.slice(at);
+    return { who, kind: r.kind, status: r.status, credits: Number(r.credits || 0), tokens: Number(r.tokens || 0), at: r.created_at };
+  });
+  return json({ ok: true, mock: wb.mock, ...shapeMiniUsage(usage), credits: { balance: balRow?.credits ?? 0, totalUsed, records } });
 }
 
 // Usage-shaping smoke test — mock-gated (404 in production).
@@ -5116,6 +5164,8 @@ const APP_HTML = String.raw`<!doctype html>
             + (cm==='mini'
                 ? '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">'+t('(可选)','(optional)')+'</span></label><input id="hIntro" maxlength="2000" placeholder="'+t('这是一场关于…的 mini 黑客松','A mini hackathon about…')+'">'
                 : '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…','A hackathon about… for…')+'"></textarea>')
+            + '<label>'+t('起止时间','Date & time')+' <span class="muted">'+t('(显示在海报/首页)','(on poster & homepage)')+'</span></label><input id="hTime" maxlength="120" placeholder="'+t('例:2026-08-15 10:00 ~ 08-17 18:00','e.g. Aug 15–17, 2026')+'">'
+            + '<label>'+t('地点','Location')+' <span class="muted">'+t('(显示在海报/首页)','(on poster & homepage)')+'</span></label><input id="hLoc" maxlength="120" placeholder="'+t('例:上海·徐汇 / 线上','e.g. Shanghai / Online')+'">'
             + (cm==='mini' ? '' : '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款)','(optional — default used)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>')
             + (cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
             + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b> · '+t('余额','balance')+' '+bal+'</div>'
@@ -5136,6 +5186,8 @@ const APP_HTML = String.raw`<!doctype html>
         const name=$('#hName').value.trim();
         const subdomain = $('#hSub') ? $('#hSub').value.trim().toLowerCase() : '';
         const intro = $('#hIntro') ? $('#hIntro').value.trim() : '';
+        const eventTime = $('#hTime') ? $('#hTime').value.trim() : '';
+        const location = $('#hLoc') ? $('#hLoc').value.trim() : '';
         if(!name){ setMsg('hMsg', t('请填写名称','Enter a name'), true); return; }
         if(cm!=='mini' && !subdomain){ setMsg('hMsg', t('请填写子域名','Enter a subdomain'), true); return; }
         if(cm!=='mini' && intro.length<10){ setMsg('hMsg', t('请写至少 10 字的简介','Add a 10+ character intro'), true); return; }
@@ -5144,7 +5196,7 @@ const APP_HTML = String.raw`<!doctype html>
         const accessDays = (mode==='secret' && $('#hDays')) ? Number($('#hDays').value)||7 : 7;
         $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
         try {
-          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,banner:window.__hBanner,mode,accessDays}});
+          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,eventTime,location,banner:window.__hBanner,mode,accessDays}});
           window.__hBanner='';
           const pw = r.adminPassword;
           const masked = pw.length>7 ? (pw.slice(0,-5)+'****'+pw.slice(-2)) : pw;
@@ -5491,9 +5543,9 @@ const APP_HTML = String.raw`<!doctype html>
       +'<div class="row" style="gap:10px;margin:12px 0 4px;align-items:center"><button id="aiFree">'+t('🎨 免费生成(固定风格)','🎨 Free (fixed style)')+'</button><span class="muted">'+t('剩','left')+' '+q.free+'/'+q.freeCap+'</span></div>'
       +'<p class="muted" style="margin:0 0 4px;font-size:12px">'+t('免费:用你的活动名/简介 + 品牌固定画风生成背景。','Free: a fixed on-brand style built from your event name/intro.')+'</p>'
       +'<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">'
-      +'<div class="row" style="justify-content:space-between;align-items:center"><b style="font-size:14px">'+t('自定义(付费)','Custom (premium)')+'</b><span class="muted">'+t('剩','left')+' '+q.custom+'/'+q.customCap+t(' · 每场'+q.customCap+'次',' · '+q.customCap+'/event')+'</span></div>'
+      +'<div class="row" style="justify-content:space-between;align-items:center"><b style="font-size:14px">'+t('自定义(付费)','Custom (premium)')+'</b><span class="muted">'+t('每张','each')+' '+q.customCredits+' '+t('积分','cr')+' · '+t('余额','balance')+' '+q.balance+'</span></div>'
       +'<textarea id="aiPrompt" rows="2" maxlength="500" placeholder="'+t('例:赛博朋克夜景,霓虹紫青配色','e.g. cyberpunk night, neon purple-teal')+'" style="margin-top:8px"></textarea>'
-      +'<div class="row" style="margin-top:10px;gap:8px"><button id="aiCustom">'+t('✨ 生成自定义海报','✨ Generate custom')+'</button><button class="ghost" id="aiClear">'+t('恢复模板版','Reset to template')+'</button><span id="aiMsg" class="muted"></span></div>';
+      +'<div class="row" style="margin-top:10px;gap:8px"><button id="aiCustom">'+t('✨ 生成自定义海报','✨ Generate custom')+' ('+q.customCredits+' '+t('积分','cr')+')</button><button class="ghost" id="aiClear">'+t('恢复模板版','Reset to template')+'</button><span id="aiMsg" class="muted"></span></div>';
     $('#aiFree').addEventListener('click', ()=>genAi('free'));
     $('#aiCustom').addEventListener('click', ()=>genAi('custom'));
     $('#aiClear').addEventListener('click', ()=>{ paint(''); });
@@ -5506,7 +5558,7 @@ const APP_HTML = String.raw`<!doctype html>
     try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{mode,prompt}});
       if(!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(r.image||'')) throw new Error(t('返回无效','Invalid response'));
       paint(r.image);
-      await loadAiPanel(); setMsg('aiMsg', t('完成 ✓ 剩 ','Done ✓ left ')+r.remaining);
+      await loadAiPanel(); setMsg('aiMsg', mode==='custom' ? (t('完成 ✓ 扣 ','Done ✓ −')+r.charged+' '+t('积分,余额 ','cr · balance ')+r.balance) : (t('完成 ✓ 剩 ','Done ✓ left ')+r.remaining));
     }catch(e){ setMsg('aiMsg', e.message, true); if(btn) btn.disabled=false; }
   }
   function renderPoster(){
@@ -6389,10 +6441,25 @@ const APP_HTML = String.raw`<!doctype html>
     try{
       const u = await api('/api/tenant/mini/usage');
       const rows = (u.perProject||[]).map(p=>'<tr><td>'+esc(p.project)+'</td><td style="text-align:right">'+Number(p.tokens||0).toLocaleString()+'</td><td style="text-align:right">'+(p.requests==null?'—':p.requests)+'</td></tr>').join('');
+      const c = u.credits || {balance:0,totalUsed:0,records:[]};
+      const kindLabel = function(k){ return k==='build'?t('构建','Build'):k==='poster'?t('海报','Poster'):k==='hackathon'?t('举办','Host'):k==='chat'?t('对话','Chat'):k; };
+      const statusLabel = function(s){ return (s==='settled'||s==='recorded'||s==='spent')?t('已扣','charged'):s==='reserved'?t('预留','held'):s==='released'?t('已退','refunded'):s==='free'?t('免费','free'):s; };
+      const crows = (c.records||[]).map(function(r){ return '<tr><td class="muted" style="font-size:12px">'+esc(new Date((r.at||0)*1000).toLocaleString())+'</td><td>'+esc(r.who||'')+'</td><td>'+kindLabel(r.kind)+'</td><td>'+statusLabel(r.status)+'</td><td style="text-align:right">'+(r.credits||0)+'</td><td style="text-align:right;color:var(--muted)">'+(r.tokens?Number(r.tokens).toLocaleString():'—')+'</td></tr>'; }).join('');
       $('#usageBox').innerHTML =
-        '<div class="row" style="gap:20px;flex-wrap:wrap;align-items:flex-end">'
-        + '<div><div class="muted">'+t('总 token','Total tokens')+'</div><div style="font-size:26px;font-weight:700">'+Number(u.totalTokens||0).toLocaleString()+'</div></div>'
-        + '<div><div class="muted">'+t('参赛者','Participants')+'</div><div style="font-size:26px;font-weight:700">'+(u.participants||0)+'</div></div>'
+        // ---- credits: balance + total used + spend records ----
+        '<div class="row" style="gap:28px;flex-wrap:wrap;align-items:flex-end;margin-bottom:4px">'
+        + '<div><div class="muted">💳 '+t('积分余额','Credit balance')+'</div><div style="font-size:28px;font-weight:800">'+(c.balance||0)+'</div></div>'
+        + '<div><div class="muted">'+t('本场已用','Used this event')+'</div><div style="font-size:28px;font-weight:800">'+(c.totalUsed||0)+'</div></div>'
+        + '<a href="/pricing" onclick="go(\'/pricing\');return false" style="font-weight:600;padding-bottom:6px">'+t('充值 →','Top up →')+'</a>'
+        + '</div>'
+        + '<table style="width:100%;margin-top:10px;border-collapse:collapse;font-size:14px"><thead><tr>'
+        +   '<th style="text-align:left;border-bottom:1px solid var(--line,#333)">'+t('时间','Time')+'</th><th style="text-align:left;border-bottom:1px solid var(--line,#333)">'+t('谁','Who')+'</th><th style="text-align:left;border-bottom:1px solid var(--line,#333)">'+t('类型','Type')+'</th><th style="text-align:left;border-bottom:1px solid var(--line,#333)">'+t('状态','Status')+'</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">'+t('积分','Credits')+'</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">token</th>'
+        + '</tr></thead><tbody>'+(crows||'<tr><td colspan="6" class="muted">'+t('暂无消费记录','No spend yet')+'</td></tr>')+'</tbody></table>'
+        // ---- token usage (WorkBench) ----
+        + '<hr style="border:0;border-top:1px solid var(--line);margin:18px 0 12px">'
+        + '<div class="row" style="gap:20px;flex-wrap:wrap;align-items:flex-end">'
+        + '<div><div class="muted">'+t('总 token','Total tokens')+'</div><div style="font-size:22px;font-weight:700">'+Number(u.totalTokens||0).toLocaleString()+'</div></div>'
+        + '<div><div class="muted">'+t('参赛者','Participants')+'</div><div style="font-size:22px;font-weight:700">'+(u.participants||0)+'</div></div>'
         + (u.mock?'<span class="chip" style="border-color:#d97706;color:#d97706">mock</span>':'')
         + '</div>'
         + '<table style="width:100%;margin-top:14px;border-collapse:collapse"><thead><tr><th style="text-align:left;border-bottom:1px solid var(--line,#333)">'+t('参赛作品','Project')+'</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">token</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">'+t('请求','Requests')+'</th></tr></thead><tbody>'+(rows||'<tr><td colspan="3" class="muted">'+t('暂无用量','No usage yet')+'</td></tr>')+'</tbody></table>'
