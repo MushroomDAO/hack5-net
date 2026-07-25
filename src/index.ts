@@ -22,6 +22,10 @@ interface Env {
   ADMIN_PASSCODE: string;
   PLATFORM_ADMIN_EMAILS?: string; // comma/space-separated platform operator emails (can set user plan)
   GITHUB_TOKEN?: string;
+  // GitHub OAuth (freeze-bypass): a >2yr GitHub account skips the 7-day new-account hosting cooldown.
+  // Set both via `wrangler secret put`. When either is unset the feature is disabled (button hidden, no route).
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
   RESEND_API_KEY?: string;
   MAIL_FROM?: string;
   DEV_MODE?: string;
@@ -142,6 +146,8 @@ export default {
       if (path === "/api/platform/login/request" && method === "POST") return platformLoginRequest(request, env);
       if (path === "/api/platform/login/verify" && method === "POST") return platformLoginVerify(request, env);
       if (path === "/api/platform/logout" && method === "POST") return platformLogout(request);
+      if (path === "/api/platform/github/start" && method === "GET") return githubOauthStart(request, env);
+      if (path === "/api/platform/github/callback" && method === "GET") return githubOauthCallback(request, env);
       if (path === "/api/platform/hackathons" && method === "POST") return createHackathon(request, env);
       if (path === "/api/platform/admin/users" && method === "GET") return adminListUsers(request, env);
       if (path === "/api/platform/admin/set-plan" && method === "POST") return adminSetPlan(request, env);
@@ -521,8 +527,9 @@ async function getUser(request: Request, env: Env): Promise<UserAuth | null> {
 async function platformMe(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ email: null });
-  const row = await env.DB.prepare("SELECT quota, plan, created_at FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string; created_at: number }>();
+  const row = await env.DB.prepare("SELECT quota, plan, created_at, github_login, github_created_at FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string; created_at: number; github_login: string | null; github_created_at: number | null }>();
   const quota = row?.quota ?? 1;
+  const githubAged = row?.github_created_at != null && unixNow() - Number(row.github_created_at) >= GITHUB_AGE_BYPASS_DAYS * 86400;
   const crow = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(user.email).first<{ credits: number }>();
   const openCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'open'").bind(user.email).first<{ c: number }>();
   const list = await env.DB.prepare(
@@ -539,6 +546,9 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
     costs: { open: hackathonCost(env, "open"), secret: hackathonCost(env, "secret"), mini: hackathonCost(env, "mini") },
     openUsed: openCount?.c ?? 0, // regular hackathons already created → first one is free
     createdAt: row?.created_at ?? null, // account age → the 7-day new-account cooldown
+    githubAged, // verified a >2yr GitHub account → bypasses the cooldown
+    githubLogin: row?.github_login ?? null,
+    githubOauth: !!(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET), // feature configured → show the verify button
     isOperator: isOperatorEmail(env, user.email),
     used: list.results.length,
     hackathons: list.results.map((h) => ({ subdomain: h.subdomain, name: h.name, url: `https://${h.subdomain}.hack5.net` })),
@@ -757,6 +767,124 @@ function platformLogout(request: Request): Response {
 function userCookie(request: Request, token: string, maxAge: number): string {
   const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
   return `${USER_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+// ---- GitHub OAuth: a >2yr GitHub account bypasses the 7-day new-account hosting cooldown ----------
+// Lightweight raw OAuth (no SDK): authorize redirect → code exchange → GET /user → read created_at.
+// No new deps, no session table — the flow is bound to the logged-in email via a short-lived signed state.
+const GITHUB_AGE_BYPASS_DAYS = 730; // 2 years
+
+type GithubState = { email: string; nonce: string; exp: number };
+
+async function signGithubState(env: Env, payload: GithubState): Promise<string> {
+  const body = b64urlEncode(JSON.stringify(payload));
+  const sig = await hmacHex(utf8(env.AUTH_SECRET), "gh:" + body); // domain-separated from user cookies
+  return `${body}.${sig}`;
+}
+
+async function readGithubState(env: Env, raw: string | null): Promise<GithubState | null> {
+  if (!raw) return null;
+  const dot = raw.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const body = raw.slice(0, dot);
+  const expected = await hmacHex(utf8(env.AUTH_SECRET), "gh:" + body);
+  if (!timingSafeEqual(raw.slice(dot + 1), expected)) return null;
+  try {
+    const p = JSON.parse(b64urlDecode(body)) as GithubState;
+    if (!p?.email || typeof p.exp !== "number" || p.exp < unixNow()) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+// Redirect back to the dashboard with a status the SPA toasts (?github=<reason>). SameSite=Lax cookies
+// ride along on this top-level GET, so the user stays logged in.
+function githubRedirect(request: Request, reason: string, extra?: string): Response {
+  const origin = new URL(request.url).origin;
+  return Response.redirect(`${origin}/start?github=${reason}${extra ? "&" + extra : ""}`, 302);
+}
+
+async function githubOauthStart(request: Request, env: Env): Promise<Response> {
+  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) return githubRedirect(request, "off");
+  const user = await getUser(request, env);
+  if (!user) return githubRedirect(request, "login"); // must be logged in so we know whose account to unlock
+  const state = await signGithubState(env, { email: user.email, nonce: crypto.randomUUID(), exp: unixNow() + 600 });
+  const origin = new URL(request.url).origin;
+  const auth = new URL("https://github.com/login/oauth/authorize");
+  auth.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
+  auth.searchParams.set("redirect_uri", `${origin}/api/platform/github/callback`);
+  auth.searchParams.set("scope", "read:user");
+  auth.searchParams.set("state", state);
+  auth.searchParams.set("allow_signup", "false");
+  return Response.redirect(auth.toString(), 302);
+}
+
+async function githubOauthCallback(request: Request, env: Env): Promise<Response> {
+  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) return githubRedirect(request, "off");
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const st = await readGithubState(env, url.searchParams.get("state"));
+  if (!code || !st) return githubRedirect(request, "state"); // CSRF / expired / tampered → refuse
+  // Login-CSRF guard: the browser completing the redirect MUST be the same logged-in account that
+  // started the flow. A validly-signed `state` alone is not enough — it could have been issued to a
+  // different party and handed to a victim, binding the victim's real GitHub identity to the attacker's
+  // account. The hv_user cookie rides along on this top-level SameSite=Lax GET, so this is safe.
+  const sessionUser = await getUser(request, env);
+  if (!sessionUser || sessionUser.email !== st.email) return githubRedirect(request, "mismatch");
+  const email = sessionUser.email; // source of truth = the live session (state.email is a redundant match)
+  const redirectUri = `${url.origin}/api/platform/github/callback`;
+
+  // 1) Exchange the code for a user access token.
+  let token = "";
+  try {
+    const tr = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": "hack5-net" },
+      body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code, redirect_uri: redirectUri }),
+    });
+    const tj = (await tr.json().catch(() => null)) as { access_token?: string } | null;
+    token = tj?.access_token ?? "";
+  } catch {
+    return githubRedirect(request, "error");
+  }
+  if (!token) return githubRedirect(request, "error");
+
+  // 2) Read the GitHub profile → login + created_at (public fields; GitHub requires a User-Agent header).
+  let login = "";
+  let createdIso = "";
+  try {
+    const ur = await fetch("https://api.github.com/user", {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "hack5-net" },
+    });
+    const uj = (await ur.json().catch(() => null)) as { login?: string; created_at?: string } | null;
+    login = uj?.login ?? "";
+    createdIso = uj?.created_at ?? "";
+  } catch {
+    return githubRedirect(request, "error");
+  }
+  const createdSec = createdIso ? Math.floor(new Date(createdIso).getTime() / 1000) : 0;
+  if (!login || !createdSec || !Number.isFinite(createdSec)) return githubRedirect(request, "error");
+
+  const ageDays = (unixNow() - createdSec) / 86400;
+  if (ageDays < GITHUB_AGE_BYPASS_DAYS) {
+    return githubRedirect(request, "young", `days=${Math.max(0, Math.ceil(GITHUB_AGE_BYPASS_DAYS - ageDays))}`);
+  }
+
+  // 3) Anti-abuse: bind one aged GitHub account to exactly ONE hack5 email. Already bound elsewhere →
+  //    refuse, else a single old GitHub could unlock unlimited farmed emails. The SELECT is the fast-path
+  //    check; the UNIQUE INDEX on users(github_login) (migration 0026) is the real guarantee — it closes the
+  //    TOCTOU window where two concurrent binds of the same GitHub account both pass the SELECT.
+  const clash = await env.DB.prepare("SELECT email FROM users WHERE github_login = ? AND email <> ? LIMIT 1").bind(login, email).first<{ email: string }>();
+  if (clash) return githubRedirect(request, "inuse");
+
+  try {
+    await env.DB.prepare("UPDATE users SET github_login = ?, github_created_at = ? WHERE email = ?").bind(login, createdSec, email).run();
+  } catch {
+    // UNIQUE(github_login) violation → a concurrent callback bound this GitHub account to another email first.
+    return githubRedirect(request, "inuse");
+  }
+  return githubRedirect(request, "ok");
 }
 
 // ---- Participant session (email-verified, per-tenant) ---------------------------------------------
@@ -983,15 +1111,16 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
 
   const modeLabel = mode === "secret" ? "企业私密" : mode === "mini" ? "mini" : "普通";
-  const urow = await env.DB.prepare("SELECT plan, created_at FROM users WHERE email = ?").bind(user.email).first<{ plan: string; created_at: number }>();
+  const urow = await env.DB.prepare("SELECT plan, created_at, github_created_at FROM users WHERE email = ?").bind(user.email).first<{ plan: string; created_at: number; github_created_at: number | null }>();
   const paid = urow?.plan === "paid";
   // Anti-abuse cooldown: a brand-new account (< 7 days) can't host, to stop signup-farming. Topping up
-  // (operator sets plan='paid') unlocks it immediately; binding a 2-year-old GitHub account will too once
-  // GitHub OAuth ships (TODO). Existing/paid accounts skip this entirely.
+  // (operator sets plan='paid') unlocks it immediately; so does binding a >2yr GitHub account via OAuth
+  // (github_created_at is set only after ownership is proven). Existing/paid accounts skip this entirely.
   const acctAgeDays = urow?.created_at ? (unixNow() - Number(urow.created_at)) / 86400 : 999;
-  if (!paid && acctAgeDays < 7) {
+  const githubAged = urow?.github_created_at != null && unixNow() - Number(urow.github_created_at) >= GITHUB_AGE_BYPASS_DAYS * 86400;
+  if (!paid && !githubAged && acctAgeDays < 7) {
     return json(
-      { error: `新注册账户需满 7 天才能举办黑客松(还差 ${Math.max(1, Math.ceil(7 - acctAgeDays))} 天);充值后立即解锁 / New accounts can host after a 7-day cooldown — top up to unlock now`, cooldownDays: Math.max(1, Math.ceil(7 - acctAgeDays)), pricingUrl: "/pricing", upgrade: true },
+      { error: `新注册账户需满 7 天才能举办黑客松(还差 ${Math.max(1, Math.ceil(7 - acctAgeDays))} 天);充值或绑定满 2 年的 GitHub 账户可立即解锁 / New accounts can host after a 7-day cooldown — top up or verify a 2-year-old GitHub account to unlock now`, cooldownDays: Math.max(1, Math.ceil(7 - acctAgeDays)), pricingUrl: "/pricing", githubUrl: (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) ? "/api/platform/github/start" : null, upgrade: true },
       403,
     );
   }
@@ -4952,7 +5081,7 @@ const APP_HTML = String.raw`<!doctype html>
     const paidAcct = ME_USER.plan==='paid';
     // 7-day new-account cooldown (server-enforced); paid unlocks it immediately.
     const ageDays = ME_USER.createdAt ? (Date.now()/1000 - ME_USER.createdAt)/86400 : 999;
-    const frozen = !paidAcct && ageDays < 7;
+    const frozen = !paidAcct && !ME_USER.githubAged && ageDays < 7; // >2yr GitHub verify also unlocks
     const cooldownLeft = Math.max(1, Math.ceil(7 - ageDays));
     const canCreate = !frozen && bal >= cost; // every account pays by credits; topping up just adds balance
     // 3-way mode picker so Mini / Enterprise are reachable straight from the dashboard (not just /pricing).
@@ -4960,7 +5089,20 @@ const APP_HTML = String.raw`<!doctype html>
                     ['mini','✨ Mini', (costs.mini!=null?costs.mini:50)+t(' 积分',' cr')],
                     ['secret','🔒 '+t('企业','Enterprise'), (costs.secret!=null?costs.secret:300)+t(' 积分',' cr')]];
     const modeSel='<div class="row" style="gap:8px;flex-wrap:wrap;margin:2px 0 16px">'+modeDefs.map(function(m){ const on=(cm===m[0]); return '<button class="hmode'+(on?'':' ghost')+'" data-m="'+m[0]+'" style="flex:1;min-width:118px;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 12px;line-height:1.25">'+m[1]+'<span style="font-size:11px;opacity:.8;font-weight:500">'+m[2]+'</span></button>'; }).join('')+'</div>';
-    app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'
+    // Toast the result of a GitHub-verify round-trip (?github=ok|young|inuse|login|state|off|error), then clean the URL.
+    const ghp = new URLSearchParams(location.search).get('github');
+    const ghNote = ghp ? ('<div class="notice" style="margin:8px 0">'+(({
+      ok: t('✅ GitHub 账户验证成功,已解锁举办权限。','✅ GitHub verified — hosting unlocked.'),
+      young: t('⚠️ 该 GitHub 账户注册未满 2 年,无法解锁。','⚠️ That GitHub account is under 2 years old — cannot unlock.'),
+      inuse: t('⚠️ 该 GitHub 账户已绑定其他邮箱。','⚠️ That GitHub account is already linked to another email.'),
+      mismatch: t('⚠️ 当前登录账户与验证发起账户不一致,请重新发起验证。','⚠️ Session mismatch — restart the verification from your own account.'),
+      login: t('请先登录再验证 GitHub。','Log in first, then verify with GitHub.'),
+      state: t('验证会话已过期,请重试。','Verification session expired — please retry.'),
+      off: t('GitHub 验证暂未开放。','GitHub verification is not enabled.'),
+      error: t('GitHub 验证失败,请重试。','GitHub verification failed — please retry.')
+    })[ghp]||t('GitHub 验证已处理。','GitHub verification processed.'))+'</div>') : '';
+    if(ghp){ history.replaceState(null,'','/start'); }
+    app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'+ghNote
       + '<p class="muted">💳 '+t('积分余额','Credits')+' <b>'+bal+'</b> · '+t('普通 80 / 企业 300 / mini 50 积分一场','open 80 / secret 300 / mini 50 per event')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('赚更多积分 →','Earn more →')+'</a></p>'
       + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
@@ -4978,7 +5120,7 @@ const APP_HTML = String.raw`<!doctype html>
             + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b> · '+t('余额','balance')+' '+bal+'</div>'
             + '<div class="row" style="margin-top:10px"><button id="hCreate">'+(cm==='mini'?t('✨ 5 分钟创建','✨ Create in 5 min'):t('创建并部署','Create & deploy'))+'</button></div><div id="hMsg"></div>'
           : (frozen
-              ? '<div class="notice">🧊 '+t('新注册账户满 7 天后可举办','New accounts can host after a 7-day cooldown')+'('+t('还差','~')+' '+cooldownLeft+' '+t('天','d')+')。'+t('充值后立即解锁(后续也可绑定 2 年以上 GitHub 账户)。','Top up to unlock now — or bind a 2-year-old GitHub account later.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值解锁','Top up to unlock')+'</button></div>'
+              ? '<div class="notice">🧊 '+t('新注册账户满 7 天后可举办','New accounts can host after a 7-day cooldown')+'('+t('还差','~')+' '+cooldownLeft+' '+t('天','d')+')。'+t('充值可立即解锁,或用满 2 年的 GitHub 账户验证解锁。','Top up to unlock now, or verify a 2-year-old GitHub account.')+'</div><div class="row" style="margin-top:12px;gap:8px"><button id="hUpgrade">'+t('去充值解锁','Top up to unlock')+'</button>'+(ME_USER.githubOauth?'<button id="hGithub" class="ghost">'+t('用 GitHub 验证(满 2 年)','Verify via GitHub (2+ yrs)')+'</button>':'')+'</div>'
               : '<div class="notice">'+t('积分不足','Not enough credits')+':'+t('本次需','need')+' '+cost+' '+t('积分,你当前','credits, you have')+' '+bal+'。'+t('充值后即可举办。','Top up to host.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值','Top up')+'</button></div>'))
       + '</div></div>';
     document.querySelectorAll('.hmode').forEach(function(b){ b.addEventListener('click',function(){ window.__createMode = b.dataset.m==='open'?null:b.dataset.m; renderDashboard(); }); });
@@ -5020,6 +5162,7 @@ const APP_HTML = String.raw`<!doctype html>
       });
     } else {
       $('#hUpgrade').addEventListener('click', ()=>go('/pricing'));
+      const gh=$('#hGithub'); if(gh) gh.addEventListener('click', ()=>{ location.href='/api/platform/github/start'; });
     }
   }
 
