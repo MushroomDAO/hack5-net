@@ -4036,6 +4036,11 @@ const APP_HTML = String.raw`<!doctype html>
     .brandchev{color:#14532d}
     :root[data-theme="dark"] #brandName{color:#5fd39a}
     :root[data-theme="dark"] .brandchev{color:#5fd39a}
+    .langseg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;vertical-align:middle}
+    .langseg button{border:0;background:transparent;color:var(--muted);font-size:11px;font-weight:600;padding:3px 7px;cursor:pointer;line-height:1.5}
+    .langseg button:hover{color:var(--ink)}
+    .langseg button.on{background:#14532d;color:#fff}
+    :root[data-theme="dark"] .langseg button.on{background:#00ff41;color:#0a0e0a}
     .mark{width:30px;height:30px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
     nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     nav .who{color:var(--muted);font-size:13px;margin-right:4px}
@@ -4233,6 +4238,9 @@ const APP_HTML = String.raw`<!doctype html>
   const LANG_LABEL = { zh: '中文', en: 'EN', th: 'ไทย' };          // label of a given lang
   const LANG_HTMLLANG = { zh: 'zh-CN', en: 'en', th: 'th' };
   window.toggleLang = () => { LANG = LANG_NEXT[LANG] || 'zh'; lsSet('hv_lang', LANG); document.documentElement.lang = LANG_HTMLLANG[LANG] || 'zh-CN'; renderNav(); renderOrgFooter(); renderSponsorFooter(); route(); };
+  window.setLang = (l) => { if(!LANG_LABEL[l]) return; LANG = l; lsSet('hv_lang', LANG); document.documentElement.lang = LANG_HTMLLANG[LANG] || 'zh-CN'; renderNav(); renderOrgFooter(); renderSponsorFooter(); route(); };
+  // Compact 3-way language segmented control (中 / EN / ไทย) — small, low-footprint.
+  function langPicker(){ return '<span class="langseg">'+['zh','en','th'].map(function(l){ return '<button class="'+(LANG===l?'on':'')+'" onclick="setLang(\''+l+'\')">'+LANG_LABEL[l]+'</button>'; }).join('')+'</span>'; }
   // Thai dictionary, keyed by the Chinese source string (first arg of t). Covers the mini participant
   // journey (nav / register / my-hackathon / make / submit / gallery / common). Anything not here
   // falls back to English — coverage grows incrementally without breaking screens.
@@ -4551,7 +4559,7 @@ const APP_HTML = String.raw`<!doctype html>
       } else {
         hp += '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>';
       }
-      hp += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN / ไทย">'+LANG_LABEL[LANG_NEXT[LANG]]+'</button>';
+      hp += themeBtn() + ''+langPicker()+'';
       n.innerHTML = hp; return;
     }
     // Participant-facing nav is intentionally minimal: the public gallery plus a single
@@ -4568,7 +4576,7 @@ const APP_HTML = String.raw`<!doctype html>
     } else {
       h += '<button onclick="go(\'/judge\')">'+t('评审 / 管理','Judge / Admin')+'</button>';
     }
-    h += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN / ไทย">'+LANG_LABEL[LANG_NEXT[LANG]]+'</button>';
+    h += themeBtn() + ''+langPicker()+'';
     n.innerHTML = h;
   }
 
