@@ -1913,6 +1913,8 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
   // `deployed` — a stale/out-of-order `failed` must not un-deploy a live app. Makes retries idempotent.
   const current = row.build_state as BuildState | null;
   const advance = !current || (state === "failed" ? current !== "deployed" : BUILD_STATE_RANK[state] >= BUILD_STATE_RANK[current]);
+  // Did OUR write actually land? The credit side effects (settle/release) must fire only if so — see below.
+  let applied = false;
   if (advance) {
     // Signed (trusted) source, but validate scheme as defense-in-depth so only http(s) URLs are stored/rendered.
     const appUrl = body.appUrl && isHttpUrl(body.appUrl) ? body.appUrl : null;
@@ -1920,24 +1922,30 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
     // On failure, capture the reason (if WorkBench sent one) so the UI can show *why*; on any other
     // (forward) transition, clear a previous error. COALESCE keeps the old value if this event omits it.
     const buildError = state === "failed" ? String(body.reason || body.error || "").trim().slice(0, 500) || null : "";
-    await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, build_error = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, build_error) END, updated_at = ? WHERE id = ?")
-      .bind(state, appUrl, repo, repo, state === "failed" ? "f" : "", buildError, unixNow(), row.id)
+    // Optimistic-concurrency guard: only apply if the row is STILL in the state we read (`current`). A
+    // second concurrent writer — the cron reaper, or another callback — can move it between our SELECT
+    // and this UPDATE; without the guard our stale advance decision would overwrite theirs and (worse)
+    // still fire our credit side effects, double-benefiting (e.g. reaper refunds the hold, then we settle
+    // a "free" deploy). `build_state IS ?` is NULL-safe in SQLite so a first callback (current=null) matches.
+    const res = await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, build_error = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, build_error) END, updated_at = ? WHERE id = ? AND build_state IS ?")
+      .bind(state, appUrl, repo, repo, state === "failed" ? "f" : "", buildError, unixNow(), row.id, current)
       .run();
+    applied = res.meta.changes === 1;
   }
-  // The coding loop finished — reconcile credits. On `deployed`, settle the reserved hold to the build's
-  // actual cost (from WorkBench usage), refunding the overheld part; on `failed`, release the hold so a
-  // failed build costs nothing. Free (unreserved) builds are just recorded for accounting. Best-effort:
-  // never fails the callback. Charging is safe because the hold was placed on a verified owning account.
-  if (state === "deployed" && row.email) {
+  // Reconcile credits ONLY when our UPDATE actually landed. If it didn't, a racing reaper/callback already
+  // owns this transition and its side effects are authoritative — running ours too would double-count.
+  // On `deployed`, settle the reserved hold to the build's actual cost (refunding the overheld part); on
+  // `failed`, release the hold so a failed build costs nothing. Best-effort: never fails the callback.
+  if (applied && state === "deployed" && row.email) {
     await settleBuildCost(env, row.id, row.email, row.tenant_id ?? "", clientSlug, projectSlug);
-  } else if (state === "failed") {
+  } else if (applied && state === "failed") {
     await releaseBuildHold(env, clientSlug, projectSlug);
   }
   // Auto-deploy: when the code is ready (coding_done → reviewing), publish it to CF Pages automatically
   // so the participant gets a live URL without a manual click. Best-effort — the manual Deploy button
   // still works if this fails. The subsequent `deployed` callback remains the source of truth for
   // app_url + credit settle. Set MINIAPP_AUTO_DEPLOY=off to disable.
-  if (advance && state === "reviewing" && env.MINIAPP_AUTO_DEPLOY !== "off") {
+  if (applied && state === "reviewing" && env.MINIAPP_AUTO_DEPLOY !== "off") {
     const full = await env.DB.prepare("SELECT wb_client, wb_project, repo_url FROM submissions WHERE id = ?")
       .bind(row.id)
       .first<{ wb_client: string | null; wb_project: string | null; repo_url: string | null }>();
@@ -1949,7 +1957,7 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
       }
     }
   }
-  return json({ ok: true, id: row.id, state: advance ? state : current, applied: advance });
+  return json({ ok: true, id: row.id, state: applied ? state : current, applied });
 }
 
 // CC-61 pre-estimate proxy: hand the idea/spec to loop's /estimate (admin token; free, no job) to get a
@@ -2082,7 +2090,10 @@ async function releaseBuildHold(env: Env, clientSlug: string, projectSlug: strin
 // moment isn't clobbered. If a genuine W5 arrives later, the callback's monotonic guard keeps `failed`
 // (a hung job never reaches `deployed`) and overwrites the placeholder reason with WorkBench's real one.
 async function reapStaleBuilds(env: Env): Promise<{ reaped: number }> {
-  const minutes = Number(env.STALE_BUILD_MINUTES ?? "120") || 120;
+  // Only a finite, positive override wins — so an operator CAN set a small cutoff for testing, while
+  // "0"/negative/garbage falls back to the 120-minute default instead of being silently coerced to it.
+  const override = Number(env.STALE_BUILD_MINUTES);
+  const minutes = Number.isFinite(override) && override > 0 ? override : 120;
   const cutoff = unixNow() - minutes * 60;
   const hours = Math.round((minutes / 60) * 10) / 10;
   const reason = `构建超时:${hours} 小时无进度回传(loop job 疑似悬空)`;
@@ -2093,17 +2104,23 @@ async function reapStaleBuilds(env: Env): Promise<{ reaped: number }> {
     .all<{ id: string; wb_client: string | null; wb_project: string | null }>();
   let reaped = 0;
   for (const r of stale.results ?? []) {
-    // Claim atomically: only flip a row that is still non-terminal, so a real callback that advanced it
-    // (or a concurrent reaper run) can't be undone. changes===1 means this run owns the transition.
-    const claimed = await env.DB.prepare(
-      "UPDATE submissions SET build_state = 'failed', build_error = ?, updated_at = ? WHERE id = ? AND build_state IN ('queued','planning','coding','reviewing')",
-    )
-      .bind(reason, unixNow(), r.id)
-      .run();
-    if (claimed.meta.changes === 1) {
-      reaped++;
-      // Refund the up-front hold (idempotent: only a still-'reserved' row is released). No-op for free builds.
-      if (r.wb_client && r.wb_project) await releaseBuildHold(env, r.wb_client, r.wb_project);
+    // Isolate each build: a DB error on one must not strand the rest of the batch (and a claimed row is
+    // now terminal, so an unreleased hold couldn't be retried on the next run — the refund must not be lost).
+    try {
+      // Claim atomically: only flip a row that is still non-terminal, so a real callback that advanced it
+      // (or a concurrent reaper run) can't be undone. changes===1 means this run owns the transition.
+      const claimed = await env.DB.prepare(
+        "UPDATE submissions SET build_state = 'failed', build_error = ?, updated_at = ? WHERE id = ? AND build_state IN ('queued','planning','coding','reviewing')",
+      )
+        .bind(reason, unixNow(), r.id)
+        .run();
+      if (claimed.meta.changes === 1) {
+        reaped++;
+        // Refund the up-front hold (idempotent: only a still-'reserved' row is released; never throws). No-op for free builds.
+        if (r.wb_client && r.wb_project) await releaseBuildHold(env, r.wb_client, r.wb_project);
+      }
+    } catch (e) {
+      console.error("reapStaleBuilds: iteration failed", r.id, String(e));
     }
   }
   if (reaped) console.log(`reapStaleBuilds: failed ${reaped} stale build(s) older than ${minutes}m`);
