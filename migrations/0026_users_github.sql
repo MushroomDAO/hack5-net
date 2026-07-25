@@ -9,3 +9,8 @@
 --                      time from this immutable value, so the 2-year threshold can be tuned later.
 ALTER TABLE users ADD COLUMN github_login TEXT;
 ALTER TABLE users ADD COLUMN github_created_at INTEGER;
+
+-- One aged GitHub account unlocks exactly ONE hack5 email. Enforce it in the DB (not just an app-level
+-- check-then-write) so two concurrent binds of the same account can't both slip through the TOCTOU window.
+-- Partial index → many rows can keep github_login = NULL; only non-null values must be unique.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_login ON users(github_login) WHERE github_login IS NOT NULL;

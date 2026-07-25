@@ -826,7 +826,13 @@ async function githubOauthCallback(request: Request, env: Env): Promise<Response
   const code = url.searchParams.get("code");
   const st = await readGithubState(env, url.searchParams.get("state"));
   if (!code || !st) return githubRedirect(request, "state"); // CSRF / expired / tampered → refuse
-  const email = st.email; // authoritative: we signed it at start from the session email
+  // Login-CSRF guard: the browser completing the redirect MUST be the same logged-in account that
+  // started the flow. A validly-signed `state` alone is not enough — it could have been issued to a
+  // different party and handed to a victim, binding the victim's real GitHub identity to the attacker's
+  // account. The hv_user cookie rides along on this top-level SameSite=Lax GET, so this is safe.
+  const sessionUser = await getUser(request, env);
+  if (!sessionUser || sessionUser.email !== st.email) return githubRedirect(request, "mismatch");
+  const email = sessionUser.email; // source of truth = the live session (state.email is a redundant match)
   const redirectUri = `${url.origin}/api/platform/github/callback`;
 
   // 1) Exchange the code for a user access token.
@@ -866,11 +872,18 @@ async function githubOauthCallback(request: Request, env: Env): Promise<Response
   }
 
   // 3) Anti-abuse: bind one aged GitHub account to exactly ONE hack5 email. Already bound elsewhere →
-  //    refuse, else a single old GitHub could unlock unlimited farmed emails.
+  //    refuse, else a single old GitHub could unlock unlimited farmed emails. The SELECT is the fast-path
+  //    check; the UNIQUE INDEX on users(github_login) (migration 0026) is the real guarantee — it closes the
+  //    TOCTOU window where two concurrent binds of the same GitHub account both pass the SELECT.
   const clash = await env.DB.prepare("SELECT email FROM users WHERE github_login = ? AND email <> ? LIMIT 1").bind(login, email).first<{ email: string }>();
   if (clash) return githubRedirect(request, "inuse");
 
-  await env.DB.prepare("UPDATE users SET github_login = ?, github_created_at = ? WHERE email = ?").bind(login, createdSec, email).run();
+  try {
+    await env.DB.prepare("UPDATE users SET github_login = ?, github_created_at = ? WHERE email = ?").bind(login, createdSec, email).run();
+  } catch {
+    // UNIQUE(github_login) violation → a concurrent callback bound this GitHub account to another email first.
+    return githubRedirect(request, "inuse");
+  }
   return githubRedirect(request, "ok");
 }
 
@@ -5082,6 +5095,7 @@ const APP_HTML = String.raw`<!doctype html>
       ok: t('✅ GitHub 账户验证成功,已解锁举办权限。','✅ GitHub verified — hosting unlocked.'),
       young: t('⚠️ 该 GitHub 账户注册未满 2 年,无法解锁。','⚠️ That GitHub account is under 2 years old — cannot unlock.'),
       inuse: t('⚠️ 该 GitHub 账户已绑定其他邮箱。','⚠️ That GitHub account is already linked to another email.'),
+      mismatch: t('⚠️ 当前登录账户与验证发起账户不一致,请重新发起验证。','⚠️ Session mismatch — restart the verification from your own account.'),
       login: t('请先登录再验证 GitHub。','Log in first, then verify with GitHub.'),
       state: t('验证会话已过期,请重试。','Verification session expired — please retry.'),
       off: t('GitHub 验证暂未开放。','GitHub verification is not enabled.'),
