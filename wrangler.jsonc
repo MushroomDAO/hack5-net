@@ -14,6 +14,9 @@
     { "pattern": "hack5.net", "custom_domain": true },
     { "pattern": "*.hack5.net/*", "zone_name": "hack5.net" }
   ],
+  // Stale-build reaper: sweep builds WorkBench left hung (no terminal callback) every 15 min so a
+  // participant's credit hold is refunded and the UI stops spinning. See reapStaleBuilds in src/index.ts.
+  "triggers": { "crons": ["*/15 * * * *"] },
   "d1_databases": [
     {
       "binding": "DB",
