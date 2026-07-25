@@ -996,15 +996,16 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     );
   }
   // Credit-priced creation. Regular's FIRST event is free; then open 80 / secret 300 / mini 50, deducted
-  // from the organizer's credit balance (participant_credits, same pool as mini participants). Operator-
-  // comped plan='paid' accounts create free. mini participants still pay per-build by token usage.
+  // from the organizer's credit balance (participant_credits, same pool as mini participants) — for EVERY
+  // account, topped-up or not (there is no "paid account creates free" tier; topping up just adds credits).
+  // plan='paid' only lifts the 7-day new-account cooldown. mini participants still pay per-build by token usage.
   let cost = hackathonCost(env, mode);
   if (mode === "open") {
     const openCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'open'").bind(user.email).first<{ c: number }>();
     if ((openCount?.c ?? 0) === 0) cost = 0; // 常规黑客松首场免费
   }
   let creditsCharged = 0;
-  if (!paid && cost > 0) {
+  if (cost > 0) {
     // Atomic conditional deduct — can't go below zero, so a concurrent create can't overdraw the balance.
     const deducted = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
       .bind(cost, unixNow(), user.email, cost)
@@ -1046,7 +1047,7 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   // First-free race close: two concurrent "first regular" creates can both read openCount==0 and go free.
   // Resolve deterministically — only the EARLIEST (created_at, id) open tenant keeps it free; any later one
   // must pay the full price now, or be rolled back if it can't afford it. (mini/secret have no free tier.)
-  if (mode === "open" && cost === 0 && !paid) {
+  if (mode === "open" && cost === 0) {
     const mine = await env.DB.prepare("SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'open' ORDER BY created_at ASC, id ASC")
       .bind(user.email)
       .all<{ id: string }>();
@@ -4155,7 +4156,6 @@ const APP_HTML = String.raw`<!doctype html>
     '关于 Hack5':'เกี่ยวกับ Hack5', '人人可办的黑客松平台':'แพลตฟอร์มแฮกกาธอนที่ทุกคนจัดได้',
     '<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它让任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点:<b>第一场免费</b>、记录永久保留;想办更多场次、或用上动态海报、一键转发、开发者社区 Bot 等高级功能,可订阅付费。':'<b>hack5.net</b> อยู่ภายใต้ <b>Mycelium</b> — องค์กรสินค้าสาธารณะดิจิทัล (Digital Public Goods) ทุกคนสามารถเริ่มและดีพลอยเว็บแฮกกาธอนของตัวเองได้ <b>ใน 10 นาที</b>: <b>งานแรกฟรี</b> เก็บบันทึกถาวร หากอยากจัดเพิ่มหรือใช้ฟีเจอร์ขั้นสูงอย่างโปสเตอร์ไดนามิก แชร์คลิกเดียว บอทคอมมิวนิตี้ สมัครสมาชิกได้',
     '运营 · 账户管理':'ผู้ดูแลระบบ · จัดการบัญชี',
-    '把用户设为 paid → 无限开企业私密 + mini + 常规;free → 走免费额度(企业私密免费不可开、mini 每人首场免费)。':'ตั้งผู้ใช้เป็น paid → เปิดองค์กรส่วนตัว + mini + ทั่วไปได้ไม่จำกัด; free → ใช้โควตาฟรี (องค์กรส่วนตัวเปิดฟรีไม่ได้ mini ฟรีงานแรกต่อคน)',
     '用户邮箱':'อีเมลผู้ใช้', '额度(可选)':'โควตา (ไม่บังคับ)', '设置':'ตั้งค่า', '用户列表':'รายชื่อผู้ใช้',
     '设置中…':'กำลังตั้งค่า…', '额度':'โควตา', '黑客松':'แฮกกาธอน', '暂无用户':'ยังไม่มีผู้ใช้', '请填邮箱':'กรุณากรอกอีเมล',
     '请选择图片文件':'กรุณาเลือกไฟล์รูปภาพ', '图片太复杂,换一张更简单的 Logo':'รูปซับซ้อนเกินไป เปลี่ยนเป็นโลโก้ที่เรียบง่ายกว่านี้',
@@ -4315,6 +4315,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(CONFIG.platform){
       let hp = '<button class="ghost" onclick="go(\'/guide\')">'+t('指南','Guide')+'</button>'
              + '<button class="ghost" onclick="go(\'/pricing\')">'+t('价格','Pricing')+'</button>'
+             + '<button class="ghost" onclick="go(\'/rewards\')">'+t('🎁 赚积分','🎁 Rewards')+'</button>'
              + '<button class="ghost" onclick="go(\'/media\')">'+t('媒体','Media')+'</button>'
              + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
       if(ME_USER.email){
@@ -4359,6 +4360,7 @@ const APP_HTML = String.raw`<!doctype html>
       if(p === '/guide') return renderGuide();
       if(p === '/media') return renderMedia();
       if(p === '/pricing') return renderPricing();
+      if(p === '/rewards') return renderRewards();
       if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
       if(p === '/settings') return ME_USER.email ? renderSettings() : renderPlatformLogin();
       if(p === '/operator') return ME_USER.isOperator ? renderOperator() : (ME_USER.email ? renderDashboard() : renderPlatformLogin());
@@ -4603,7 +4605,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderPricing(){
     const TOPUPS = [[10,500],[50,2500],[100,5000]]; // [USD, credits] — 1 积分 = $0.02
     app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('积分与价格','Credits & pricing')+'</h1>'
-      + '<p class="guide-sub">'+t('按积分举办黑客松 · 新用户注册即送 300 积分','Host hackathons with credits · new accounts get 300 free credits')+'</p></div>'
+      + '<p class="guide-sub">'+t('按积分举办黑客松 · 新用户注册即送 300 积分','Host hackathons with credits · new accounts get 300 free credits')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('更多赚积分方式 →','More ways to earn →')+'</a></p></div>'
       + '<div class="price-grid">'
       // Regular
       + '<div class="price-card"><div class="pc-ico">⚡</div><h2>'+t('常规黑客松','Regular')+'</h2>'
@@ -4649,6 +4651,48 @@ const APP_HTML = String.raw`<!doctype html>
       window.__createMode = (plan==='mini'||plan==='secret') ? plan : null; // 'open' → regular (no preset)
       go('/start'); // → the create flow (or platform login first), with the mode preselected
     }));
+  }
+  // ---------------- rewards / earn credits (activity page) ----------------
+  function renderRewards(){
+    const BLOG='https://blog.mushroom.cv/';
+    app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>🎁 '+t('赚积分','Earn credits')+'</h1>'
+      + '<p class="guide-sub">'+t('注册即送 300 积分,还有更多方式一起长黑客松 —— 把 Hack5 分享出去。','Sign up for 300 free credits — and here are more ways to earn while spreading Hack5.')+'</p></div>'
+      + '<div class="price-grid">'
+      // 1) signup grant (live)
+      + '<div class="price-card"><div class="pc-ico">🎁</div><h2>'+t('注册即送','Sign-up bonus')+'</h2>'
+      + '<div class="pc-tag">'+t('已自动到账','Auto-credited')+'</div>'
+      + '<p>'+t('新账户注册即得 300 积分,足够办 3–4 场常规黑客松 —— 而且第一场还免费。','New accounts get 300 credits on sign-up — enough for 3–4 regular hackathons, and your first one is free.')+'</p>'
+      + '<div class="pc-price"><b>300 '+t('积分','credits')+'</b></div>'
+      + '<button class="pc-btn" onclick="go(\'/start\')">'+t('去发起 →','Host one →')+'</button></div>'
+      // 2) cost hook
+      + '<div class="price-card"><div class="pc-ico">💰</div><h2>'+t('一场只要 ¥12','Just $1.6 / event')+'</h2>'
+      + '<div class="pc-tag">'+t('超低成本','Ridiculously cheap')+'</div>'
+      + '<p>'+t('常规黑客松 80 积分一场 = 约 ¥12 / $1.6。分秒触达千万 Builder,把你的活动第一时间送到真正的开发者手里。','A regular hackathon is 80 credits ≈ ¥12 / $1.6 — and reaches millions of Builders the moment you launch.')+'</p>'
+      + '<div class="pc-price"><b>¥12 · $1.6</b> <span class="muted">/ '+t('场','event')+'</span></div>'
+      + '<button class="pc-btn" onclick="go(\'/pricing\')">'+t('看价格','See pricing')+'</button></div>'
+      // 3) write your story
+      + '<div class="price-card"><div class="pc-ico">📝</div><h2>'+t('分享你的体会','Share your story')+'</h2>'
+      + '<div class="pc-tag">'+t('投稿','Write')+'</div>'
+      + '<p>'+t('写下你参与或举办黑客松的体会,介绍你如何用 Hack5 发起一场活动。优秀投稿会在 Mycelium Blog 发布。','Write about joining or hosting a hackathon and how you used Hack5 — the best posts get published on Mycelium Blog.')+'</p>'
+      + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('投稿到 Mycelium Blog →','Submit to Mycelium Blog →')+'</button></a></div>'
+      // 4) subscribe blog
+      + '<div class="price-card"><div class="pc-ico">📰</div><h2>'+t('订阅 Mycelium Blog','Subscribe to the Blog')+'</h2>'
+      + '<div class="pc-tag">'+t('每月 +30 积分','+30 credits / month')+'</div>'
+      + '<p>'+t('订阅 Mycelium Blog,每月赠 30 积分。持续关注数字公共品与黑客松生态。','Subscribe to Mycelium Blog and get 30 credits every month while following the digital-public-goods ecosystem.')+'</p>'
+      + '<div class="pc-price"><b>+30 '+t('积分/月','cr / mo')+'</b></div>'
+      + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('去订阅 →','Subscribe →')+'</button></a></div>'
+      // 5) comment
+      + '<div class="price-card"><div class="pc-ico">💬</div><h2>'+t('评论一条 Post','Comment on a post')+'</h2>'
+      + '<div class="pc-tag">'+t('每条 +1 积分','+1 credit each')+'</div>'
+      + '<p>'+t('用你的 AI agent 账户在 Blog 文章下评论,每条 +1 积分。让你的 agent 帮你持续参与社区。','Comment on Blog posts with your AI agent account for +1 credit each — let your agent stay engaged for you.')+'</p>'
+      + '<div class="pc-price"><b>+1 '+t('积分/条','cr / comment')+'</b></div>'
+      + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('去评论 →','Go comment →')+'</button></a></div>'
+      + '</div>'
+      + '<p class="muted" style="text-align:center;margin-top:16px;font-size:12px">'+t('订阅与评论积分为社区活动奖励,发放以 Mycelium 运营核对为准(自动发放即将上线)。1 积分 = $0.02。','Blog subscribe & comment rewards are community incentives credited after operator verification (auto-crediting coming soon). 1 credit = $0.02.')+'</p>'
+      + '<div class="panel guide-cta" style="margin-top:22px"><h2>'+t('现在就发起你的黑客松','Launch your hackathon now')+'</h2>'
+      + '<p style="color:rgba(255,255,255,.88)">'+t('你已有的积分足够开始。常规首场免费,mini 50 / 企业 300 一场。','Your credits are enough to start — first regular event free, mini 50 / enterprise 300 per event.')+'</p>'
+      + '<a href="https://hack5.net/start"><button>🚀 '+t('去发起 →','Start now →')+'</button></a></div>'
+      + '</div>';
   }
   function renderMedia(){
     const rows = MEDIA.map(m=>'<tr><td><b>'+esc(m.platform)+'</b>'+(m.handle?'<div class="muted" style="font-size:12px">'+esc(m.handle)+'</div>':'')+'</td>'
@@ -4728,7 +4772,7 @@ const APP_HTML = String.raw`<!doctype html>
   // B — hack5 运营方(operator)账户管理:按 email 设 paid/free(+可选额度),替代手敲 SQL。
   async function renderOperator(){
     app.innerHTML = '<h1>'+t('运营 · 账户管理','Operator · Accounts')+'</h1>'
-      + '<div class="notice">'+t('把用户设为 paid → 无限开企业私密 + mini + 常规;free → 走免费额度(企业私密免费不可开、mini 每人首场免费)。','Set a user to paid for unlimited secret + mini + regular; free uses the free tiers.')+'</div>'
+      + '<div class="notice">'+t('把用户设为 paid = 已充值/可信,解除新账户 7 天冷冻,立即可举办;举办仍按积分扣(充值只是加积分,没有免扣账户)。','Setting a user to paid = topped-up/trusted: it only lifts the 7-day new-account cooldown so they can host immediately. Hosting still deducts credits — topping up just adds balance, there is no free-hosting tier.')+'</div>'
       + '<div class="panel" style="max-width:560px">'
       + '<label>'+t('用户邮箱','User email')+'</label><input id="opEmail" type="email" placeholder="user@example.com">'
       + '<div class="row" style="gap:8px;margin-top:8px;align-items:center">'
@@ -4910,14 +4954,19 @@ const APP_HTML = String.raw`<!doctype html>
     const ageDays = ME_USER.createdAt ? (Date.now()/1000 - ME_USER.createdAt)/86400 : 999;
     const frozen = !paidAcct && ageDays < 7;
     const cooldownLeft = Math.max(1, Math.ceil(7 - ageDays));
-    const canCreate = !frozen && (paidAcct || bal >= cost);
+    const canCreate = !frozen && bal >= cost; // every account pays by credits; topping up just adds balance
+    // 3-way mode picker so Mini / Enterprise are reachable straight from the dashboard (not just /pricing).
+    const modeDefs=[['open','⚡ '+t('常规','Regular'), firstOpenFree?t('首场免费','1st free'):((costs.open!=null?costs.open:80)+t(' 积分',' cr'))],
+                    ['mini','✨ Mini', (costs.mini!=null?costs.mini:50)+t(' 积分',' cr')],
+                    ['secret','🔒 '+t('企业','Enterprise'), (costs.secret!=null?costs.secret:300)+t(' 积分',' cr')]];
+    const modeSel='<div class="row" style="gap:8px;flex-wrap:wrap;margin:2px 0 16px">'+modeDefs.map(function(m){ const on=(cm===m[0]); return '<button class="hmode'+(on?'':' ghost')+'" data-m="'+m[0]+'" style="flex:1;min-width:118px;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 12px;line-height:1.25">'+m[1]+'<span style="font-size:11px;opacity:.8;font-weight:500">'+m[2]+'</span></button>'; }).join('')+'</div>';
     app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'
-      + '<p class="muted">💳 '+t('积分余额','Credits')+' <b>'+bal+'</b>'+(paidAcct?' · '+t('付费账户,创建免积分','paid — free to create'):' · '+t('普通 80 / 企业 300 / mini 50 积分一场','open 80 / secret 300 / mini 50 per event'))+'</p>'
+      + '<p class="muted">💳 '+t('积分余额','Credits')+' <b>'+bal+'</b> · '+t('普通 80 / 企业 300 / mini 50 积分一场','open 80 / secret 300 / mini 50 per event')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('赚更多积分 →','Earn more →')+'</a></p>'
       + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
+      + modeSel
       + (canCreate
-          ? '<div class="muted" style="margin-bottom:10px">'+t('模式','Mode')+': <b>'+modeLabel+'</b>'+(cm!=='open'?' · <a href="#" onclick="window.__createMode=null;renderDashboard();return false" style="font-size:12px">'+t('换常规','switch to regular')+'</a>':'')+'</div>'
-            + '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
+          ? '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
             + (cm==='mini' ? '' : '<label>'+t('子域名','Subdomain')+' <span class="muted">.hack5.net</span></label><input id="hSub" maxlength="30" placeholder="shanghai2026">')
             + (cm==='mini'
                 ? '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">'+t('(可选)','(optional)')+'</span></label><input id="hIntro" maxlength="2000" placeholder="'+t('这是一场关于…的 mini 黑客松','A mini hackathon about…')+'">'
@@ -4926,12 +4975,13 @@ const APP_HTML = String.raw`<!doctype html>
             + (cm==='open'
                 ? '<label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="hSecret" style="width:auto"> '+t('🔒 私密 / 企业模式','🔒 Private / enterprise')+'</label><div id="hSecretOpts" style="display:none"><label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px"></div>'
                 : cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
-            + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b>'+(paidAcct?' · '+t('付费账户免扣','free on paid'):' · '+t('余额','balance')+' '+bal)+'</div>'
+            + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b> · '+t('余额','balance')+' '+bal+'</div>'
             + '<div class="row" style="margin-top:10px"><button id="hCreate">'+(cm==='mini'?t('✨ 5 分钟创建','✨ Create in 5 min'):t('创建并部署','Create & deploy'))+'</button></div><div id="hMsg"></div>'
           : (frozen
               ? '<div class="notice">🧊 '+t('新注册账户满 7 天后可举办','New accounts can host after a 7-day cooldown')+'('+t('还差','~')+' '+cooldownLeft+' '+t('天','d')+')。'+t('充值后立即解锁(后续也可绑定 2 年以上 GitHub 账户)。','Top up to unlock now — or bind a 2-year-old GitHub account later.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值解锁','Top up to unlock')+'</button></div>'
               : '<div class="notice">'+t('积分不足','Not enough credits')+':'+t('本次需','need')+' '+cost+' '+t('积分,你当前','credits, you have')+' '+bal+'。'+t('充值后即可举办。','Top up to host.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值','Top up')+'</button></div>'))
       + '</div></div>';
+    document.querySelectorAll('.hmode').forEach(function(b){ b.addEventListener('click',function(){ window.__createMode = b.dataset.m==='open'?null:b.dataset.m; renderDashboard(); }); });
     if(canCreate){
       const sc=$('#hSecret'); if(sc) sc.addEventListener('change', ()=>{ $('#hSecretOpts').style.display = sc.checked ? 'block' : 'none'; const ch=$('#hCostHint'); if(ch) ch.textContent = sc.checked ? ((costs.secret!=null?costs.secret:300)+' '+t('积分','cr')) : (firstOpenFree ? t('免费(常规首场)','free (1st regular)') : ((costs.open!=null?costs.open:80)+' '+t('积分','cr'))); });
       const bf=$('#hBanner'); if(bf) bf.addEventListener('change', async ev=>{
