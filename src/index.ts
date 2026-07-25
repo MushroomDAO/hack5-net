@@ -66,6 +66,7 @@ interface Env {
   CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
   CREDITS_SIGNUP_GRANT?: string; // credits granted to a new participant on first registration (default 300)
   CREDITS_LAUNCH_HOLD?: string; // credits reserved up-front for a paid build; settled to actual cost (default 30)
+  STALE_BUILD_MINUTES?: string; // reap non-terminal builds with no update for this long (default 120)
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
@@ -81,6 +82,11 @@ const DEFAULT_MAX_SHOTS = 4;
 const DEFAULT_MAX_SHOT_BYTES = 1_048_576;
 
 export default {
+  // Cron: sweep builds that WorkBench's loop left hung (no terminal W5 callback) so a submission never
+  // sits non-terminal forever with its credit hold stuck and the UI spinning. See reapStaleBuilds.
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(reapStaleBuilds(env).catch((e) => console.error("reapStaleBuilds failed", String(e))));
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -215,6 +221,7 @@ export default {
       // ---- WorkBench build-status callback (W5, HMAC-verified) + its smoke test ----
       if (path === "/api/wb/callback" && method === "POST") return wbCallback(request, env);
       if (path === "/api/wb/callback-selftest" && method === "GET") return callbackSelftest(env);
+      if (path === "/api/wb/reap-selftest" && method === "POST") return reapSelftest(env);
 
       // ---- screenshots (KV, content-addressed by submission uuid) ----
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
@@ -2065,6 +2072,44 @@ async function releaseBuildHold(env: Env, clientSlug: string, projectSlug: strin
   }
 }
 
+// Stale-build reaper (cron). WorkBench's loop can leave a job hung — never completing and never sending
+// a terminal W5 callback (single-instance serial + no per-task timeout; tracked as a WorkBench-side CC).
+// The submission then sits in a non-terminal build_state forever: the up-front credit hold is never
+// released (30 credits stuck) and the UI spins indefinitely. This sweeps builds stuck non-terminal past
+// STALE_BUILD_MINUTES with no update, marks them failed with a "timed out" reason, and releases the hold.
+// Defensive only — it does not fix the loop; it stops a hung job from freezing a participant's balance.
+// Race-safe: the UPDATE only claims a still-non-terminal row, so a real callback landing at the same
+// moment isn't clobbered. If a genuine W5 arrives later, the callback's monotonic guard keeps `failed`
+// (a hung job never reaches `deployed`) and overwrites the placeholder reason with WorkBench's real one.
+async function reapStaleBuilds(env: Env): Promise<{ reaped: number }> {
+  const minutes = Number(env.STALE_BUILD_MINUTES ?? "120") || 120;
+  const cutoff = unixNow() - minutes * 60;
+  const hours = Math.round((minutes / 60) * 10) / 10;
+  const reason = `构建超时:${hours} 小时无进度回传(loop job 疑似悬空)`;
+  const stale = await env.DB.prepare(
+    "SELECT id, wb_client, wb_project FROM submissions WHERE build_state IN ('queued','planning','coding','reviewing') AND updated_at < ?",
+  )
+    .bind(cutoff)
+    .all<{ id: string; wb_client: string | null; wb_project: string | null }>();
+  let reaped = 0;
+  for (const r of stale.results ?? []) {
+    // Claim atomically: only flip a row that is still non-terminal, so a real callback that advanced it
+    // (or a concurrent reaper run) can't be undone. changes===1 means this run owns the transition.
+    const claimed = await env.DB.prepare(
+      "UPDATE submissions SET build_state = 'failed', build_error = ?, updated_at = ? WHERE id = ? AND build_state IN ('queued','planning','coding','reviewing')",
+    )
+      .bind(reason, unixNow(), r.id)
+      .run();
+    if (claimed.meta.changes === 1) {
+      reaped++;
+      // Refund the up-front hold (idempotent: only a still-'reserved' row is released). No-op for free builds.
+      if (r.wb_client && r.wb_project) await releaseBuildHold(env, r.wb_client, r.wb_project);
+    }
+  }
+  if (reaped) console.log(`reapStaleBuilds: failed ${reaped} stale build(s) older than ${minutes}m`);
+  return { reaped };
+}
+
 // Callback smoke test — mock-gated (404 in production); verifies the event→state mapping + badge
 // buckets without needing a signed request or a DB row.
 async function callbackSelftest(env: Env): Promise<Response> {
@@ -2072,6 +2117,14 @@ async function callbackSelftest(env: Env): Promise<Response> {
   const mapping = ["loop_ready", "coding_done", "deployed", "failed", "bogus"].map((e) => ({ event: e, state: wbEventToBuildState(e) }));
   const ok = mapping.filter((m) => m.event !== "bogus").every((m) => m.state !== null) && mapping.find((m) => m.event === "bogus")?.state === null;
   return json({ ok, mapping });
+}
+
+// Reaper smoke test — mock-gated (404 in production). Runs the real sweep against the local DB so a
+// seeded stale row can be verified end-to-end (query cutoff + atomic claim + hold release).
+async function reapSelftest(env: Env): Promise<Response> {
+  if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
+  const { reaped } = await reapStaleBuilds(env);
+  return json({ ok: true, reaped });
 }
 
 // ============================ A3 — mini「做成应用」入口 ============================
