@@ -1682,7 +1682,7 @@ async function getSubmission(request: Request, env: Env, tenant: Tenant | null, 
   if (!tid) return json({ error: "Not found" }, 404);
   if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
   const row = await env.DB.prepare(
-    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md, link_url, likes, wb_client, wb_project, app_url, build_state, build_error FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
+    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md, link_url, likes, wb_client, wb_project, app_url, build_state, build_error, build_phases FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
   )
     .bind(id, tid)
     .first<Record<string, unknown>>();
@@ -1718,6 +1718,16 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean,
     appUrl: row.app_url ?? null,
     buildState: row.build_state ?? null,
     buildError: row.build_error ?? null,
+    // CC-64: per-step cost breakdown (display only). Parse the stored JSON defensively — a bad row
+    // must never break the whole submission response.
+    phases: (() => {
+      try {
+        const p = row.build_phases ? JSON.parse(String(row.build_phases)) : null;
+        return Array.isArray(p) ? p : null;
+      } catch {
+        return null;
+      }
+    })(),
     // Secret fields only appear for secret tenants (open-mode responses stay unchanged). Online
     // demo + README show to anyone past the gate; credentials are judges/admin only (like contact).
     ...(secret
@@ -1895,7 +1905,7 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
   if (!provided || !timingSafeEqual(provided.toLowerCase(), expected)) return json({ error: "bad signature" }, 401);
   const body = (() => {
     try {
-      return JSON.parse(raw) as { event?: string; clientSlug?: string; projectSlug?: string; repo?: string; appUrl?: string; reason?: string; error?: string };
+      return JSON.parse(raw) as { event?: string; clientSlug?: string; projectSlug?: string; repo?: string; appUrl?: string; reason?: string; error?: string; phases?: unknown };
     } catch {
       return null;
     }
@@ -1923,13 +1933,17 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
     // On failure, capture the reason (if WorkBench sent one) so the UI can show *why*; on any other
     // (forward) transition, clear a previous error. COALESCE keeps the old value if this event omits it.
     const buildError = state === "failed" ? String(body.reason || body.error || "").trim().slice(0, 500) || null : "";
+    // CC-64: per-step cost breakdown. Store the JSON array durably (COALESCE keeps the last one if this
+    // event omits it) so the UI can show a per-node timeline even after the container is recycled. Capped
+    // to bound a hostile/huge payload; null when absent or not an array so COALESCE preserves the prior value.
+    const phasesJson = Array.isArray(body.phases) && body.phases.length ? JSON.stringify(body.phases).slice(0, 20000) : null;
     // Optimistic-concurrency guard: only apply if the row is STILL in the state we read (`current`). A
     // second concurrent writer — the cron reaper, or another callback — can move it between our SELECT
     // and this UPDATE; without the guard our stale advance decision would overwrite theirs and (worse)
     // still fire our credit side effects, double-benefiting (e.g. reaper refunds the hold, then we settle
     // a "free" deploy). `build_state IS ?` is NULL-safe in SQLite so a first callback (current=null) matches.
-    const res = await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, build_error = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, build_error) END, updated_at = ? WHERE id = ? AND build_state IS ?")
-      .bind(state, appUrl, repo, repo, state === "failed" ? "f" : "", buildError, unixNow(), row.id, current)
+    const res = await env.DB.prepare("UPDATE submissions SET build_state = ?, app_url = COALESCE(?, app_url), repo_url = CASE WHEN ? <> '' THEN ? ELSE repo_url END, build_error = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, build_error) END, build_phases = COALESCE(?, build_phases), updated_at = ? WHERE id = ? AND build_state IS ?")
+      .bind(state, appUrl, repo, repo, state === "failed" ? "f" : "", buildError, phasesJson, unixNow(), row.id, current)
       .run();
     applied = res.meta.changes === 1;
   }
@@ -1998,6 +2012,9 @@ async function miniAppBuildStatus(request: Request, env: Env, tenant: Tenant | n
   try {
     const s = await createWorkbench(env).status(jobId);
     const p = s.progress || {};
+    // CC-64: /status carries the live phases[] too — pass it through so the build view can show a
+    // per-step cost timeline while the job is still running, before the terminal callback stores it.
+    const livePhases = (s as unknown as { phases?: unknown }).phases;
     return json({
       state: s.state,
       percent: typeof p.percent === "number" ? p.percent : (p.total ? Math.round(((p.done ?? 0) / p.total) * 100) : null),
@@ -2005,6 +2022,7 @@ async function miniAppBuildStatus(request: Request, env: Env, tenant: Tenant | n
       total: p.total ?? null,
       done: p.done ?? null,
       appUrl: s.appUrl ?? null,
+      phases: Array.isArray(livePhases) ? livePhases : null,
     });
   } catch {
     return json({ error: "status unavailable" }, 502);
@@ -5376,6 +5394,8 @@ const APP_HTML = String.raw`<!doctype html>
           // The hosted CF Pages preview auto-clears after ~7 days; the GitHub code is permanent + self-deployable.
           + (s.appUrl?'<div class="muted" style="font-size:12px;margin:-4px 0 6px">'+t('⏳ 在线托管约 7 天后自动清理 · 代码永久保留在 GitHub,可随时自行部署','⏳ Hosted preview auto-clears in ~7 days · code kept on GitHub, redeploy anytime')+'</div>':'')
           + (s.repoUrl?'<div class="kv"><span>'+t('公有仓库','Public repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
+          // CC-64 — per-step cost timeline (failed build highlights the step it stopped on).
+          + phasesTimeline(s.phases, s.buildState)
           // CC-56 — deploy button once the code is ready (build_state==='reviewing'), before it's live.
           + (isMini && s.buildState==='reviewing'
               ? '<div id="deployBox" style="margin-top:10px">'
@@ -5691,6 +5711,26 @@ const APP_HTML = String.raw`<!doctype html>
     }
     // Live build progress: a labelled bar that maps build_state → step + %. Failure shows the reason
     // (once WorkBench sends one in the W5 callback; otherwise a "not reported yet" note).
+    // CC-64: per-step cost breakdown from WorkBench phases[]. Display only — the real charge is the
+    // event-level total (settle), NOT the sum of these (per-node ceil rounds up). On a failed build the
+    // last phase is where it stopped, so highlight it.
+    function phasesTimeline(phases, st){
+      if(!Array.isArray(phases) || !phases.length) return '';
+      const rows = phases.map(function(ph, i){
+        const failedHere = (st==='failed' && i===phases.length-1);
+        const usd = (typeof ph.costUsd==='number') ? ('$'+ph.costUsd.toFixed(3)) : '';
+        const cr = (typeof ph.credits==='number') ? ph.credits : ((typeof ph.costUsd==='number') ? Math.ceil(ph.costUsd*100) : null);
+        return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px'+(failedHere?';color:#dc2626;font-weight:600':'')+'">'
+          + '<span>'+(failedHere?'⚠️':'•')+'</span>'
+          + '<span style="flex:none;min-width:72px;font-family:ui-monospace,Menlo,monospace">'+esc(String(ph.stage!=null?ph.stage:('#'+(i+1))))+'</span>'
+          + '<span class="muted" style="flex:1">'+esc(usd)+'</span>'
+          + (cr!=null?'<span style="flex:none">≈ '+cr+' '+t('积分','cr')+'</span>':'')
+          + '</div>';
+      }).join('');
+      return '<div style="margin-top:8px;border-top:1px solid var(--line,#333);padding-top:8px">'
+        + '<div class="muted" style="font-size:12px;margin-bottom:4px">💠 '+t('每步花费','Per-step cost')+' <span style="opacity:.65">('+t('仅展示','display only')+')</span></div>'
+        + rows + '</div>';
+    }
     function buildProgressLine(st, extra, pct, current){
       const map={queued:['⏳',t('排队中','Queued'),15],planning:['🛠',t('规划中','Planning'),35],coding:['🛠',t('编码中','Coding'),60],reviewing:['🔍',t('审查中','Reviewing'),85],deployed:['✅',t('已上线','Live'),100],failed:['⚠️',t('构建失败','Build failed'),100]};
       const m=map[st]||['📦',esc(st||''),10];
@@ -5719,15 +5759,15 @@ const APP_HTML = String.raw`<!doctype html>
         const st=s.buildState||'queued';
         // Fine progress from loop's /status (via the server proxy, using the jobId from launch). Best-effort:
         // the jobId can vanish after a container restart, so fall back to the coarse per-stage bar.
-        let pct=null, current=null;
+        let pct=null, current=null, phases=s.phases||null; // stored phases (from callback); live /status may override
         if(r.jobId && st!=='deployed' && st!=='failed'){
-          try{ const bs=await api('/api/tenant/mini/app/build-status?jobId='+encodeURIComponent(r.jobId)); if(bs){ if(typeof bs.percent==='number') pct=bs.percent; current=bs.current||null; } }catch(e){}
+          try{ const bs=await api('/api/tenant/mini/app/build-status?jobId='+encodeURIComponent(r.jobId)); if(bs){ if(typeof bs.percent==='number') pct=bs.percent; current=bs.current||null; if(bs.phases) phases=bs.phases; } }catch(e){}
         }
         let extra='';
         if(st==='deployed' && s.appUrl) extra=' · <a href="'+esc(s.appUrl)+'" target="_blank" rel="noopener">🔗 '+t('打开应用(CF)','Open app (CF)')+'</a >';
         if(st==='reviewing') extra=' · <span class="muted">'+t('自动部署中…','auto-deploying…')+'</span>';
         if(st==='failed') extra='<br><span style="color:#dc2626;font-size:12px">'+esc(s.buildError||t('原因暂无(WorkBench 未回传失败详情)','no failure reason reported yet'))+'</span>';
-        if(document.body.contains(stEl)) stEl.innerHTML=buildProgressLine(st, extra, pct, current);
+        if(document.body.contains(stEl)) stEl.innerHTML=buildProgressLine(st, extra, pct, current) + phasesTimeline(phases, st);
         if(st==='deployed'||st==='failed') return;
       }
     }
