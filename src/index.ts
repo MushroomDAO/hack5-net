@@ -4707,7 +4707,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderAbout(){
     const feats = [
       ['⚡', t('10 分钟发起','Live in 10 minutes'), t('三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。','Three steps: log in → name it → deploy your own hackathon site on its own domain.')],
-      ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
+      ['🆓', t('首场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
       ['🌱', t('数字公共物品','A digital public good'), t('Hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','Hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
     ];
     app.innerHTML = '<div class="guide">'
@@ -4782,7 +4782,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderPlatformLanding(){
     const feats = [
       ['⚡', t('三步 · 10 分钟','3 steps · 10 min'), t('登录 → 取名 → 一键部署你专属的黑客松站点。','Log in → name it → deploy your own hackathon site.')],
-      ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
+      ['🆓', t('首场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
       ['🌱', t('数字公共物品','Digital public good'), t('Hack5 隶属于 Mycelium,为开放的创造者社区而建。','Hack5 is part of Mycelium, built for open makers.')],
     ];
     app.innerHTML = '<div class="guide">'
@@ -5139,8 +5139,8 @@ const APP_HTML = String.raw`<!doctype html>
     const logoColor = opts.logoColor || '#ffffff';   // the "Hack5" wordmark (the ‹5› mark stays branded on its cream chip)
     const nameLines = wrapText(name, name.length>16?14:10, 3);
     const nameFs = nameLines.length>=3?56:(name.length>14?66:84);
-    const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,72), 30, 2);
-    const eyebrow = [tn.eventTime, tn.location].filter(Boolean).join('   ·   ');
+    const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,70), 32, 2); // ≤70 chars, smaller font
+    const eyebrow = tn.eventTime ? ('📅  '+tn.eventTime) : ''; // start/end date-time on its own line
     const bits=[]; if(tn.location)bits.push(['📍',tn.location]); if(tn.address)bits.push(['🏛',tn.address]);
     const sub = tn.subdomain||'';
     let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 794 1123" width="100%" style="display:block">'
@@ -5163,13 +5163,23 @@ const APP_HTML = String.raw`<!doctype html>
     nameLines.forEach((ln,i)=>{ svg+='<text x="62" y="'+(y+i*(nameFs+4))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="'+nameColor+'" letter-spacing="-1">'+esc(ln)+'</text>'; });
     y = y + nameLines.length*(nameFs+4) + 18;
     svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#25ff86"/>'; y+=44;
-    introLines.forEach((ln,i)=>{ svg+='<text x="64" y="'+(y+i*36)+'" font-family="-apple-system,sans-serif" font-size="24" fill="#aeb6cc">'+esc(ln)+'</text>'; });
+    introLines.forEach((ln,i)=>{ svg+='<text x="64" y="'+(y+i*34)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#aeb6cc">'+esc(ln)+'</text>'; });
     y += introLines.length*36 + 40;
     bits.forEach((b,i)=>{ svg+='<text x="64" y="'+(y+i*46)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#dbe0ee">'+b[0]+'  '+esc(String(b[1]).slice(0,40))+'</text>'; });
-    svg += '<g transform="translate(64,968)"><rect width="666" height="96" rx="20" fill="url(#pcta)"/><rect width="666" height="96" rx="20" fill="none" stroke="#ffffff" stroke-opacity="0.15"/>'
-      + '<text x="34" y="42" font-family="-apple-system,sans-serif" font-size="16" font-weight="600" fill="#ffffff" opacity="0.85" letter-spacing="0.5">'+t('报名 · 提交作品','Join &amp; submit')+'</text>'
-      + '<text x="34" y="74" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">'+esc(sub)+'.hack5.net</text></g>'
-      + '<text x="730" y="1100" text-anchor="end" font-family="-apple-system,sans-serif" font-size="12" fill="#5a6285" letter-spacing="0.5">Mycelium · Digital Public Goods</text>'
+    const qr = opts.qr || '';
+    if(qr){
+      // CTA bar (narrower) + a white QR card scanning straight to the subdomain URL.
+      svg += '<g transform="translate(64,928)"><rect width="486" height="150" rx="20" fill="url(#pcta)"/><rect width="486" height="150" rx="20" fill="none" stroke="#ffffff" stroke-opacity="0.15"/>'
+        + '<text x="34" y="50" font-family="-apple-system,sans-serif" font-size="17" font-weight="600" fill="#ffffff" opacity="0.9" letter-spacing="0.5">'+t('报名 · 提交作品','Join &amp; submit')+'</text>'
+        + '<text x="34" y="90" font-family="ui-monospace,monospace" font-size="29" font-weight="800" fill="#ffffff">'+esc(sub)+'.hack5.net</text>'
+        + '<text x="34" y="124" font-family="-apple-system,sans-serif" font-size="15" fill="#ffffff" opacity="0.82">'+t('扫右侧二维码直达 →','Scan the QR to open →')+'</text></g>'
+        + '<g transform="translate(578,928)"><rect width="152" height="152" rx="18" fill="#ffffff"/><image href="'+qr+'" x="13" y="13" width="126" height="126"/></g>';
+    } else {
+      svg += '<g transform="translate(64,968)"><rect width="666" height="96" rx="20" fill="url(#pcta)"/><rect width="666" height="96" rx="20" fill="none" stroke="#ffffff" stroke-opacity="0.15"/>'
+        + '<text x="34" y="42" font-family="-apple-system,sans-serif" font-size="16" font-weight="600" fill="#ffffff" opacity="0.85" letter-spacing="0.5">'+t('报名 · 提交作品','Join &amp; submit')+'</text>'
+        + '<text x="34" y="74" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">'+esc(sub)+'.hack5.net</text></g>';
+    }
+    svg += '<text x="730" y="1100" text-anchor="end" font-family="-apple-system,sans-serif" font-size="12" fill="#5a6285" letter-spacing="0.5">Mycelium · Digital Public Goods</text>'
       + '</svg>';
     return svg;
   }
@@ -5179,6 +5189,9 @@ const APP_HTML = String.raw`<!doctype html>
   // Fetch a preset bg and return it as a data: URI, so the canvas PNG export isn't tainted by a
   // cross-origin <image href>. '' → no background (the gradient template). Throws on fetch failure.
   async function bgToDataUrl(url){ if(!url) return ''; const r=await fetch(url); if(!r.ok) throw new Error('bg '+r.status); const b=await r.blob(); return await new Promise(function(res,rej){ const fr=new FileReader(); fr.onload=function(){res(fr.result);}; fr.onerror=function(){rej(new Error('read'));}; fr.readAsDataURL(b); }); }
+  // Rasterize the /qr/<sub> SVG to a PNG data URL so it composites reliably into the poster PNG export
+  // (a nested SVG <image> can fail to rasterize on canvas in some browsers). Same-origin → untainted.
+  function qrToPng(sub){ return new Promise(function(res,rej){ const img=new Image(); img.onload=function(){ const c=document.createElement('canvas'); c.width=c.height=252; const x=c.getContext('2d'); x.fillStyle='#ffffff'; x.fillRect(0,0,252,252); x.drawImage(img,0,0,252,252); try{ res(c.toDataURL('image/png')); }catch(e){ rej(e); } }; img.onerror=function(){ rej(new Error('qr')); }; img.src='/qr/'+encodeURIComponent(sub); }); }
   // Shared poster editor state (title override + logo/name colors), read by every posterSvg() call.
   const posterOpts = { title:null, nameColor:'', logoColor:'' };
   const NAME_COLORS = ['#ffffff','#25ff86','#8b7bff','#ffd166','#ff6b6b','#0a0e0a'];
@@ -5250,6 +5263,7 @@ const APP_HTML = String.raw`<!doctype html>
     function paintShare(bg){ shareBg=bg||''; const el=$('#shPosterBox'); if(el) el.innerHTML=posterSvg(shareBg, posterOpts); }
     paintShare(''); // instant gradient template, then swap to a nice default background (free preset)
     bgToDataUrl('/poster-bg/illustration.jpg').then(paintShare).catch(function(){});
+    qrToPng(sub).then(function(d){ posterOpts.qr=d; paintShare(shareBg); }).catch(function(){}); // embed the join QR into the poster
     wirePosterControls(function(){ paintShare(shareBg); });
     document.querySelectorAll('.shbg').forEach(function(btn){ btn.addEventListener('click', async function(){
       const u=btn.dataset.bg||''; if(!u){ paintShare(''); setMsg('shMsg',''); return; }
@@ -5273,6 +5287,9 @@ const APP_HTML = String.raw`<!doctype html>
   }
   async function loadAiPanel(){
     const box=$('#aiPanel'); if(!box) return;
+    // AI generation is organizer-only. Show a clear unlock hint to non-admins instead of hiding the section.
+    if(ME.role!=='admin'){ box.innerHTML='<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报','AI poster')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">FLUX · Cloudflare</span></div>'
+      +'<p class="muted" style="margin:8px 0 0">🔒 '+t('用管理员密码登录本站后,可用 Cloudflare Workers AI 按活动描述生成定制海报背景。','Log in with the site admin password to generate a custom AI poster background via Cloudflare Workers AI.')+'</p>'; return; }
     let q; try{ q=await api('/api/tenant/poster/quota'); }catch(e){ box.innerHTML='<span class="muted">'+t('AI 海报加载失败','AI panel failed')+'</span>'; return; }
     if(!q.aiEnabled){ box.innerHTML='<b>'+t('AI 海报','AI poster')+'</b><p class="muted">'+t('暂未开通','Not enabled yet')+'</p>'; return; }
     box.innerHTML =
@@ -5301,6 +5318,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderPoster(){
     if(!CONFIG.tenant){ go('/'); return; }
     const isAdmin = ME.role==='admin';
+    const sub = (CONFIG.tenant.subdomain||'');
     app.innerHTML = '<div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap"><h1>'+t('宣传海报','Promo poster')+'</h1>'
       + '<div class="row"><button id="dlPng">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg">'+t('下载 SVG','Download SVG')+'</button></div></div>'
       + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。海报 = 背景图 + 文字,下面随便换背景。','A4 portrait, auto-built from your homepage info. A poster is just a background + text — swap the background below.')+'</p>'
@@ -5312,11 +5330,12 @@ const APP_HTML = String.raw`<!doctype html>
       +   '<div class="muted" style="font-size:12px;margin-top:8px">'+t('四种背景免费,或上传自己的图。AI 定制(按描述+活动信息生成)见下方,付费。','Four backgrounds free, or upload your own. AI-custom (from your description + event info) below — premium.')
       +   '</div><div id="bgMsg" class="muted" style="font-size:12px;margin-top:4px"></div></div>'
       + posterControlsHtml()
-      + (isAdmin ? '<div id="aiPanel" class="panel" style="max-width:640px;margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>' : '')
+      + '<div id="aiPanel" class="panel" style="max-width:640px;margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>'
       + '<div id="posterBox" style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>';
     paint('');
+    qrToPng(sub).then(function(d){ posterOpts.qr=d; paint(window.__posterBg||''); }).catch(function(){}); // embed the join QR into the poster
     wirePosterControls(function(){ paint(window.__posterBg||''); });
-    if(isAdmin) loadAiPanel();
+    loadAiPanel();
     // Poster background = a fetched image turned into a data URI before it goes into the SVG, so the
     // canvas PNG export stays untainted (an external <image href> would taint it). Presets are real
     // static files under /poster-bg/, never base64 baked into this bundle.
