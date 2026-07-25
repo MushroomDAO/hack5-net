@@ -4955,43 +4955,23 @@ const APP_HTML = String.raw`<!doctype html>
   // Reusable media kit (shown on /about and /media): two-color logo lockups + downloads (full lockup as
   // displayed + mark-only + PNG) + usage note. Marks inlined so it renders without a fetch.
   function mediaKitHtml(){
-    const dgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
-      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#14532d">5</text></svg>';
-    const bgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
-      +'<rect width="40" height="40" rx="11" fill="#0a0e0a"/>'
-      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text></svg>';
     return '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
       + '<div class="panel">'
       +   '<div style="display:flex;gap:16px;flex-wrap:wrap">'
-      +     '<div style="flex:1;min-width:210px;background:#fff;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px">'
-      +       '<span style="flex:none;line-height:0">'+dgSvg+'</span>'
-      +       '<div><div style="font-size:23px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
-      +       '<div style="font-size:13px;color:#14532d;opacity:.72">hack5.net</div></div>'
-      +     '</div>'
-      +     '<div style="flex:1;min-width:210px;background:#0a0e0a;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px;border:1px solid rgba(255,255,255,.08)">'
-      +       '<span style="flex:none;line-height:0">'+bgSvg+'</span>'
-      +       '<div><div style="font-size:23px;font-weight:800;color:#25ff86;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
-      +       '<div style="font-size:13px;color:#25ff86;opacity:.72">hack5.net</div></div>'
-      +     '</div>'
+      +     '<div style="flex:1;min-width:240px;border-radius:14px;overflow:hidden;border:1px solid rgba(128,128,128,.14)"><img src="/brand/hack5-logo.png" alt="Hack5" style="width:100%;display:block"></div>'
+      +     '<div style="flex:1;min-width:240px;border-radius:14px;overflow:hidden;border:1px solid rgba(128,128,128,.14)"><img src="/brand/hack5-logo-black.png" alt="Hack5" style="width:100%;display:block"></div>'
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识(字符标 + 字标,即上图):','Full lockup (mark + wordmark, as shown):')+'</div>'
+      +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识 Hack&lt;5&gt;(即上图):','Full lockup Hack&lt;5&gt; (as shown):')+'</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
-      +     '<a href="/brand/hack5-lockup-green.png" download><button>⬇ '+t('亮绿完整版','Bright-green lockup')+' (PNG)</button></a>'
-      +     '<a href="/brand/hack5-lockup-green.svg" download><button class="ghost">⬇ '+t('亮绿完整版','Bright-green lockup')+' (SVG)</button></a>'
-      +     '<a href="/brand/hack5-lockup-darkgreen.png" download><button>⬇ '+t('墨绿完整版','Ink-green lockup')+' (PNG)</button></a>'
-      +     '<a href="/brand/hack5-lockup-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿完整版','Ink-green lockup')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-logo.png" download><button>⬇ '+t('奶白底 / 墨绿','Cream / ink-green')+' (PNG)</button></a>'
+      +     '<a href="/brand/hack5-logo-black.png" download><button>⬇ '+t('黑底 / 亮绿','Black / matrix-green')+' (PNG)</button></a>'
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt; / 位图:','Mark only / bitmap:')+'</div>'
+      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt;:','Mark only &lt;5&gt;:')+'</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
       +     '<a href="/brand/hack5-logo-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿标','Ink-green mark')+' (SVG)</button></a>'
       +     '<a href="/brand/hack5-logo-green.svg" download><button class="ghost">⬇ '+t('亮绿标','Bright-green mark')+' (SVG)</button></a>'
-      +     '<a href="/brand/hack5-logo.png" download><button class="ghost">⬇ PNG</button></a>'
       +   '</div>'
-      +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('主色:墨绿 #14532D(浅底)· 亮绿 #25FF86(深底)。标识 = &lt;5&gt; 字符标 + 「Hack5」字标,域名 hack5.net。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Primary: ink-green #14532D on light · bright-green #25FF86 on dark. The mark is the &lt;5&gt; glyph + the “Hack5” wordmark; domain hack5.net. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
+      +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('主色:墨绿 #14532D(奶白底)· 亮绿(黑客帝国绿)#25FF86(黑底)。完整标识 = 「Hack&lt;5&gt;」字标,域名 hack5.net。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Primary: ink-green #14532D on cream · matrix-green #25FF86 on black. The full lockup is the “Hack&lt;5&gt;” wordmark; domain hack5.net. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
       + '</div>';
   }
   function renderAbout(){
@@ -5019,29 +4999,20 @@ const APP_HTML = String.raw`<!doctype html>
       + '<p>'+t('Hack5 的核心理念是<b>普及黑客松</b>:哪怕是老年大学、幼儿园、任何社区、任何一个人,都能马上组织一次思想火花的碰撞,让普通人开始那份属于黑客的激情创造。这正是 Mycelium 眼中的数字公共物品 —— <b>提升普通人的数字生活福祉</b>。','Hack5’s core idea is to <b>make hackathons for everyone</b>: a seniors’ college, a kindergarten, any community, any single person can spark a collision of ideas right away, and let ordinary people begin the hacker’s joy of creating. This is what Mycelium means by a digital public good — <b>lifting the digital well-being of ordinary people</b>.')+'</p>'
       + '<p style="font-weight:700;color:var(--ink);margin-bottom:0">'+t('让我们开始创造! 🌱','Let’s start creating! 🌱')+'</p>'
       + '</div>'
-      // ---- What Hack5 handles for you ----
+      // ---- What Hack5 handles for you (item cards, same guide-steps format as the landing list) ----
       + '<h2 style="margin:34px 2px 14px;font-size:22px">'+t('Hack5 帮你搞定全流程','Everything Hack5 handles for you')+'</h2>'
-      + '<div class="panel" style="font-size:15px;line-height:1.7">'
-      + '<div style="font-weight:700;color:var(--ink);margin:0 0 6px">'+t('👥 三方协作(参赛者 · 组织方 · 评委)','👥 Three-way collaboration (participants · organizers · judges)')+'</div>'
-      + '<ul style="margin:0 0 16px;padding-left:20px">'
-      +   '<li>'+t('参赛者:邮箱一键快速注册报名,一句想法交给 AI 做成作品','Participants — one-tap email sign-up; hand an idea to AI and get a working project')+'</li>'
-      +   '<li>'+t('评委:独立注册、独立登录、在线打分评价','Judges — register and log in independently, score & review online')+'</li>'
-      +   '<li>'+t('组织方:多赛事管理,一处管理你所有黑客松','Organizers — multi-event management; run all your hackathons from one place')+'</li>'
-      + '</ul>'
-      + '<div style="font-weight:700;color:var(--ink);margin:0 0 6px">'+t('⚙️ 作品自动构建与发布','⚙️ Auto build & publish')+'</div>'
-      + '<ul style="margin:0 0 16px;padding-left:20px">'
-      +   '<li>'+t('作品代码自动发布到 GitHub','Project code auto-published to GitHub')+'</li>'
-      +   '<li>'+t('参赛作品自动部署到 Cloudflare(内置账号,7 天自动清理)','Projects auto-deployed to Cloudflare (built-in account, auto-cleaned after 7 days)')+'</li>'
-      +   '<li>'+t('Mini 黑客松:AI 代码 Agent 把一句想法自动做成能跑的应用','Mini hackathons — an AI coding agent turns one idea into a working app automatically')+'</li>'
-      + '</ul>'
-      + '<div style="font-weight:700;color:var(--ink);margin:0 0 6px">'+t('🎨 内容 · 评审 · 触达','🎨 Content · judging · reach')+'</div>'
-      + '<ul style="margin:0;padding-left:20px">'
-      +   '<li>'+t('参赛作品排行榜 + 评委打分','Project leaderboard with judge scoring')+'</li>'
-      +   '<li>'+t('海报智能生成(AI 背景 + 自动排版 + 二维码)','Smart poster generation — AI background + auto layout + QR')+'</li>'
-      +   '<li>'+t('中 / 英 / 泰 三语支持','Chinese / English / Thai — trilingual')+'</li>'
-      +   '<li>'+t('一键转发、报名名单导出、活动首页与时间地点','One-click sharing, roster export, event homepage with date & location')+'</li>'
-      + '</ul>'
-      + '</div>'
+      + '<div class="guide-steps">'+[
+          ['🙋', t('参赛者快速注册','Participants sign up in seconds'), t('邮箱一键报名,一句想法交给 AI 就能做成作品。','One-tap email sign-up; hand an idea to AI and get a working project.')],
+          ['🧑‍⚖️', t('评委独立评审','Judges review independently'), t('评委独立注册、独立登录、在线打分与评价。','Judges register and log in on their own, then score and review online.')],
+          ['🎯', t('组织方多赛事管理','Multi-event management'), t('一处管理你所有的黑客松,赛事、报名、评分尽在掌握。','Run all your hackathons from one place — events, sign-ups and scoring.')],
+          ['🐙', t('代码自动上 GitHub','Code auto-published to GitHub'), t('参赛作品的代码自动发布到 GitHub 仓库。','Each project’s code is auto-published to a GitHub repo.')],
+          ['☁️', t('自动部署 Cloudflare','Auto-deployed to Cloudflare'), t('参赛作品自动部署上线(内置账号,7 天自动清理)。','Projects auto-deploy live on Cloudflare — a built-in account, cleaned up after 7 days.')],
+          ['🤖', t('Mini AI 代码 Agent','Mini AI coding agent'), t('Mini 黑客松:一句想法,AI 代码 Agent 自动做成能跑的应用。','In a Mini hackathon, one idea becomes a working app via an AI coding agent.')],
+          ['🏆', t('作品排行榜','Project leaderboard'), t('评委打分 + 实时排名,作品一目了然。','Judge scores and live ranking make every project stand out.')],
+          ['🎨', t('海报智能生成','Smart poster generation'), t('AI 生成背景 + 自动排版 + 二维码,一键出图。','AI background + auto layout + QR — a poster in one click.')],
+          ['🌏', t('中 / 英 / 泰 三语','Chinese / English / Thai'), t('全站三语切换,面向国内外社区。','Full trilingual UI for communities at home and abroad.')],
+          ['🔗', t('转发与名单','Sharing & rosters'), t('一键转发、二维码、报名名单导出。','One-click sharing, QR codes, and roster export.')]
+        ].map(function(f){return '<div class="step"><div class="num" style="font-size:19px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>';}).join('')+'</div>'
       + mediaKitHtml()
       + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><button onclick="go(\'/start\')">'+t('发起黑客松 →','Start a hackathon →')+'</button></div>'
       + '</div>';
