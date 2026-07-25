@@ -4889,43 +4889,36 @@ const APP_HTML = String.raw`<!doctype html>
   // Reusable media kit (shown on /about and /media): two-color logo lockups + downloads (full lockup as
   // displayed + mark-only + PNG) + usage note. Marks inlined so it renders without a fetch.
   function mediaKitHtml(){
-    const dgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
-      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#14532d">5</text></svg>';
-    const bgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
-      +'<rect width="40" height="40" rx="11" fill="#0a0e0a"/>'
-      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text></svg>';
+    // Unified mark: ‹5› chevrons + "5", one color per theme. Cream lockup = black; black lockup = forest green.
+    const mkMark = function(c){ return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
+      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="'+c+'" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="'+c+'" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="'+c+'">5</text></svg>'; };
+    const card = function(bg,c){ return '<div style="flex:1;min-width:210px;background:'+bg+';border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px;border:1px solid rgba(128,128,128,.14)">'
+      +'<span style="flex:none;line-height:0">'+mkMark(c)+'</span>'
+      +'<div><div style="font-size:23px;font-weight:800;color:'+c+';font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
+      +'<div style="font-size:13px;color:'+c+';opacity:.7">hack5.net</div></div></div>'; };
     return '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
       + '<div class="panel">'
       +   '<div style="display:flex;gap:16px;flex-wrap:wrap">'
-      +     '<div style="flex:1;min-width:210px;background:#fff;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px">'
-      +       '<span style="flex:none;line-height:0">'+dgSvg+'</span>'
-      +       '<div><div style="font-size:23px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
-      +       '<div style="font-size:13px;color:#14532d;opacity:.72">hack5.net</div></div>'
-      +     '</div>'
-      +     '<div style="flex:1;min-width:210px;background:#0a0e0a;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px;border:1px solid rgba(255,255,255,.08)">'
-      +       '<span style="flex:none;line-height:0">'+bgSvg+'</span>'
-      +       '<div><div style="font-size:23px;font-weight:800;color:#25ff86;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
-      +       '<div style="font-size:13px;color:#25ff86;opacity:.72">hack5.net</div></div>'
-      +     '</div>'
+      +     card('#f6f2e9','#0a0e0a')   // cream bg → black lockup
+      +     card('#0a0e0a','#2f9e5f')   // black bg → forest-green lockup
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识(字符标 + 字标,即上图):','Full lockup (mark + wordmark, as shown):')+'</div>'
+      +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识(字符标 + 字标 + 域名,即上图):','Full lockup (mark + wordmark + domain, as shown):')+'</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
-      +     '<a href="/brand/hack5-lockup-green.png" download><button>⬇ '+t('亮绿完整版','Bright-green lockup')+' (PNG)</button></a>'
-      +     '<a href="/brand/hack5-lockup-green.svg" download><button class="ghost">⬇ '+t('亮绿完整版','Bright-green lockup')+' (SVG)</button></a>'
-      +     '<a href="/brand/hack5-lockup-darkgreen.png" download><button>⬇ '+t('墨绿完整版','Ink-green lockup')+' (PNG)</button></a>'
-      +     '<a href="/brand/hack5-lockup-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿完整版','Ink-green lockup')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-lockup-cream.png" download><button>⬇ '+t('奶白底(黑字)','Cream (black)')+' PNG</button></a>'
+      +     '<a href="/brand/hack5-lockup-cream.svg" download><button class="ghost">⬇ '+t('奶白底','Cream')+' SVG</button></a>'
+      +     '<a href="/brand/hack5-lockup-black.png" download><button>⬇ '+t('黑底(森绿)','Black (green)')+' PNG</button></a>'
+      +     '<a href="/brand/hack5-lockup-black.svg" download><button class="ghost">⬇ '+t('黑底','Black')+' SVG</button></a>'
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt; / 位图:','Mark only / bitmap:')+'</div>'
+      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt;:','Mark only &lt;5&gt;:')+'</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
-      +     '<a href="/brand/hack5-logo-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿标','Ink-green mark')+' (SVG)</button></a>'
-      +     '<a href="/brand/hack5-logo-green.svg" download><button class="ghost">⬇ '+t('亮绿标','Bright-green mark')+' (SVG)</button></a>'
-      +     '<a href="/brand/hack5-logo.png" download><button class="ghost">⬇ PNG</button></a>'
+      +     '<a href="/brand/hack5-mark-cream.png" download><button class="ghost">⬇ '+t('奶白底(墨绿标)','Cream (ink mark)')+' PNG</button></a>'
+      +     '<a href="/brand/hack5-mark-cream.svg" download><button class="ghost">⬇ SVG</button></a>'
+      +     '<a href="/brand/hack5-mark-black.png" download><button class="ghost">⬇ '+t('黑底(森绿标)','Black (green mark)')+' PNG</button></a>'
+      +     '<a href="/brand/hack5-mark-black.svg" download><button class="ghost">⬇ SVG</button></a>'
       +   '</div>'
-      +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('主色:墨绿 #14532D(浅底)· 亮绿 #25FF86(深底)。标识 = &lt;5&gt; 字符标 + 「Hack5」字标,域名 hack5.net。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Primary: ink-green #14532D on light · bright-green #25FF86 on dark. The mark is the &lt;5&gt; glyph + the “Hack5” wordmark; domain hack5.net. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
+      +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('配色统一:墨绿 #14532D(奶白底的字符标)· 森林绿 #2F9E5F(黑底)· 黑 #0A0E0A(奶白底的字标)· 奶白 #F6F2E9。标识 = &lt;5&gt; 字符标 + 「Hack5」字标 + hack5.net。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Unified palette: ink-green #14532D (mark on cream) · forest-green #2F9E5F (on black) · black #0A0E0A (wordmark on cream) · cream #F6F2E9. The mark is the &lt;5&gt; glyph + the “Hack5” wordmark + hack5.net. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
       + '</div>';
   }
   function renderAbout(){
@@ -5393,7 +5386,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<defs>'
       + '<linearGradient id="pbg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#141a2e"/><stop offset="0.55" stop-color="#0c1020"/><stop offset="1" stop-color="#080a12"/></linearGradient>'
       + '<radialGradient id="pglow" cx="0.82" cy="0.12" r="0.5"><stop offset="0" stop-color="#5b4be6" stop-opacity="0.55"/><stop offset="1" stop-color="#5b4be6" stop-opacity="0"/></radialGradient>'
-      + '<radialGradient id="pglow2" cx="0.1" cy="0.9" r="0.5"><stop offset="0" stop-color="#25ff86" stop-opacity="0.18"/><stop offset="1" stop-color="#25ff86" stop-opacity="0"/></radialGradient>'
+      + '<radialGradient id="pglow2" cx="0.1" cy="0.9" r="0.5"><stop offset="0" stop-color="#2f9e5f" stop-opacity="0.18"/><stop offset="1" stop-color="#2f9e5f" stop-opacity="0"/></radialGradient>'
       + '<linearGradient id="pcta" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6d5cf0"/><stop offset="1" stop-color="#8b7bff"/></linearGradient>'
       + '<linearGradient id="pscrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080a12" stop-opacity="0.7"/><stop offset="0.45" stop-color="#080a12" stop-opacity="0.25"/><stop offset="1" stop-color="#080a12" stop-opacity="0.92"/></linearGradient>'
       + '</defs>'
@@ -5408,7 +5401,7 @@ const APP_HTML = String.raw`<!doctype html>
     y+=48;
     nameLines.forEach((ln,i)=>{ svg+='<text x="62" y="'+(y+i*(nameFs+4))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="'+nameColor+'" letter-spacing="-1">'+esc(ln)+'</text>'; });
     y = y + nameLines.length*(nameFs+4) + 18;
-    svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#25ff86"/>'; y+=44;
+    svg+='<rect x="64" y="'+y+'" width="64" height="5" rx="2.5" fill="#2f9e5f"/>'; y+=44;
     introLines.forEach((ln,i)=>{ svg+='<text x="64" y="'+(y+i*34)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#aeb6cc">'+esc(ln)+'</text>'; });
     y += introLines.length*36 + 40;
     bits.forEach((b,i)=>{ svg+='<text x="64" y="'+(y+i*46)+'" font-family="-apple-system,sans-serif" font-size="22" fill="#dbe0ee">'+b[0]+'  '+esc(String(b[1]).slice(0,40))+'</text>'; });
@@ -5440,8 +5433,8 @@ const APP_HTML = String.raw`<!doctype html>
   function qrToPng(sub){ return new Promise(function(res,rej){ const img=new Image(); img.onload=function(){ const c=document.createElement('canvas'); c.width=c.height=252; const x=c.getContext('2d'); x.fillStyle='#ffffff'; x.fillRect(0,0,252,252); x.drawImage(img,0,0,252,252); try{ res(c.toDataURL('image/png')); }catch(e){ rej(e); } }; img.onerror=function(){ rej(new Error('qr')); }; img.src='/qr/'+encodeURIComponent(sub); }); }
   // Shared poster editor state (title override + logo/name colors), read by every posterSvg() call.
   const posterOpts = { title:null, nameColor:'', logoColor:'' };
-  const NAME_COLORS = ['#ffffff','#25ff86','#8b7bff','#ffd166','#ff6b6b','#0a0e0a'];
-  const LOGO_COLORS = ['#ffffff','#25ff86','#8b7bff','#ffd166','#0a0e0a'];
+  const NAME_COLORS = ['#ffffff','#2f9e5f','#8b7bff','#ffd166','#ff6b6b','#0a0e0a'];
+  const LOGO_COLORS = ['#ffffff','#2f9e5f','#8b7bff','#ffd166','#0a0e0a'];
   // Title + color controls, reused on /poster and /share. repaint() re-renders the current preview.
   function posterControlsHtml(){
     const sw=function(c,cls){ return '<button class="'+cls+'" data-c="'+esc(c)+'" title="'+esc(c)+'" style="width:26px;height:26px;border-radius:7px;border:2px solid var(--line);background:'+esc(c)+';cursor:pointer;padding:0"></button>'; };
