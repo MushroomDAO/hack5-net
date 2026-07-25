@@ -2674,11 +2674,12 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
 
   const owner = "mini";
   const repoKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
-  // Per-participant free quota: mini gives 1 free build per email; beyond that requires payment
-  // (anonymous mini has no login, so email is the identity — same key as the submission identity).
+  // Per-participant billing: every mini build is charged by real token usage — no free build. The
+  // participant must own a verified email (so the organizer can pre-fund it) and hold enough credits.
+  // (anonymous mini has no login, so email is the identity — same key as the submission identity.)
   const launchKey = `miniapp:launch:${tid}:${repoKey}`;
   const launched = Number((await env.SHOTS.get(launchKey)) ?? "0");
-  const FREE_LAUNCHES = 1;
+  const FREE_LAUNCHES = 0; // no free build: every mini build is metered by real token usage (organizer pre-funds participant credits)
   // Beyond the free build, charge credits. Real-time, no overdraft: reserve a hold up-front (atomic
   // conditional deduct — can't reserve more than the balance), then settle to the build's actual cost
   // on the deployed callback (refunding the overheld part) or release it if the build fails. The hold
@@ -2688,7 +2689,7 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   if (launched >= FREE_LAUNCHES) {
     const me = await getParticipant(request, env, tid);
     if (!(me?.verified === true && me.email === email)) {
-      return json({ error: "免费额度已用完。请在「我的黑客松」验证邮箱后用积分继续 / Free quota used — verify your email in My hackathon to continue with credits", upgrade: true, needVerify: true }, 402);
+      return json({ error: "构建按实际用量扣积分,请先在「我的黑客松」验证邮箱后继续(积分由组织者预充值提供)/ Builds are charged by real token usage — verify your email in My hackathon to continue (credits are pre-funded by the organizer)", upgrade: true, needVerify: true }, 402);
     }
     const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
     const now0 = unixNow();
@@ -2802,12 +2803,12 @@ async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | nu
   const repoKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
   const launchKey = `miniapp:launch:${tid}:${repoKey}`;
   const launched = Number((await env.SHOTS.get(launchKey)) ?? "0");
-  const FREE_LAUNCHES = 1;
+  const FREE_LAUNCHES = 0; // no free build: every mini build is metered by real token usage (organizer pre-funds participant credits)
   let creditHold = 0;
   if (launched >= FREE_LAUNCHES) {
     const me = await getParticipant(request, env, tid);
     if (!(me?.verified === true && me.email === email)) {
-      return json({ error: "免费额度已用完。请在「我的黑客松」验证邮箱后用积分继续 / Free quota used — verify your email in My hackathon to continue with credits", upgrade: true, needVerify: true }, 402);
+      return json({ error: "构建按实际用量扣积分,请先在「我的黑客松」验证邮箱后继续(积分由组织者预充值提供)/ Builds are charged by real token usage — verify your email in My hackathon to continue (credits are pre-funded by the organizer)", upgrade: true, needVerify: true }, 402);
     }
     const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
     const now0 = unixNow();
@@ -3003,7 +3004,7 @@ async function nameSelftest(env: Env): Promise<Response> {
 // ============================ WorkBench usage / billing (A7) ============================
 
 // Shape the raw WorkBench usage into a per-participant summary + the mini free-tier note.
-// Read-only display (C4: v1 只记录用量;成本模型 Phase 2). `mini 首场免费,之后累计待结算`.
+// Read-only display (C4: v1 只记录用量;成本模型 Phase 2). `mini 按实际 token 用量扣积分(无首场免费)`.
 function shapeMiniUsage(usage: { global?: { tokens?: number; requests?: number }; perProject?: Record<string, { tokens?: number; requests?: number }>; byClient?: Record<string, { tokens?: number }>; at?: string }) {
   const perProject = Object.entries(usage.perProject ?? {})
     .map(([project, v]) => ({ project, tokens: Number(v?.tokens ?? 0), requests: v?.requests ?? null }))
@@ -3016,7 +3017,7 @@ function shapeMiniUsage(usage: { global?: { tokens?: number; requests?: number }
     perProject,
     byClient: usage.byClient ?? null,
     // v1 只读:免费/付费由 hack5 侧 DB plan='paid' 控制;这里仅展示用量与额度口径。
-    freeTier: { model: "mini 首场免费,之后按 token 累计待结算 / first event free, then metered", freeEvents: 1 },
+    freeTier: { model: "按实际 token 用量扣积分,预估约 100 积分/人;积分由组织者预充值 / metered by real token usage, ~100 credits per participant, pre-funded by the organizer", freeEvents: 0 },
   };
 }
 
@@ -4746,8 +4747,8 @@ const APP_HTML = String.raw`<!doctype html>
       // Mini
       + '<div class="price-card"><div class="pc-ico">✨</div><h2>'+t('Mini 黑客松','Mini')+'</h2>'
       + '<div class="pc-tag">'+t('组织按场 · 参赛按用量','Host per event · builds by usage')+'</div>'
-      + '<p>'+t('面向非开发者:AI 帮参赛者把想法做成能跑的应用。组织者一口价,参赛者的每次构建按实际 token 消耗扣积分。','For non-coders: AI turns ideas into working apps. Flat cost to organize; each participant build is charged by real token usage.')+'</p>'
-      + '<ul class="pc-list"><li>'+t('5 分钟创建','Live in 5 min')+'</li><li>'+t('参赛构建按 token 扣积分','Builds metered by tokens')+'</li><li>'+t('可由赞助商代付','A sponsor can pay')+'</li></ul>'
+      + '<p>'+t('面向非开发者:AI 帮参赛者把想法做成能跑的应用。组织者一口价 50 积分;参赛者的每次构建按实际 token 消耗扣积分(预估约 100 积分/人),积分由组织者预充值提供。','For non-coders: AI turns ideas into working apps. Flat 50 credits to organize; each participant build is charged by real token usage (≈100 credits/participant), pre-funded by the organizer.')+'</p>'
+      + '<ul class="pc-list"><li>'+t('5 分钟创建','Live in 5 min')+'</li><li>'+t('参赛构建按 token 扣积分(约 100/人)','Builds metered by tokens (≈100/person)')+'</li><li>'+t('参赛者积分由组织者预充值(可由赞助商代付)','Participant credits pre-funded by the organizer (a sponsor can pay)')+'</li></ul>'
       + '<div class="pc-price"><b>50 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
       + '<button class="pc-btn" data-plan="mini">'+t('去举办','Host one')+'</button></div>'
       // Enterprise secret
@@ -4967,7 +4968,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="entry-grid">'
       + '<div class="entry-card" onclick="startMode(\'open\')"><div class="ec-ico">⚡</div><h3>'+t('常规黑客松','Regular')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 200 人以下','10 min · under 200 people')+'</div><p>'+t('公开报名、作品墙、评审打分——通用规模。','Public sign-up, gallery, judging — general scale.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
       + '<div class="entry-card" onclick="startMode(\'secret\')"><div class="ec-ico">🔒</div><h3>'+t('企业私密黑客松','Enterprise')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 邀请制','10 min · invite-only')+'</div><p>'+t('访问码门禁、不公开源码、Demo 评审。付费。','Access-gated, no source exposed, demo review. Paid.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
-      + '<div class="entry-card" onclick="startMode(\'mini\')"><div class="ec-ico">✨</div><h3>'+t('Mini 黑客松','Mini')+'</h3><div class="ec-sub">'+t('5 分钟启动 · AI 驱动 · 50 人以下','5 min · AI-powered · under 50')+'</div><p>'+t('面向非开发者:AI 驱动,一句想法就能自动做成能跑的应用。每人 1 次免费。','For non-coders — AI-powered: one idea auto-built into a working app. 1 free each.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
+      + '<div class="entry-card" onclick="startMode(\'mini\')"><div class="ec-ico">✨</div><h3>'+t('Mini 黑客松','Mini')+'</h3><div class="ec-sub">'+t('5 分钟启动 · AI 驱动 · 50 人以下','5 min · AI-powered · under 50')+'</div><p>'+t('面向非开发者:AI 驱动,一句想法就能自动做成能跑的应用。构建按实际用量扣积分,组织者预充值。','For non-coders — AI-powered: one idea auto-built into a working app. Builds metered by usage, pre-funded by the organizer.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
       + '</div>'
       + '<div style="text-align:center;margin-top:16px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 看 Demo 示例 → demo.hack5.net','👀 See the demo → demo.hack5.net')+'</a></div>'
       + '<div class="guide-steps" style="margin-top:38px">'
@@ -5116,9 +5117,7 @@ const APP_HTML = String.raw`<!doctype html>
                 ? '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">'+t('(可选)','(optional)')+'</span></label><input id="hIntro" maxlength="2000" placeholder="'+t('这是一场关于…的 mini 黑客松','A mini hackathon about…')+'">'
                 : '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…','A hackathon about… for…')+'"></textarea>')
             + (cm==='mini' ? '' : '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款)','(optional — default used)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>')
-            + (cm==='open'
-                ? '<label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="hSecret" style="width:auto"> '+t('🔒 私密 / 企业模式','🔒 Private / enterprise')+'</label><div id="hSecretOpts" style="display:none"><label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px"></div>'
-                : cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
+            + (cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
             + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b> · '+t('余额','balance')+' '+bal+'</div>'
             + '<div class="row" style="margin-top:10px"><button id="hCreate">'+(cm==='mini'?t('✨ 5 分钟创建','✨ Create in 5 min'):t('创建并部署','Create & deploy'))+'</button></div><div id="hMsg"></div>'
           : (frozen
@@ -6385,7 +6384,7 @@ const APP_HTML = String.raw`<!doctype html>
   async function renderMiniUsage(){
     if(!CONFIG.tenant){ go('/'); return; }
     app.innerHTML = '<h1>'+t('用量与计费','Usage & billing')+'</h1>'
-      + '<div class="notice">'+t('只读:mini 首场免费,之后按 token 累计待结算。真实用量需 WorkBench 联调后显示。','Read-only: first mini event free, then metered. Real figures appear after WorkBench integration.')+'</div>'
+      + '<div class="notice">'+t('只读:mini 构建按实际 token 用量扣积分(无首场免费),预估约 100 积分/人,积分由组织者预充值。真实用量需 WorkBench 联调后显示。','Read-only: mini builds are metered by real token usage (no free build), ≈100 credits/participant, pre-funded by the organizer. Real figures appear after WorkBench integration.')+'</div>'
       + '<div id="usageBox" class="panel"><p>'+t('加载中…','Loading…')+'</p></div>';
     try{
       const u = await api('/api/tenant/mini/usage');
