@@ -1043,6 +1043,33 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     return json({ error: "子域名配置失败,请重试 / Subdomain setup failed", detail: dnsErr }, 502);
   }
 
+  // First-free race close: two concurrent "first regular" creates can both read openCount==0 and go free.
+  // Resolve deterministically — only the EARLIEST (created_at, id) open tenant keeps it free; any later one
+  // must pay the full price now, or be rolled back if it can't afford it. (mini/secret have no free tier.)
+  if (mode === "open" && cost === 0 && !paid) {
+    const mine = await env.DB.prepare("SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'open' ORDER BY created_at ASC, id ASC")
+      .bind(user.email)
+      .all<{ id: string }>();
+    if ((mine.results ?? []).findIndex((r) => r.id === id) >= 1) {
+      const price = hackathonCost(env, "open");
+      const late = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
+        .bind(price, unixNow(), user.email, price)
+        .run();
+      if (late.meta.changes !== 1) {
+        // A concurrent create already claimed the free slot and this one can't afford the price → roll back.
+        // (The subdomain CNAME is idempotent, so a retry reuses it; leaving it is harmless.)
+        await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
+        const bal = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(user.email).first<{ credits: number }>();
+        const have = bal?.credits ?? 0;
+        return json(
+          { error: `首场免费名额刚被占用(并发),本次需 ${price} 积分,你当前 ${have} 积分,请充值后再办 / Your free-first slot was just used — this one needs ${price} credits, you have ${have}.`, cost: price, balance: have, pricingUrl: "/pricing", upgrade: true },
+          402,
+        );
+      }
+      creditsCharged = price;
+    }
+  }
+
   // Tenant confirmed (survived insert + DNS) → record the credit spend for audit (idempotent by tenant id).
   if (creditsCharged) {
     await env.DB.prepare("INSERT OR IGNORE INTO credit_ledger (id, tenant_id, email, kind, status, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'hackathon', 'spent', ?, ?, ?, ?)")
