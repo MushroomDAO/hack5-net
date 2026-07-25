@@ -4558,6 +4558,16 @@ const APP_HTML = String.raw`<!doctype html>
       ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
       ['🌱', t('数字公共物品','A digital public good'), t('Hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','Hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
     ];
+    // Brand marks, inlined so the media kit renders without a fetch: 墨绿 (ink-green, for light) + bright-green (for dark).
+    const dgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
+      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#14532d">5</text></svg>';
+    const bgSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="52" height="52" aria-label="Hack5">'
+      +'<rect width="40" height="40" rx="11" fill="#0a0e0a"/>'
+      +'<path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text></svg>';
     app.innerHTML = '<div class="guide">'
       + '<div class="guide-hero"><h1>'+t('关于 Hack5','About Hack5')+'</h1>'
       + '<p class="guide-sub">'+t('人人可办的黑客松平台','a hackathon platform anyone can run')+'</p></div>'
@@ -4567,6 +4577,28 @@ const APP_HTML = String.raw`<!doctype html>
       + '</div>'
       + '<div class="guide-steps" style="margin-top:20px">'
       + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
+      + '</div>'
+      // ---- media kit: 墨绿/亮绿 logo 展示 + 下载 + Hack5 / hack5.net 标识 ----
+      + '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
+      + '<div class="panel">'
+      +   '<div style="display:flex;gap:16px;flex-wrap:wrap">'
+      +     '<div style="flex:1;min-width:210px;background:#fff;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px">'
+      +       '<span style="flex:none;line-height:0">'+dgSvg+'</span>'
+      +       '<div><div style="font-size:23px;font-weight:800;color:#14532d;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
+      +       '<div style="font-size:13px;color:#14532d;opacity:.72">hack5.net</div></div>'
+      +     '</div>'
+      +     '<div style="flex:1;min-width:210px;background:#0a0e0a;border-radius:14px;padding:22px;display:flex;align-items:center;gap:14px;border:1px solid rgba(255,255,255,.08)">'
+      +       '<span style="flex:none;line-height:0">'+bgSvg+'</span>'
+      +       '<div><div style="font-size:23px;font-weight:800;color:#25ff86;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.5px">Hack5</div>'
+      +       '<div style="font-size:13px;color:#25ff86;opacity:.72">hack5.net</div></div>'
+      +     '</div>'
+      +   '</div>'
+      +   '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:14px">'
+      +     '<a href="/brand/hack5-logo-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿 Logo','Ink-green')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-logo-green.svg" download><button class="ghost">⬇ '+t('亮绿 Logo','Bright-green')+' (SVG)</button></a>'
+      +     '<a href="/brand/hack5-logo.png" download><button class="ghost">⬇ Logo (PNG)</button></a>'
+      +   '</div>'
+      +   '<p class="muted" style="margin:12px 2px 0;font-size:12.5px;line-height:1.7">'+t('主色:墨绿 #14532D(浅底)· 亮绿 #25FF86(深底)。标识 = &lt;5&gt; 字符标 + 「Hack5」字标,域名 hack5.net。转载/报道请直接使用以上文件,勿改色、勿变形、勿加边框。','Primary: ink-green #14532D on light · bright-green #25FF86 on dark. The mark is the &lt;5&gt; glyph + the “Hack5” wordmark; domain hack5.net. For press, use the files as-is — do not recolor, distort, or add borders.')+'</p>'
       + '</div>'
       + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><button onclick="go(\'/start\')">'+t('发起黑客松 →','Start a hackathon →')+'</button></div>'
       + '</div>';
