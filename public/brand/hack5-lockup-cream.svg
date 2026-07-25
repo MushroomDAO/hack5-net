@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 120" width="380" height="120" role="img" aria-label="Hack5 — hack5.net"><title>Hack5 lockup — black on cream</title>
-  <rect width="380" height="120" rx="18" fill="#f6f2e9"/>
-  <g transform="translate(34,34)">
-    <path d="M20 6 6 26 20 46" fill="none" stroke="#0a0e0a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M48 6 62 26 48 46" fill="none" stroke="#0a0e0a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="34" y="40" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="34" font-weight="800" fill="#0a0e0a">5</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 392 128" width="392" height="128" role="img" aria-label="Hack5 — hack5.net"><title>Hack5 lockup</title>
+  <rect width="392" height="128" rx="18" fill="#f6f2e9"/>
+  <text x="32" y="73" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="50" font-weight="800" fill="#0a0e0a" letter-spacing="-1">Hack</text>
+  <g transform="translate(178,28)">
+    <path d="M13 8 3 30 13 52" fill="none" stroke="#14532d" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M55 8 65 30 55 52" fill="none" stroke="#14532d" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="34" y="46" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="38" font-weight="800" fill="#14532d">5</text>
   </g>
-  <text x="150" y="58" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="40" font-weight="800" fill="#0a0e0a" letter-spacing="-0.5">Hack5</text>
-  <text x="152" y="84" font-family="ui-monospace,Menlo,monospace" font-size="17" fill="#0a0e0a" opacity="0.68">hack5.net</text>
+  <text x="34" y="102" font-family="ui-monospace,Menlo,monospace" font-size="16" fill="#0a0e0a" opacity="0.72">hack5.net</text>
 </svg>
