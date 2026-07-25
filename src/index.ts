@@ -4041,7 +4041,7 @@ const APP_HTML = String.raw`<!doctype html>
     .ghost:hover{background:var(--ghost-hover)}
     header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
     .brand{display:flex;align-items:center;gap:10px;font-weight:800;cursor:pointer}
-    #brandName{color:#14532d}
+    #brandName{color:#14532d;font-family:Inter,ui-sans-serif,-apple-system,sans-serif;letter-spacing:-1px}
     .brandchev{color:#14532d}
     :root[data-theme="dark"] #brandName{color:#5fd39a}
     :root[data-theme="dark"] .brandchev{color:#5fd39a}
@@ -4211,10 +4211,10 @@ const APP_HTML = String.raw`<!doctype html>
 <body>
   <header>
     <div class="brand" onclick="go('/')">
-      <span id="brandName">Hack</span><svg class="brandchev" width="42" height="25" viewBox="0 0 66 40" aria-hidden="true" style="flex:0 0 auto;margin-left:2px">
-        <path d="M9 6 3 20 9 34" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-        <text x="33" y="29" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="30" font-weight="800" fill="currentColor">5</text>
-        <path d="M57 6 63 20 57 34" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <span id="brandName">Hack</span><svg class="brandchev" width="37" height="24" viewBox="0 0 60 40" aria-hidden="true" style="flex:0 0 auto;margin-left:1px">
+        <path d="M17 7 9 20 17 33" fill="none" stroke="currentColor" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="30" y="30" text-anchor="middle" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="34" font-weight="800" fill="currentColor" letter-spacing="-1">5</text>
+        <path d="M43 7 51 20 43 33" fill="none" stroke="currentColor" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round"/>
       </svg></div>
     <nav id="nav"></nav>
   </header>
@@ -4956,11 +4956,11 @@ const APP_HTML = String.raw`<!doctype html>
   // displayed + mark-only + PNG) + usage note. Marks inlined so it renders without a fetch.
   function mediaKitHtml(){
     // Full "Hack‹5›" wordmark as one inline SVG so the ‹5› is exactly the same size as "Hack".
-    const wordmark = function(hackC,markC,h){ return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 286 64" height="'+(h||34)+'" role="img" aria-label="Hack5">'
-      +'<text x="0" y="51" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="52" font-weight="800" fill="'+hackC+'" letter-spacing="-1">Hack</text>'
-      +'<path d="M182 24 170 43 182 62" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>'
-      +'<text x="216" y="52" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="52" font-weight="800" fill="'+markC+'">5</text>'
-      +'<path d="M250 24 262 43 250 62" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'; };
+    const wordmark = function(hackC,markC,h){ return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 64" height="'+(h||34)+'" role="img" aria-label="Hack5">'
+      +'<text x="0" y="51" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="52" font-weight="800" fill="'+hackC+'" letter-spacing="-2">Hack</text>'
+      +'<path d="M170 25 161 43 170 61" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>'
+      +'<text x="196" y="51" text-anchor="middle" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="52" font-weight="800" fill="'+markC+'" letter-spacing="-1">5</text>'
+      +'<path d="M222 25 231 43 222 61" fill="none" stroke="'+markC+'" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'; };
     const card = function(bg,hackC,markC){ return '<div style="flex:1;min-width:210px;background:'+bg+';border-radius:14px;padding:22px;border:1px solid rgba(128,128,128,.14)">'
       +'<div style="line-height:0">'+wordmark(hackC,markC,34)+'</div>'
       +'<div style="font-size:13px;color:'+hackC+';opacity:.65;font-family:ui-monospace,Menlo,monospace;margin-top:8px">hack5.net</div></div>'; };
@@ -5483,10 +5483,10 @@ const APP_HTML = String.raw`<!doctype html>
       + (bg
           ? '<rect width="794" height="1123" fill="#080a12"/><image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#pscrim)"/>'
           : '<rect width="794" height="1123" fill="url(#pbg)"/><rect width="794" height="1123" fill="url(#pglow)"/><rect width="794" height="1123" fill="url(#pglow2)"/><text x="470" y="1050" font-family="ui-monospace,monospace" font-size="520" font-weight="800" fill="#ffffff" opacity="0.03">5</text>')
-      + '<text x="64" y="104" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="30" font-weight="800" fill="'+logoColor+'" letter-spacing="-0.5">Hack</text>'
-      + '<path d="M171 85 162 104 171 123" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
-      + '<text x="197" y="104" text-anchor="middle" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="'+logoColor+'">5</text>'
-      + '<path d="M223 85 232 104 223 123" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<text x="64" y="104" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="30" font-weight="800" fill="'+logoColor+'" letter-spacing="-1.5">Hack</text>'
+      + '<path d="M160 88 152 104 160 120" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<text x="184" y="104" text-anchor="middle" font-family="Inter,ui-sans-serif,-apple-system,sans-serif" font-size="30" font-weight="800" fill="'+logoColor+'" letter-spacing="-1">5</text>'
+      + '<path d="M208 88 216 104 208 120" fill="none" stroke="'+logoColor+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
       + '<text x="730" y="105" text-anchor="end" font-family="-apple-system,sans-serif" font-size="13" fill="#8b93b5" letter-spacing="4">HACKATHON</text>';
     let y=300;
     if(eyebrow){ svg+='<text x="64" y="'+y+'" font-family="-apple-system,sans-serif" font-size="19" font-weight="600" fill="#8b7bff" letter-spacing="1.5">'+esc(eyebrow.slice(0,60))+'</text>'; y+=20; }
