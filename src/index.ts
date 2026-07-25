@@ -64,8 +64,13 @@ interface Env {
   CREDIT_USD_VALUE?: string; // dollars per credit (default 0.02)
   CREDITS_MARKUP?: string; // markup multiplier over raw model cost (default 2)
   CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
-  CREDITS_SIGNUP_GRANT?: string; // credits granted to a new participant on first registration (default 300)
+  CREDITS_SIGNUP_GRANT?: string; // credits granted to a new participant/organizer on first sight of an email (default 300)
   CREDITS_LAUNCH_HOLD?: string; // credits reserved up-front for a paid build; settled to actual cost (default 30)
+  // Credit cost to CREATE a hackathon (deducted from the organizer's balance). mini participants then pay
+  // per-build by real token usage on top of this. Defaults: open 80 / secret 300 / mini 50.
+  HACKATHON_COST_OPEN?: string;
+  HACKATHON_COST_SECRET?: string;
+  HACKATHON_COST_MINI?: string;
   STALE_BUILD_MINUTES?: string; // reap non-terminal builds with no update for this long (default 120)
 }
 
@@ -517,6 +522,7 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
   if (!user) return json({ email: null });
   const row = await env.DB.prepare("SELECT quota, plan FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string }>();
   const quota = row?.quota ?? 1;
+  const crow = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(user.email).first<{ credits: number }>();
   const list = await env.DB.prepare(
     "SELECT subdomain, name, created_at FROM tenants WHERE owner_email = ? AND status = 'active' ORDER BY created_at ASC",
   )
@@ -526,6 +532,9 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
     email: user.email,
     quota,
     plan: row?.plan ?? "free",
+    // Credit balance + per-mode creation cost — the create flow shows these and gates on them.
+    credits: crow?.credits ?? 0,
+    costs: { open: hackathonCost(env, "open"), secret: hackathonCost(env, "secret"), mini: hackathonCost(env, "mini") },
     isOperator: isOperatorEmail(env, user.email),
     used: list.results.length,
     hackathons: list.results.map((h) => ({ subdomain: h.subdomain, name: h.name, url: `https://${h.subdomain}.hack5.net` })),
@@ -730,6 +739,9 @@ async function platformLoginVerify(request: Request, env: Env): Promise<Response
   await env.DB.prepare("INSERT OR IGNORE INTO users (email, quota, plan, created_at) VALUES (?, 1, 'free', ?)")
     .bind(email, now)
     .run();
+  // Seed the organizer's credit account on first login too, so a new organizer can afford their first
+  // hackathon (open 80 / mini 50). Same pool as mini participants; granted once per email.
+  await grantSignupCredits(env, email, now);
   const token = await signUser(env, { email, exp: now + 30 * 24 * 60 * 60 });
   return json({ ok: true, email }, 200, { "Set-Cookie": userCookie(request, token, 30 * 24 * 60 * 60) });
 }
@@ -913,6 +925,23 @@ async function pickAvailableSubdomain(env: Env, base: string): Promise<string> {
   return clip(`${base.slice(0, 25)}-${randomCodeBody(4).toLowerCase()}`);
 }
 
+// Credit cost to create a hackathon of this mode. open 80 / secret 300 / mini 50 (env-overridable).
+function hackathonCost(env: Env, mode: string): number {
+  const raw = mode === "secret" ? env.HACKATHON_COST_SECRET : mode === "mini" ? env.HACKATHON_COST_MINI : env.HACKATHON_COST_OPEN;
+  const def = mode === "secret" ? 300 : mode === "mini" ? 50 : 80;
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
+// Seed a credit account on first sight of an email (participant registration OR organizer login), granting
+// CREDITS_SIGNUP_GRANT (default 300). INSERT OR IGNORE → granted exactly once per email, never re-granted.
+async function grantSignupCredits(env: Env, email: string, now: number): Promise<void> {
+  const grant = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "300")) || 300);
+  await env.DB.prepare("INSERT OR IGNORE INTO participant_credits (email, credits, granted, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+    .bind(email, grant, grant, now, now)
+    .run();
+}
+
 async function createHackathon(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ error: "请先登录 / Please log in" }, 401);
@@ -949,74 +978,58 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(subdomain).first();
   if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
 
-  const urow = await env.DB.prepare("SELECT quota, plan FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string }>();
-  const quota = urow?.quota ?? 1;
-  // Paid accounts (grant manually via `UPDATE users SET plan='paid' WHERE email=?`) bypass every free-tier
-  // limit: unlimited secret + mini + regular. Free accounts keep the free tiers below.
+  // Credit-priced creation (open 80 / secret 300 / mini 50). We deduct from the organizer's credit balance
+  // (participant_credits, keyed by their login email — the same pool as mini participants). Operator-comped
+  // `plan='paid'` accounts create for free (no charge). mini participants still pay per-build by token usage.
+  const cost = hackathonCost(env, mode);
+  const modeLabel = mode === "secret" ? "企业私密" : mode === "mini" ? "mini" : "普通";
+  const urow = await env.DB.prepare("SELECT plan FROM users WHERE email = ?").bind(user.email).first<{ plan: string }>();
   const paid = urow?.plan === "paid";
+  let creditsCharged = 0;
   if (!paid) {
-    if (mode === "secret") {
-      // Enterprise secret hackathon is paid-only — no free tier.
-      return json({ error: "企业私密黑客松需付费账户,请购买后开通 / Enterprise secret hackathon requires a paid account", upgrade: true }, 402);
-    } else if (mode === "mini") {
-      // Mini has its own free allowance (1 per person), separate from the regular quota. Post-paid after.
-      const miniUsed = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND mode = 'mini' AND status = 'active'")
-        .bind(user.email)
-        .first<{ c: number }>();
-      if ((miniUsed?.c ?? 0) >= 1) {
-        return json({ error: "mini 免费额度已用完(每人 1 场)。充值或由赞助商代付后可继续 / Free mini used — top up or get a sponsor", upgrade: true }, 402);
-      }
-    } else {
-      const used = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode != 'mini'")
-        .bind(user.email)
-        .first<{ c: number }>();
-      if ((used?.c ?? 0) >= quota) {
-        return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached — upgrade for 100`, upgrade: true }, 402);
-      }
+    // Atomic conditional deduct — can't go below zero, so a concurrent create can't overdraw the balance.
+    const deducted = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
+      .bind(cost, unixNow(), user.email, cost)
+      .run();
+    if (deducted.meta.changes !== 1) {
+      const bal = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(user.email).first<{ credits: number }>();
+      const have = bal?.credits ?? 0;
+      return json(
+        { error: `举办${modeLabel}黑客松需 ${cost} 积分,你当前 ${have} 积分,请充值后再办 / Hosting a ${mode} hackathon costs ${cost} credits — you have ${have}. Top up to continue.`, cost, balance: have, pricingUrl: "/pricing", upgrade: true },
+        402,
+      );
     }
+    creditsCharged = cost;
   }
 
   const adminPass = `hack5-${randomCodeBody(8).toLowerCase()}`;
   const now = unixNow();
   const id = crypto.randomUUID();
-  await env.DB.prepare(
-    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-  )
-    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, mode, accessDays, now, now)
-    .run();
-
-  // Close the quota race deterministically: recount after insert and roll back if a concurrent
-  // create pushed this one past the limit (regular/secret share the quota; mini has its own free=1).
-  // Paid accounts have no limit, so nothing to roll back.
-  if (paid) {
-    // no-op: unlimited
-  } else if (mode === "mini") {
-    const mine = await env.DB.prepare(
-      "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'mini' ORDER BY created_at ASC, id ASC",
+  try {
+    await env.DB.prepare(
+      "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
     )
-      .bind(user.email)
-      .all<{ id: string }>();
-    if (mine.results.findIndex((r) => r.id === id) >= 1) {
-      await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
-      return json({ error: "mini 免费额度已用完(每人 1 场)。充值或由赞助商代付后可继续 / Free mini used", upgrade: true }, 402);
-    }
-  } else {
-    const owned = await env.DB.prepare(
-      "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode != 'mini' ORDER BY created_at ASC, id ASC",
-    )
-      .bind(user.email)
-      .all<{ id: string }>();
-    if (owned.results.findIndex((r) => r.id === id) >= quota) {
-      await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
-      return json({ error: `已达免费额度(${quota} 场)。充值 ¥99 可举办 100 场 / Quota reached`, upgrade: true }, 402);
-    }
+      .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, mode, accessDays, now, now)
+      .run();
+  } catch {
+    // Subdomain UNIQUE race (taken between the check above and here) or any insert failure → refund + 409.
+    if (creditsCharged) await env.DB.prepare("UPDATE participant_credits SET credits = credits + ?, updated_at = ? WHERE email = ?").bind(creditsCharged, unixNow(), user.email).run();
+    return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
   }
 
-  // Auto-provision the subdomain DNS so <sub>.hack5.net resolves. Roll back the tenant if it fails.
+  // Auto-provision the subdomain DNS so <sub>.hack5.net resolves. Roll back the tenant (and refund) if it fails.
   const dnsErr = await createSubdomainDns(env, subdomain);
   if (dnsErr) {
     await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
+    if (creditsCharged) await env.DB.prepare("UPDATE participant_credits SET credits = credits + ?, updated_at = ? WHERE email = ?").bind(creditsCharged, unixNow(), user.email).run();
     return json({ error: "子域名配置失败,请重试 / Subdomain setup failed", detail: dnsErr }, 502);
+  }
+
+  // Tenant confirmed (survived insert + DNS) → record the credit spend for audit (idempotent by tenant id).
+  if (creditsCharged) {
+    await env.DB.prepare("INSERT OR IGNORE INTO credit_ledger (id, tenant_id, email, kind, status, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'hackathon', 'spent', ?, ?, ?, ?)")
+      .bind(`hackathon:${id}`, id, user.email, creditsCharged, mode, now, now)
+      .run();
   }
 
   // Store the banner now that the tenant is confirmed (survived quota + DNS); flag only after it lands.
@@ -1277,12 +1290,7 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
     .run();
   // Seed the participant's local credits account on first sight of this email (global across events).
   // INSERT OR IGNORE → granted exactly once per email; a repeat / cross-event registration never re-grants.
-  const grant = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "300")) || 300);
-  await env.DB.prepare(
-    "INSERT OR IGNORE INTO participant_credits (email, credits, granted, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-  )
-    .bind(email, grant, grant, now, now)
-    .run();
+  await grantSignupCredits(env, email, now);
   // Registering establishes an UNVERIFIED participant session (hv_part, verified:false): this browser
   // typed an email but has not proven it owns that inbox, so the session may unlock 开始开发 (which needs
   // only `registered`) but must NOT read admin-only registration/submission details — otherwise anyone
@@ -4533,28 +4541,37 @@ const APP_HTML = String.raw`<!doctype html>
 
   // ---------------- about ----------------
   function renderPricing(){
-    app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('购买 / 充值','Pricing')+'</h1>'
-      + '<p class="guide-sub">'+t('常规黑客松首场免费;Mini 与企业私密为付费产品。','Regular is free for your first event; Mini and Enterprise are paid.')+'</p></div>'
+    app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('积分与价格','Credits & pricing')+'</h1>'
+      + '<p class="guide-sub">'+t('按积分举办黑客松 · 新用户注册即送 300 积分','Host hackathons with credits · new accounts get 300 free credits')+'</p></div>'
       + '<div class="price-grid">'
-      // Mini — recharge / pay-per-use
+      // Regular
+      + '<div class="price-card"><div class="pc-ico">⚡</div><h2>'+t('常规黑客松','Regular')+'</h2>'
+      + '<div class="pc-tag">'+t('按场 · 积分','Per event · credits')+'</div>'
+      + '<p>'+t('公开报名、作品墙、评委打分、海报与一键转发。适合社区、校园、线上赛。','Open sign-up, project wall, judge scoring, posters & one-click sharing. For communities, campuses, online events.')+'</p>'
+      + '<ul class="pc-list"><li>'+t('独立子域名站点','Its own subdomain site')+'</li><li>'+t('记录永久保留','Records kept forever')+'</li></ul>'
+      + '<div class="pc-price"><b>80 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
+      + '<button class="pc-btn" data-plan="open">'+t('去举办','Host one')+'</button></div>'
+      // Mini
       + '<div class="price-card"><div class="pc-ico">✨</div><h2>'+t('Mini 黑客松','Mini')+'</h2>'
-      + '<div class="pc-tag">'+t('充值制 · 按用量','Top-up · pay as you go')+'</div>'
-      + '<p>'+t('面向非开发者:AI 帮你把想法做成能跑的应用。每建一个应用都会消耗 AI token,所以按充值使用。','For non-coders: AI turns your idea into a working app. Building each app consumes AI tokens, so it runs on top-ups.')+'</p>'
-      + '<ul class="pc-list"><li>'+t('每人首场免费','First event free per person')+'</li><li>'+t('之后按 token 充值继续','Then top up to keep going')+'</li><li>'+t('可由赞助商代付','A sponsor can pay for you')+'</li></ul>'
-      + '<div class="pc-price"><b>'+t('充值包','Top-up')+'</b> <span class="muted">¥50 / ¥100 / ¥200</span></div>'
-      + '<button class="pc-btn" data-plan="mini">'+t('充值','Top up')+'</button></div>'
-      // Enterprise secret — direct purchase
+      + '<div class="pc-tag">'+t('组织按场 · 参赛按用量','Host per event · builds by usage')+'</div>'
+      + '<p>'+t('面向非开发者:AI 帮参赛者把想法做成能跑的应用。组织者一口价,参赛者的每次构建按实际 token 消耗扣积分。','For non-coders: AI turns ideas into working apps. Flat cost to organize; each participant build is charged by real token usage.')+'</p>'
+      + '<ul class="pc-list"><li>'+t('5 分钟创建','Live in 5 min')+'</li><li>'+t('参赛构建按 token 扣积分','Builds metered by tokens')+'</li><li>'+t('可由赞助商代付','A sponsor can pay')+'</li></ul>'
+      + '<div class="pc-price"><b>50 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
+      + '<button class="pc-btn" data-plan="mini">'+t('去举办','Host one')+'</button></div>'
+      // Enterprise secret
       + '<div class="price-card"><div class="pc-ico">🔒</div><h2>'+t('企业私密黑客松','Enterprise')+'</h2>'
-      + '<div class="pc-tag">'+t('直接购买 · 按场','Buy directly · per event')+'</div>'
+      + '<div class="pc-tag">'+t('按场 · 积分','Per event · credits')+'</div>'
       + '<p>'+t('邀请制、访问码门禁、不公开源码、Demo 评审。适合企业内部赛与命题赛。','Invite-only, access-gated, no source exposed, demo review. For internal & themed enterprise events.')+'</p>'
-      + '<ul class="pc-list"><li>'+t('访问码门禁 + 会话时效','Access gate + timed sessions')+'</li><li>'+t('评委作为协作者评估私有代码','Judges review private code as collaborators')+'</li><li>'+t('一口价,按场购买','Flat price, per event')+'</li></ul>'
-      + '<div class="pc-price"><b>'+t('按场','Per event')+'</b> <span class="muted">'+t('购买后即用','buy & go')+'</span></div>'
-      + '<button class="pc-btn" data-plan="secret">'+t('购买','Buy')+'</button></div>'
+      + '<ul class="pc-list"><li>'+t('访问码门禁 + 会话时效','Access gate + timed sessions')+'</li><li>'+t('评委作为协作者评估私有代码','Judges review private code as collaborators')+'</li></ul>'
+      + '<div class="pc-price"><b>300 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
+      + '<button class="pc-btn" data-plan="secret">'+t('去举办','Host one')+'</button></div>'
       + '</div>'
-      + '<p class="muted" style="text-align:center;margin-top:20px;font-size:13px">'+t('支付通道即将上线。现在需要开通请联系我们。','Payment is coming soon — contact us to get set up now.')+'</p>'
+      + '<p class="muted" style="text-align:center;margin-top:20px;font-size:13px">'+t('1 积分 = $0.02。注册送 300 积分(够办 1 场常规或 6 场 mini)。充值通道即将上线,现在需要更多积分请联系我们。','1 credit = $0.02. New accounts get 300 credits (enough for 1 regular or 6 mini events). Top-up is coming soon — contact us for more now.')+'</p>'
       + '</div>';
     app.querySelectorAll('.pc-btn').forEach(b=>b.addEventListener('click',()=>{
-      alert(t('支付通道即将上线,我们会尽快开通。可先联系 Mycelium 团队。','Payment is coming soon. Please contact the Mycelium team to get set up.'));
+      const plan=b.dataset.plan;
+      window.__createMode = (plan==='mini'||plan==='secret') ? plan : null; // 'open' → regular (no preset)
+      go('/start'); // → the create flow (or platform login first), with the mode preselected
     }));
   }
   function renderMedia(){
@@ -4796,10 +4813,14 @@ const APP_HTML = String.raw`<!doctype html>
     const hs = ME_USER.hackathons || [];
     const cm = window.__createMode==='mini'?'mini':window.__createMode==='secret'?'secret':'open';
     const modeLabel = cm==='mini'?t('✨ Mini(5 分钟)','✨ Mini'):cm==='secret'?t('🔒 企业私密','🔒 Enterprise'):t('⚡ 常规','⚡ Regular');
-    // Mini has its own free allowance; regular/secret share the quota. canCreate never blocks mini here.
-    const canCreate = cm==='mini' || (ME_USER.used||0) < (ME_USER.quota||1);
+    // Credit-priced: creating costs 积分 (open 80 / secret 300 / mini 50), deducted from your balance.
+    const costs = ME_USER.costs || {open:80,secret:300,mini:50};
+    const cost = costs[cm]!=null?costs[cm]:(cm==='secret'?300:cm==='mini'?50:80);
+    const bal = ME_USER.credits||0;
+    const paidAcct = ME_USER.plan==='paid';
+    const canCreate = paidAcct || bal >= cost;
     app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'
-      + '<p class="muted">'+t('已用','Used')+' '+(ME_USER.used||0)+' / '+(ME_USER.quota||1)+'</p>'
+      + '<p class="muted">💳 '+t('积分余额','Credits')+' <b>'+bal+'</b>'+(paidAcct?' · '+t('付费账户,创建免积分','paid — free to create'):' · '+t('普通 80 / 企业 300 / mini 50 积分一场','open 80 / secret 300 / mini 50 per event'))+'</p>'
       + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
       + (canCreate
@@ -4813,11 +4834,12 @@ const APP_HTML = String.raw`<!doctype html>
             + (cm==='open'
                 ? '<label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="hSecret" style="width:auto"> '+t('🔒 私密 / 企业模式','🔒 Private / enterprise')+'</label><div id="hSecretOpts" style="display:none"><label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px"></div>'
                 : cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
-            + '<div class="row" style="margin-top:14px"><button id="hCreate">'+(cm==='mini'?t('✨ 5 分钟创建','✨ Create in 5 min'):t('创建并部署','Create & deploy'))+'</button></div><div id="hMsg"></div>'
-          : '<div class="notice">'+t('已达免费额度。充值 ¥99 可举办 100 场。','Free quota reached. Upgrade (¥99) for 100 hackathons.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('充值 ¥99','Upgrade ¥99')+'</button></div>')
+            + '<div class="muted" style="font-size:12px;margin:8px 0 2px">'+t('本次将扣','This costs')+' <b id="hCostHint">'+cost+'</b> '+t('积分','credits')+(paidAcct?' ('+t('付费账户免扣','free on paid')+')':' · '+t('余额','balance')+' '+bal)+'</div>'
+            + '<div class="row" style="margin-top:10px"><button id="hCreate">'+(cm==='mini'?t('✨ 5 分钟创建','✨ Create in 5 min'):t('创建并部署','Create & deploy'))+'</button></div><div id="hMsg"></div>'
+          : '<div class="notice">'+t('积分不足','Not enough credits')+':'+t('本次需','need')+' '+cost+' '+t('积分,你当前','credits, you have')+' '+bal+'。'+t('充值后即可举办。','Top up to host.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值','Top up')+'</button></div>')
       + '</div></div>';
     if(canCreate){
-      const sc=$('#hSecret'); if(sc) sc.addEventListener('change', ()=>{ $('#hSecretOpts').style.display = sc.checked ? 'block' : 'none'; });
+      const sc=$('#hSecret'); if(sc) sc.addEventListener('change', ()=>{ $('#hSecretOpts').style.display = sc.checked ? 'block' : 'none'; const ch=$('#hCostHint'); if(ch) ch.textContent = sc.checked ? (costs.secret!=null?costs.secret:300) : (costs.open!=null?costs.open:80); });
       const bf=$('#hBanner'); if(bf) bf.addEventListener('change', async ev=>{
         const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
         try{ window.__hBanner=await compressBanner(f); $('#hBannerPrev').innerHTML='<img src="'+window.__hBanner+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;margin-top:8px;border:1px solid var(--line)">'; }
