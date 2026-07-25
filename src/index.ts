@@ -1137,11 +1137,18 @@ async function sendRegistrationConfirmEmail(
 async function createSubdomainDns(env: Env, sub: string): Promise<string | null> {
   if (!env.CF_DNS_TOKEN || !env.CF_ZONE_ID) return null;
   const root = env.ROOT_DOMAIN || "hack5.net";
-  const res = await fetch(`https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/dns_records`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.CF_DNS_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "CNAME", name: sub, content: root, proxied: true, ttl: 1 }),
-  });
+  // Must NEVER throw: callers (createHackathon) charge credits before this and roll back / refund on the
+  // RETURNED error. A thrown fetch (network failure) would bypass that → credits lost + orphaned tenant.
+  let res: Response;
+  try {
+    res = await fetch(`https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/dns_records`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.CF_DNS_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "CNAME", name: sub, content: root, proxied: true, ttl: 1 }),
+    });
+  } catch (e) {
+    return `DNS request failed: ${String(e)}`;
+  }
   if (res.ok) return null;
   const body = await res.json<{ errors?: { code?: number; message?: string }[] }>().catch(() => null);
   if (body?.errors?.some((e) => e.code === 81053 || String(e.message ?? "").toLowerCase().includes("already exists"))) {
