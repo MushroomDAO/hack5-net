@@ -4966,7 +4966,11 @@ const APP_HTML = String.raw`<!doctype html>
       +     '<a href="/brand/hack5-logo.png" download><button>⬇ '+t('奶白底 / 墨绿','Cream / ink-green')+' (PNG)</button></a>'
       +     '<a href="/brand/hack5-logo-black.png" download><button>⬇ '+t('黑底 / 亮绿','Black / matrix-green')+' (PNG)</button></a>'
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt;:','Mark only &lt;5&gt;:')+'</div>'
+      +   '<div class="muted" style="font-size:12px;margin:12px 0 6px">'+t('仅字符标 &lt;5&gt;(尖角号 + 5):','Mark only &lt;5&gt; (chevrons + 5):')+'</div>'
+      +   '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:8px">'
+      +     '<div style="width:72px;height:72px;border-radius:12px;background:#f6f2e9;border:1px solid rgba(128,128,128,.14);display:flex;align-items:center;justify-content:center"><img src="/brand/hack5-logo-darkgreen.svg" alt="Hack5 mark" style="width:46px;height:46px"></div>'
+      +     '<div style="width:72px;height:72px;border-radius:12px;background:#0a0e0a;border:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center"><img src="/brand/hack5-logo-green.svg" alt="Hack5 mark" style="width:46px;height:46px"></div>'
+      +   '</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
       +     '<a href="/brand/hack5-logo-darkgreen.svg" download><button class="ghost">⬇ '+t('墨绿标','Ink-green mark')+' (SVG)</button></a>'
       +     '<a href="/brand/hack5-logo-green.svg" download><button class="ghost">⬇ '+t('亮绿标','Bright-green mark')+' (SVG)</button></a>'
@@ -5002,14 +5006,18 @@ const APP_HTML = String.raw`<!doctype html>
       // ---- What Hack5 handles for you (item cards, same guide-steps format as the landing list) ----
       + '<h2 style="margin:34px 2px 14px;font-size:22px">'+t('Hack5 帮你搞定全流程','Everything Hack5 handles for you')+'</h2>'
       + '<div class="guide-steps">'+[
-          ['🙋', t('参赛者快速注册','Participants sign up in seconds'), t('邮箱一键报名,一句想法交给 AI 就能做成作品。','One-tap email sign-up; hand an idea to AI and get a working project.')],
-          ['🧑‍⚖️', t('评委独立评审','Judges review independently'), t('评委独立注册、独立登录、在线打分与评价。','Judges register and log in on their own, then score and review online.')],
-          ['🎯', t('组织方多赛事管理','Multi-event management'), t('一处管理你所有的黑客松,赛事、报名、评分尽在掌握。','Run all your hackathons from one place — events, sign-ups and scoring.')],
+          ['🌐', t('独立域名站点','Its own domain site'), t('每场黑客松一个 name.hack5.net,专业又好记。','Each hackathon gets its own name.hack5.net — professional and memorable.')],
+          ['📧', t('参赛者快速注册','Participants sign up in seconds'), t('邮箱一键报名、免注册,一句想法交给 AI 就能做成作品。','One-tap email sign-up (no account needed); hand an idea to AI and get a working project.')],
+          ['🤖', t('Mini AI 代码 Agent','Mini AI coding agent'), t('Mini 黑客松:一句想法,AI 代码 Agent 自动做成能跑的应用。','In a Mini hackathon, one idea becomes a working app via an AI coding agent.')],
           ['🐙', t('代码自动上 GitHub','Code auto-published to GitHub'), t('参赛作品的代码自动发布到 GitHub 仓库。','Each project’s code is auto-published to a GitHub repo.')],
           ['☁️', t('自动部署 Cloudflare','Auto-deployed to Cloudflare'), t('参赛作品自动部署上线(内置账号,7 天自动清理)。','Projects auto-deploy live on Cloudflare — a built-in account, cleaned up after 7 days.')],
-          ['🤖', t('Mini AI 代码 Agent','Mini AI coding agent'), t('Mini 黑客松:一句想法,AI 代码 Agent 自动做成能跑的应用。','In a Mini hackathon, one idea becomes a working app via an AI coding agent.')],
-          ['🏆', t('作品排行榜','Project leaderboard'), t('评委打分 + 实时排名,作品一目了然。','Judge scores and live ranking make every project stand out.')],
+          ['🧱', t('作品墙','Project wall'), t('选手交 GitHub 链接,自动抓 star / 语言 / README 生成作品卡。','Builders drop a GitHub link; cards are auto-built from stars, language and README.')],
+          ['🧑‍⚖️', t('评委独立评审','Judges review independently'), t('评委登录码、四维打分、锁定评审版本,独立登录评价。','Judge login codes, four-dimension scoring, locked review versions — judges log in on their own.')],
+          ['🏆', t('作品排行榜','Project leaderboard'), t('实时排名 + CSV 导出,作品一目了然。','Live ranking with CSV export makes every project stand out.')],
+          ['🏠', t('活动首页 + 地图','Event homepage + map'), t('介绍、时间地点、周期,内嵌地图(国内外自动适配)。','Intro, date & location, schedule, with an embedded map (auto-fits China / overseas).')],
+          ['📸', t('照片墙','Photo wall'), t('现场花絮瀑布流,上传自动压缩。','A masonry stream of event photos; uploads are auto-compressed.')],
           ['🎨', t('海报智能生成','Smart poster generation'), t('AI 生成背景 + 自动排版 + 二维码,一键出图。','AI background + auto layout + QR — a poster in one click.')],
+          ['🎯', t('组织方多赛事管理','Multi-event management'), t('一处管理你所有的黑客松,赛事、报名、评分尽在掌握。','Run all your hackathons from one place — events, sign-ups and scoring.')],
           ['🌏', t('中 / 英 / 泰 三语','Chinese / English / Thai'), t('全站三语切换,面向国内外社区。','Full trilingual UI for communities at home and abroad.')],
           ['🔗', t('转发与名单','Sharing & rosters'), t('一键转发、二维码、报名名单导出。','One-click sharing, QR codes, and roster export.')]
         ].map(function(f){return '<div class="step"><div class="num" style="font-size:19px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>';}).join('')+'</div>'
