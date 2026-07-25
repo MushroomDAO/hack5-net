@@ -1085,12 +1085,15 @@ function hackathonCost(env: Env, mode: string): number {
 async function grantSignupCredits(env: Env, email: string, now: number): Promise<void> {
   const base = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "100")) || 100);
   const cap = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT_CAP ?? "100")) || 100);
-  const already = await env.DB.prepare("SELECT email FROM participant_credits WHERE email = ?").bind(email).first();
-  if (already) return; // never re-grant / re-count an existing account
-  const cnt = Number((await env.DB.prepare("SELECT COUNT(*) AS c FROM participant_credits").first<{ c: number }>())?.c ?? 0);
-  const grant = cnt < cap ? base : 0; // first `cap` accounts get `base`, the rest 0
-  await env.DB.prepare("INSERT OR IGNORE INTO participant_credits (email, credits, granted, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-    .bind(email, grant, grant, now, now)
+  // Atomic: the COUNT and the INSERT run in ONE statement, so concurrent signups can't all read a stale
+  // count and over-grant past `cap` (D1 serializes per-statement — a later call sees the earlier committed
+  // row). INSERT OR IGNORE (email is PK) never re-grants an existing account. Grant `base` while under the
+  // cap, else 0. Binds in text order: email, created_at, updated_at, cap, base.
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO participant_credits (email, credits, granted, created_at, updated_at) " +
+      "SELECT ?, v, v, ?, ? FROM (SELECT CASE WHEN (SELECT COUNT(*) FROM participant_credits) < ? THEN ? ELSE 0 END AS v)",
+  )
+    .bind(email, now, now, cap, base)
     .run();
 }
 
