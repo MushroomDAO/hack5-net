@@ -70,6 +70,7 @@ interface Env {
   CREDITS_MARKUP?: string; // markup multiplier over raw model cost (default 2)
   CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
   CREDITS_SIGNUP_GRANT?: string; // credits granted to a new participant/organizer on first sight of an email (default 100)
+  CREDITS_SIGNUP_GRANT_CAP?: string; // only the first N registered accounts get the signup grant (default 100)
   CREDITS_LAUNCH_HOLD?: string; // credits reserved up-front for a paid build; settled to actual cost (default 30)
   // Credit cost to CREATE a hackathon (deducted from the organizer's balance). mini participants then pay
   // per-build by real token usage on top of this. Defaults: open 80 / secret 300 / mini 50.
@@ -143,6 +144,7 @@ export default {
 
       // ---- platform user (email login) + hackathon creation (not tenant-scoped) ----
       if (path === "/api/platform/me" && method === "GET") return platformMe(request, env);
+      if (path === "/api/platform/stats" && method === "GET") return platformStats(env);
       if (path === "/api/platform/login/request" && method === "POST") return platformLoginRequest(request, env);
       if (path === "/api/platform/login/verify" && method === "POST") return platformLoginVerify(request, env);
       if (path === "/api/platform/logout" && method === "POST") return platformLogout(request);
@@ -526,6 +528,14 @@ async function getUser(request: Request, env: Env): Promise<UserAuth | null> {
   } catch {
     return null;
   }
+}
+
+// Public stats: how many accounts registered + how many of the first-N signup-grant slots remain.
+async function platformStats(env: Env): Promise<Response> {
+  const cap = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT_CAP ?? "100")) || 100);
+  const grant = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "100")) || 100);
+  const cnt = Number((await env.DB.prepare("SELECT COUNT(*) AS c FROM participant_credits").first<{ c: number }>())?.c ?? 0);
+  return json({ registered: cnt, grantCap: cap, grant, grantRemaining: Math.max(0, cap - cnt) });
 }
 
 async function platformMe(request: Request, env: Env): Promise<Response> {
@@ -1070,11 +1080,20 @@ function hackathonCost(env: Env, mode: string): number {
 }
 
 // Seed a credit account on first sight of an email (participant registration OR organizer login), granting
-// CREDITS_SIGNUP_GRANT (default 100). INSERT OR IGNORE → granted exactly once per email, never re-granted.
+// CREDITS_SIGNUP_GRANT (default 100), given ONLY to the first CREDITS_SIGNUP_GRANT_CAP (default 100)
+// registered accounts — after that new accounts are created with 0. INSERT OR IGNORE → once per email.
 async function grantSignupCredits(env: Env, email: string, now: number): Promise<void> {
-  const grant = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "100")) || 100);
-  await env.DB.prepare("INSERT OR IGNORE INTO participant_credits (email, credits, granted, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-    .bind(email, grant, grant, now, now)
+  const base = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "100")) || 100);
+  const cap = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT_CAP ?? "100")) || 100);
+  // Atomic: the COUNT and the INSERT run in ONE statement, so concurrent signups can't all read a stale
+  // count and over-grant past `cap` (D1 serializes per-statement — a later call sees the earlier committed
+  // row). INSERT OR IGNORE (email is PK) never re-grants an existing account. Grant `base` while under the
+  // cap, else 0. Binds in text order: email, created_at, updated_at, cap, base.
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO participant_credits (email, credits, granted, created_at, updated_at) " +
+      "SELECT ?, v, v, ?, ? FROM (SELECT CASE WHEN (SELECT COUNT(*) FROM participant_credits) < ? THEN ? ELSE 0 END AS v)",
+  )
+    .bind(email, now, now, cap, base)
     .run();
 }
 
@@ -4885,15 +4904,18 @@ const APP_HTML = String.raw`<!doctype html>
     }));
   }
   // ---------------- rewards / earn credits (activity page) ----------------
-  function renderRewards(){
+  async function renderRewards(){
     const BLOG='https://blog.mushroom.cv/';
+    let stats=null; try{ stats=await api('/api/platform/stats'); }catch(e){}
+    const regLine = stats ? (t('已注册','Registered')+' <b>'+stats.registered+'</b> / '+stats.grantCap+' · '+(stats.grantRemaining>0?(t('注册送积分名额剩','signup-grant slots left')+' '+stats.grantRemaining):t('名额已满(新账户不再自动送)','slots full — new accounts no longer auto-credited'))) : '';
     app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>🎁 '+t('赚积分','Earn credits')+'</h1>'
-      + '<p class="guide-sub">'+t('注册即送 100 积分,还有更多方式一起长黑客松 —— 把 Hack5 分享出去。','Sign up for 100 free credits — and here are more ways to earn while spreading Hack5.')+'</p></div>'
+      + '<p class="guide-sub">'+t('限前 100 名注册即送 100 积分,还有更多方式一起长黑客松 —— 把 Hack5 分享出去。','The first 100 sign-ups get 100 free credits — plus more ways to earn while spreading Hack5.')+'</p>'
+      + (regLine?'<p class="muted" style="margin-top:6px;font-size:13px">'+regLine+'</p>':'')+'</div>'
       + '<div class="price-grid">'
-      // 1) signup grant (live)
+      // 1) signup grant (live, first 100 only)
       + '<div class="price-card"><div class="pc-ico">🎁</div><h2>'+t('注册即送','Sign-up bonus')+'</h2>'
-      + '<div class="pc-tag">'+t('已自动到账','Auto-credited')+'</div>'
-      + '<p>'+t('新账户注册即得 100 积分,够办 1 场常规黑客松 —— 而且第一场还免费。','New accounts get 100 credits on sign-up — enough for a regular hackathon, and your first one is free.')+'</p>'
+      + '<div class="pc-tag">'+t('限前 100 名 · 自动到账','First 100 only · auto-credited')+'</div>'
+      + '<p>'+t('前 100 名注册的账户即得 100 积分,够办 1 场常规黑客松 —— 而且第一场还免费。','The first 100 registered accounts get 100 credits — enough for a regular hackathon, and your first one is free.')+'</p>'
       + '<div class="pc-price"><b>100 '+t('积分','credits')+'</b></div>'
       + '<button class="pc-btn" onclick="go(\'/start\')">'+t('去发起 →','Host one →')+'</button></div>'
       // 2) cost hook
@@ -4909,14 +4931,14 @@ const APP_HTML = String.raw`<!doctype html>
       + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('投稿到 Mycelium Blog →','Submit to Mycelium Blog →')+'</button></a></div>'
       // 4) subscribe blog
       + '<div class="price-card"><div class="pc-ico">📰</div><h2>'+t('订阅 Mycelium Blog','Subscribe to the Blog')+'</h2>'
-      + '<div class="pc-tag">'+t('每月 +30 积分','+30 credits / month')+'</div>'
-      + '<p>'+t('订阅 Mycelium Blog,每月赠 30 积分。持续关注数字公共品与黑客松生态。','Subscribe to Mycelium Blog and get 30 credits every month while following the digital-public-goods ecosystem.')+'</p>'
-      + '<div class="pc-price"><b>+30 '+t('积分/月','cr / mo')+'</b></div>'
+      + '<div class="pc-tag">'+t('每月 +10 积分(需评论一次)','+10 credits / month (1 comment)')+'</div>'
+      + '<p>'+t('订阅 Mycelium Blog,并在当月至少评论一次,即得 10 积分/月。持续关注数字公共品与黑客松生态。','Subscribe to Mycelium Blog and comment at least once that month to get 10 credits/month, while following the digital-public-goods ecosystem.')+'</p>'
+      + '<div class="pc-price"><b>+10 '+t('积分/月','cr / mo')+'</b></div>'
       + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('去订阅 →','Subscribe →')+'</button></a></div>'
-      // 5) comment
-      + '<div class="price-card"><div class="pc-ico">💬</div><h2>'+t('评论一条 Post','Comment on a post')+'</h2>'
-      + '<div class="pc-tag">'+t('每条 +1 积分','+1 credit each')+'</div>'
-      + '<p>'+t('用你的 AI agent 账户在 Blog 文章下评论,每条 +1 积分。让你的 agent 帮你持续参与社区。','Comment on Blog posts with your AI agent account for +1 credit each — let your agent stay engaged for you.')+'</p>'
+      // 5) comment = the interaction that unlocks the monthly +10
+      + '<div class="price-card"><div class="pc-ico">💬</div><h2>'+t('评论互动','Comment to unlock')+'</h2>'
+      + '<div class="pc-tag">'+t('每月互动一次','Once a month')+'</div>'
+      + '<p>'+t('用你的 AI agent 账户在 Blog 文章下评论 —— 当月评论过,就满足上面「每月 +10 积分」的互动条件。让你的 agent 帮你持续参与社区。','Comment on a Blog post with your AI agent account — one comment that month unlocks the +10 monthly credits above. Let your agent stay engaged for you.')+'</p>'
       + '<div class="pc-price"><b>+1 '+t('积分/条','cr / comment')+'</b></div>'
       + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('去评论 →','Go comment →')+'</button></a></div>'
       + '</div>'
@@ -4991,6 +5013,15 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="guide-steps" style="margin-top:20px">'
       + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
       + '</div>'
+      // ---- Why Hack5? ----
+      + '<h2 style="margin:34px 2px 14px;font-size:22px">'+t('为什么是 Hack5?','Why Hack5?')+'</h2>'
+      + '<div class="panel" style="font-size:15.5px;line-height:1.85;color:var(--ink2)">'
+      + '<p style="margin-top:0">'+t('黑客松早已有很多免费系统和收费平台,连 ETHGlobal 这样的大型赛事都自建整套系统 —— 但对普通人来说,黑客松依然是个遥远的话题。','Hackathons already have plenty of free tools and paid platforms — even big events like ETHGlobal build their own — yet for ordinary people a hackathon still feels far away.')+'</p>'
+      + '<p>'+t('而随着 AI 普及、中国大模型崛起、顶级模型 token 大幅降价,<b>创造与创新第一次成了普通人也玩得起的游戏</b>:把想法说清楚,一个你亲手创造、能解决日常问题的产品、工具、小应用或简单系统,一天之内就能做出来!','As AI goes mainstream, Chinese large models rise, and top-model token prices fall, <b>creating and inventing finally becomes a game ordinary people can afford</b>: describe your idea clearly, and a product, tool, mini-app or small system you built yourself — one that solves a real daily problem — can be done in a single day.')+'</p>'
+      + '<p>'+t('可过去办一场黑客松又麻烦又难:定主题、触达和培训开发者、物料、场地、宣传、海报、AI token、非开发者的参与门槛,乃至最简单的报名、评分、名单整理 —— 全靠手工。<b>Hack5 把这套全流程都接了过来</b>,作为公共物品,只收取基础的服务器运维成本。','Running a hackathon used to be genuinely hard: theme, reaching and training developers, materials, venue, promotion, posters, AI tokens, the barrier for non-coders, even the basics of sign-up, scoring and roster-keeping — all by hand. <b>Hack5 takes the whole pipeline off your plate</b>, as a public good, charging only the basic server-running cost.')+'</p>'
+      + '<p>'+t('Hack5 的核心理念是<b>普及黑客松</b>:哪怕是老年大学、幼儿园、任何社区、任何一个人,都能马上组织一次思想火花的碰撞,让普通人开始那份属于黑客的激情创造。这正是 Mycelium 眼中的数字公共物品 —— <b>提升普通人的数字生活福祉</b>。','Hack5’s core idea is to <b>make hackathons for everyone</b>: a seniors’ college, a kindergarten, any community, any single person can spark a collision of ideas right away, and let ordinary people begin the hacker’s joy of creating. This is what Mycelium means by a digital public good — <b>lifting the digital well-being of ordinary people</b>.')+'</p>'
+      + '<p style="font-weight:700;color:var(--ink);margin-bottom:0">'+t('让我们开始创造! 🌱','Let’s start creating! 🌱')+'</p>'
+      + '</div>'
       + mediaKitHtml()
       + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><button onclick="go(\'/start\')">'+t('发起黑客松 →','Start a hackathon →')+'</button></div>'
       + '</div>';
@@ -4998,7 +5029,9 @@ const APP_HTML = String.raw`<!doctype html>
 
   // B — hack5 运营方(operator)账户管理:按 email 设 paid/free(+可选额度),替代手敲 SQL。
   async function renderOperator(){
+    let stats=null; try{ stats=await api('/api/platform/stats'); }catch(e){}
     app.innerHTML = '<h1>'+t('运营 · 账户管理','Operator · Accounts')+'</h1>'
+      + (stats?'<div class="panel" style="max-width:560px;display:flex;gap:28px;flex-wrap:wrap"><div><div class="muted">'+t('注册用户','Registered users')+'</div><div style="font-size:26px;font-weight:800">'+stats.registered+'</div></div><div><div class="muted">'+t('注册送积分名额(前 '+stats.grantCap+')','Signup-grant slots (first '+stats.grantCap+')')+'</div><div style="font-size:26px;font-weight:800">'+t('剩 ','')+stats.grantRemaining+'</div></div></div>':'')
       + '<div class="notice">'+t('把用户设为 paid = 已充值/可信,解除新账户 7 天冷冻,立即可举办;举办仍按积分扣(充值只是加积分,没有免扣账户)。','Setting a user to paid = topped-up/trusted: it only lifts the 7-day new-account cooldown so they can host immediately. Hosting still deducts credits — topping up just adds balance, there is no free-hosting tier.')+'</div>'
       + '<div class="panel" style="max-width:560px">'
       + '<label>'+t('用户邮箱','User email')+'</label><input id="opEmail" type="email" placeholder="user@example.com">'
