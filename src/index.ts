@@ -1754,24 +1754,14 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
 
   // BACKGROUND ONLY — never put the event name/words in the prompt (that makes FLUX render text). All
   // text/logo/QR is composited later in SVG (posterSvg). intro is used only as abstract mood, not literal.
-  const intro = (tenant.intro ?? "").replace(/\s+/g, " ").slice(0, 160);
-  const noText =
-    ` ABSOLUTELY NO text, no letters, no words, no numbers, no captions, no titles, no watermark, no logos,` +
-    ` no typography and no signage anywhere in the image — a purely abstract, completely textless background.`;
+  // Prompt = a PURE ABSTRACT WALLPAPER only. Deliberately NO "poster"/"hackathon"/event-name/intro — those
+  // bias flux-schnell toward rendering titles & captions. The no-text hint is kept to a single short clause;
+  // a long "no letters/words/numbers/captions…" list backfires on this model (it primes those very tokens).
+  // Every real word (title, time, location, QR, logo) is composited afterwards in SVG, never by the model.
   const prompt =
     mode === "free"
-      ? `Abstract hackathon poster BACKGROUND, textless.` +
-        (intro ? ` Mood/theme only (do not render as words): ${intro}.` : "") +
-        ` Style: deep indigo-to-black vertical gradient with luminous violet and emerald-green glows,` +
-        ` subtle glowing mycelium / network filaments, clean modern, cinematic, high detail, professional.` +
-        ` Vertical A4 portrait. Keep the lower third calmer and darker for text overlay.` +
-        noText
-      : `Hackathon poster BACKGROUND artwork, abstract and textless.` +
-        (intro ? ` Event mood/theme only (do not render as words): ${intro}.` : "") +
-        ` Art direction from the organizer: ${style}.` +
-        ` Vertical A4 portrait composition, cinematic, high detail, vivid, professional event-poster quality.` +
-        ` Keep the lower third calmer and slightly darker so text can be overlaid on top.` +
-        noText;
+      ? `Abstract vertical wallpaper, deep indigo to near-black smooth gradient, luminous violet and emerald-green glows, soft glowing network filaments, fine particles and gentle bokeh, cinematic, minimal, ultra high detail, calmer and darker toward the bottom. Pure abstract texture, no text.`
+      : `Abstract vertical wallpaper texture. Art direction: ${style}. Cinematic, vivid, ultra high detail, smooth, calmer and darker toward the bottom. Pure abstract, no text.`;
 
   // Generate the BACKGROUND. Prefer Cloudflare Workers AI (flux-1-schnell — native to this Worker, cheap,
   // no external key, no cold-start vendor); fall back to OpenAI gpt-image-1 only if the AI binding is absent.
@@ -1779,7 +1769,7 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
   let contentType = "image/jpeg";
   try {
     if (env.AI) {
-      const out = (await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt, steps: 6 })) as { image?: string };
+      const out = (await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt, steps: 8 })) as { image?: string };
       rawB64 = String(out?.image ?? "");
       contentType = "image/jpeg";
     } else {
