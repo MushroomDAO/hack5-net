@@ -222,6 +222,7 @@ export default {
       if (path === "/api/wb/callback" && method === "POST") return wbCallback(request, env);
       if (path === "/api/wb/callback-selftest" && method === "GET") return callbackSelftest(env);
       if (path === "/api/wb/reap-selftest" && method === "POST") return reapSelftest(env);
+      if (path === "/api/wb/affordability-selftest" && method === "POST") return affordabilitySelftest(env);
 
       // ---- screenshots (KV, content-addressed by submission uuid) ----
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
@@ -2127,6 +2128,38 @@ async function reapStaleBuilds(env: Env): Promise<{ reaped: number }> {
   return { reaped };
 }
 
+// Pre-build affordability gate (CC-61 hard门槛). The flat launch hold (30) covers a small build, but a
+// bigger idea/spec can cost more than the hold — settle would then floor the extra charge at 0 (the
+// platform eats the difference) and the participant was never told. So before reserving, ask WorkBench
+// for the credit estimate and require the balance to cover max(estimateHigh, hold). Returns null when
+// affordable, or a 402 Response telling the participant to top up. Best-effort on the estimate: if
+// WorkBench can't estimate, fall back to the hold-only guard — never block a build on an estimate
+// outage. NOTE: WorkBench currently under-estimates (tracked WorkBench-side on the Cooperation-Center);
+// once its seed table is calibrated this gate tightens automatically with the better numbers.
+async function affordabilityGate(env: Env, email: string, hold: number, input: { idea?: string; spec?: string }): Promise<Response | null> {
+  let gate = hold;
+  try {
+    const high = Math.ceil(Number((await createWorkbench(env).estimate(input))?.creditsHigh));
+    if (Number.isFinite(high) && high > hold) gate = high;
+  } catch {
+    /* estimate unavailable → hold-only gate (the atomic reserve still enforces balance >= hold) */
+  }
+  if (gate <= hold) return null; // nothing extra to check beyond the reserve's own balance >= hold guard
+  const row = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(email).first<{ credits: number }>();
+  const have = row?.credits ?? 0;
+  if (have >= gate) return null;
+  return json(
+    {
+      error: `积分不足:这个应用预计约需 ${gate} 积分,你当前 ${have} 积分,请充值后再生成 / Not enough credits — this build needs ~${gate}, you have ${have}. Top up to continue.`,
+      estCredits: gate,
+      balance: have,
+      pricingUrl: "/pricing",
+      upgrade: true,
+    },
+    402,
+  );
+}
+
 // Callback smoke test — mock-gated (404 in production); verifies the event→state mapping + badge
 // buckets without needing a signed request or a DB row.
 async function callbackSelftest(env: Env): Promise<Response> {
@@ -2142,6 +2175,29 @@ async function reapSelftest(env: Env): Promise<Response> {
   if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
   const { reaped } = await reapStaleBuilds(env);
   return json({ ok: true, reaped });
+}
+
+// Affordability-gate smoke test — mock-gated (404 in production). The mock estimate returns creditsHigh
+// 15, so we use hold=5 to make the gate (max(15,5)=15) actually exceed the hold and check the balance:
+// a 10-credit account must be blocked (402), a 100-credit account must pass (null). Seeds + cleans up.
+async function affordabilitySelftest(env: Env): Promise<Response> {
+  if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
+  const hold = 5;
+  const poor = "afford-selftest-poor@example.com";
+  const rich = "afford-selftest-rich@example.com";
+  const now = unixNow();
+  const seed = (email: string, credits: number) =>
+    env.DB.prepare("INSERT OR REPLACE INTO participant_credits (email, credits, granted, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(email, credits, credits, now, now)
+      .run();
+  await seed(poor, 10);
+  await seed(rich, 100);
+  const poorResp = await affordabilityGate(env, poor, hold, { idea: "smoke" });
+  const richResp = await affordabilityGate(env, rich, hold, { idea: "smoke" });
+  await env.DB.prepare("DELETE FROM participant_credits WHERE email IN (?, ?)").bind(poor, rich).run();
+  const poorBlocked = poorResp?.status === 402;
+  const richPassed = richResp === null;
+  return json({ ok: poorBlocked && richPassed, hold, estHigh: 15, poorBlocked, richPassed });
 }
 
 // ============================ A3 — mini「做成应用」入口 ============================
@@ -2420,6 +2476,9 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
     }
     const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
     const now0 = unixNow();
+    // Hard affordability gate: if the estimate exceeds the balance, stop here and prompt top-up.
+    const gateResp = await affordabilityGate(env, email, hold, { idea });
+    if (gateResp) return gateResp;
     const held = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
       .bind(hold, now0, email, hold)
       .run();
@@ -2536,6 +2595,9 @@ async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | nu
     }
     const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
     const now0 = unixNow();
+    // Hard affordability gate: estimate from the full spec; if it exceeds the balance, prompt top-up.
+    const gateResp = await affordabilityGate(env, email, hold, { spec });
+    if (gateResp) return gateResp;
     const held = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
       .bind(hold, now0, email, hold)
       .run();
@@ -5572,7 +5634,11 @@ const APP_HTML = String.raw`<!doctype html>
         setMsg('mkMsg','');
         clearDraft(); // build is queued and the repo is the artifact now — drop the saved chat draft
         await pollBuild(r.id, $('#launchBox'), r);
-      }catch(e){ setMsg('mkMsg', e.message, true); $('#mkGo').disabled=false; }
+      }catch(e){
+        // On an affordability 402 the server returns pricingUrl → offer a one-click 去充值 CTA.
+        const cta=(e.data&&e.data.pricingUrl)?' <a href="'+esc(e.data.pricingUrl)+'" onclick="go(\''+esc(e.data.pricingUrl)+'\');return false" style="font-weight:600">'+t('去充值 →','Top up →')+'</a>':'';
+        setMsg('mkMsg', e.message+cta, true); $('#mkGo').disabled=false;
+      }
     }
     function hydrateFromDraft(d){
       clientSlug=d.clientSlug||''; projectSlug=d.projectSlug||''; lastIdea=d.lastIdea||''; lastReadiness=d.readiness||d.lastReadiness||null;
