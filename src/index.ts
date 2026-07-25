@@ -520,9 +520,10 @@ async function getUser(request: Request, env: Env): Promise<UserAuth | null> {
 async function platformMe(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ email: null });
-  const row = await env.DB.prepare("SELECT quota, plan FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string }>();
+  const row = await env.DB.prepare("SELECT quota, plan, created_at FROM users WHERE email = ?").bind(user.email).first<{ quota: number; plan: string; created_at: number }>();
   const quota = row?.quota ?? 1;
   const crow = await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(user.email).first<{ credits: number }>();
+  const openCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'open'").bind(user.email).first<{ c: number }>();
   const list = await env.DB.prepare(
     "SELECT subdomain, name, created_at FROM tenants WHERE owner_email = ? AND status = 'active' ORDER BY created_at ASC",
   )
@@ -535,6 +536,8 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
     // Credit balance + per-mode creation cost — the create flow shows these and gates on them.
     credits: crow?.credits ?? 0,
     costs: { open: hackathonCost(env, "open"), secret: hackathonCost(env, "secret"), mini: hackathonCost(env, "mini") },
+    openUsed: openCount?.c ?? 0, // regular hackathons already created → first one is free
+    createdAt: row?.created_at ?? null, // account age → the 7-day new-account cooldown
     isOperator: isOperatorEmail(env, user.email),
     used: list.results.length,
     hackathons: list.results.map((h) => ({ subdomain: h.subdomain, name: h.name, url: `https://${h.subdomain}.hack5.net` })),
@@ -978,15 +981,29 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(subdomain).first();
   if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
 
-  // Credit-priced creation (open 80 / secret 300 / mini 50). We deduct from the organizer's credit balance
-  // (participant_credits, keyed by their login email — the same pool as mini participants). Operator-comped
-  // `plan='paid'` accounts create for free (no charge). mini participants still pay per-build by token usage.
-  const cost = hackathonCost(env, mode);
   const modeLabel = mode === "secret" ? "企业私密" : mode === "mini" ? "mini" : "普通";
-  const urow = await env.DB.prepare("SELECT plan FROM users WHERE email = ?").bind(user.email).first<{ plan: string }>();
+  const urow = await env.DB.prepare("SELECT plan, created_at FROM users WHERE email = ?").bind(user.email).first<{ plan: string; created_at: number }>();
   const paid = urow?.plan === "paid";
+  // Anti-abuse cooldown: a brand-new account (< 7 days) can't host, to stop signup-farming. Topping up
+  // (operator sets plan='paid') unlocks it immediately; binding a 2-year-old GitHub account will too once
+  // GitHub OAuth ships (TODO). Existing/paid accounts skip this entirely.
+  const acctAgeDays = urow?.created_at ? (unixNow() - Number(urow.created_at)) / 86400 : 999;
+  if (!paid && acctAgeDays < 7) {
+    return json(
+      { error: `新注册账户需满 7 天才能举办黑客松(还差 ${Math.max(1, Math.ceil(7 - acctAgeDays))} 天);充值后立即解锁 / New accounts can host after a 7-day cooldown — top up to unlock now`, cooldownDays: Math.max(1, Math.ceil(7 - acctAgeDays)), pricingUrl: "/pricing", upgrade: true },
+      403,
+    );
+  }
+  // Credit-priced creation. Regular's FIRST event is free; then open 80 / secret 300 / mini 50, deducted
+  // from the organizer's credit balance (participant_credits, same pool as mini participants). Operator-
+  // comped plan='paid' accounts create free. mini participants still pay per-build by token usage.
+  let cost = hackathonCost(env, mode);
+  if (mode === "open") {
+    const openCount = await env.DB.prepare("SELECT COUNT(*) AS c FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'open'").bind(user.email).first<{ c: number }>();
+    if ((openCount?.c ?? 0) === 0) cost = 0; // 常规黑客松首场免费
+  }
   let creditsCharged = 0;
-  if (!paid) {
+  if (!paid && cost > 0) {
     // Atomic conditional deduct — can't go below zero, so a concurrent create can't overdraw the balance.
     const deducted = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
       .bind(cost, unixNow(), user.email, cost)
@@ -4548,6 +4565,7 @@ const APP_HTML = String.raw`<!doctype html>
 
   // ---------------- about ----------------
   function renderPricing(){
+    const TOPUPS = [[10,500],[50,2500],[100,5000]]; // [USD, credits] — 1 积分 = $0.02
     app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('积分与价格','Credits & pricing')+'</h1>'
       + '<p class="guide-sub">'+t('按积分举办黑客松 · 新用户注册即送 300 积分','Host hackathons with credits · new accounts get 300 free credits')+'</p></div>'
       + '<div class="price-grid">'
@@ -4556,7 +4574,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="pc-tag">'+t('按场 · 积分','Per event · credits')+'</div>'
       + '<p>'+t('公开报名、作品墙、评委打分、海报与一键转发。适合社区、校园、线上赛。','Open sign-up, project wall, judge scoring, posters & one-click sharing. For communities, campuses, online events.')+'</p>'
       + '<ul class="pc-list"><li>'+t('独立子域名站点','Its own subdomain site')+'</li><li>'+t('记录永久保留','Records kept forever')+'</li></ul>'
-      + '<div class="pc-price"><b>80 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
+      + '<div class="pc-price"><b>'+t('首场免费','1st free')+'</b> <span class="muted">'+t('之后 80 积分/场','then 80 cr/event')+'</span></div>'
       + '<button class="pc-btn" data-plan="open">'+t('去举办','Host one')+'</button></div>'
       // Mini
       + '<div class="price-card"><div class="pc-ico">✨</div><h2>'+t('Mini 黑客松','Mini')+'</h2>'
@@ -4573,10 +4591,25 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="pc-price"><b>300 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
       + '<button class="pc-btn" data-plan="secret">'+t('去举办','Host one')+'</button></div>'
       + '</div>'
-      + '<p class="muted" style="text-align:center;margin-top:20px;font-size:13px">'+t('1 积分 = $0.02。注册送 300 积分(够办 1 场常规或 6 场 mini)。充值通道即将上线,现在需要更多积分请联系我们。','1 credit = $0.02. New accounts get 300 credits (enough for 1 regular or 6 mini events). Top-up is coming soon — contact us for more now.')+'</p>'
+      + '<p class="muted" style="text-align:center;margin-top:18px;font-size:13px">'+t('常规黑客松首场免费;之后与 mini/企业一样按积分扣。1 积分 = $0.02,注册即送 300 积分。','Your first regular hackathon is free; after that everything runs on credits. 1 credit = $0.02, and new accounts get 300 free.')+'</p>'
+      // ---- top-up packages ($ → credits) ----
+      + '<h2 style="text-align:center;margin:26px 0 2px;font-size:20px">'+t('充值包','Top up')+'</h2>'
+      + '<p class="guide-sub" style="text-align:center;margin-bottom:14px">'+t('1 积分 = $0.02','1 credit = $0.02')+'</p>'
+      + '<div class="price-grid">'
+      + TOPUPS.map(function(p){ return '<div class="price-card" style="text-align:center"><div class="pc-ico">💳</div><h2>$'+p[0]+'</h2>'
+          + '<div class="pc-price"><b>'+p[1]+' '+t('积分','credits')+'</b></div>'
+          + '<p class="muted" style="font-size:12px">≈ '+Math.floor(p[1]/80)+' '+t('场常规','regular')+' · '+Math.floor(p[1]/50)+' '+t('场 mini','mini')+'</p>'
+          + '<button class="pc-btn" data-plan="topup">'+t('充值','Top up')+'</button></div>'; }).join('')
+      + '</div>'
+      + '<p class="muted" style="text-align:center;margin-top:10px;font-size:12px">'+t('支付通道即将上线;现在需要充值请联系我们(运营可手动开通)。新注册账户 7 天后可举办,充值后立即解锁。','Payment is coming soon — contact us to top up now. New accounts can host after a 7-day cooldown; topping up unlocks it immediately.')+'</p>'
+      // ---- 黑客触达 (Hacker Reach) product teaser ----
+      + '<div class="panel guide-cta" style="margin-top:24px"><div class="pc-tag" style="display:inline-block;margin-bottom:6px">'+t('产品预报 · 即将上线','Coming soon')+'</div>'
+      + '<h2>📡 '+t('黑客触达','Hacker Reach')+'</h2>'
+      + '<p style="color:rgba(255,255,255,.88)">'+t('通过公众号、Blog、邮件订阅,以及历史黑客松参赛者名单,把你的黑客松第一时间触达到真正的 Builder 手中。常规黑客松第一次免费,后续收费。','Reach real Builders the moment you launch — via our WeChat channel, blog, email list, and the roster of past-hackathon participants. First regular hackathon free, then paid.')+'</p></div>'
       + '</div>';
     app.querySelectorAll('.pc-btn').forEach(b=>b.addEventListener('click',()=>{
       const plan=b.dataset.plan;
+      if(plan==='topup'){ alert(t('充值通道即将上线,请联系 Mycelium 团队开通(运营可手动加积分)。','Top-up is coming soon — contact the Mycelium team to get set up.')); return; }
       window.__createMode = (plan==='mini'||plan==='secret') ? plan : null; // 'open' → regular (no preset)
       go('/start'); // → the create flow (or platform login first), with the mode preselected
     }));
@@ -4820,12 +4853,18 @@ const APP_HTML = String.raw`<!doctype html>
     const hs = ME_USER.hackathons || [];
     const cm = window.__createMode==='mini'?'mini':window.__createMode==='secret'?'secret':'open';
     const modeLabel = cm==='mini'?t('✨ Mini(5 分钟)','✨ Mini'):cm==='secret'?t('🔒 企业私密','🔒 Enterprise'):t('⚡ 常规','⚡ Regular');
-    // Credit-priced: creating costs 积分 (open 80 / secret 300 / mini 50), deducted from your balance.
+    // Credit-priced: creating costs 积分 (open 80 / secret 300 / mini 50). Regular's FIRST event is free.
     const costs = ME_USER.costs || {open:80,secret:300,mini:50};
-    const cost = costs[cm]!=null?costs[cm]:(cm==='secret'?300:cm==='mini'?50:80);
+    const rawCost = costs[cm]!=null?costs[cm]:(cm==='secret'?300:cm==='mini'?50:80);
+    const firstOpenFree = (cm==='open') && ((ME_USER.openUsed||0)===0); // 常规首场免费
+    const cost = firstOpenFree ? 0 : rawCost;
     const bal = ME_USER.credits||0;
     const paidAcct = ME_USER.plan==='paid';
-    const canCreate = paidAcct || bal >= cost;
+    // 7-day new-account cooldown (server-enforced); paid unlocks it immediately.
+    const ageDays = ME_USER.createdAt ? (Date.now()/1000 - ME_USER.createdAt)/86400 : 999;
+    const frozen = !paidAcct && ageDays < 7;
+    const cooldownLeft = Math.max(1, Math.ceil(7 - ageDays));
+    const canCreate = !frozen && (paidAcct || bal >= cost);
     app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'
       + '<p class="muted">💳 '+t('积分余额','Credits')+' <b>'+bal+'</b>'+(paidAcct?' · '+t('付费账户,创建免积分','paid — free to create'):' · '+t('普通 80 / 企业 300 / mini 50 积分一场','open 80 / secret 300 / mini 50 per event'))+'</p>'
       + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
@@ -4841,12 +4880,14 @@ const APP_HTML = String.raw`<!doctype html>
             + (cm==='open'
                 ? '<label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="hSecret" style="width:auto"> '+t('🔒 私密 / 企业模式','🔒 Private / enterprise')+'</label><div id="hSecretOpts" style="display:none"><label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px"></div>'
                 : cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
-            + '<div class="muted" style="font-size:12px;margin:8px 0 2px">'+t('本次将扣','This costs')+' <b id="hCostHint">'+cost+'</b> '+t('积分','credits')+(paidAcct?' ('+t('付费账户免扣','free on paid')+')':' · '+t('余额','balance')+' '+bal)+'</div>'
+            + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b>'+(paidAcct?' · '+t('付费账户免扣','free on paid'):' · '+t('余额','balance')+' '+bal)+'</div>'
             + '<div class="row" style="margin-top:10px"><button id="hCreate">'+(cm==='mini'?t('✨ 5 分钟创建','✨ Create in 5 min'):t('创建并部署','Create & deploy'))+'</button></div><div id="hMsg"></div>'
-          : '<div class="notice">'+t('积分不足','Not enough credits')+':'+t('本次需','need')+' '+cost+' '+t('积分,你当前','credits, you have')+' '+bal+'。'+t('充值后即可举办。','Top up to host.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值','Top up')+'</button></div>')
+          : (frozen
+              ? '<div class="notice">🧊 '+t('新注册账户满 7 天后可举办','New accounts can host after a 7-day cooldown')+'('+t('还差','~')+' '+cooldownLeft+' '+t('天','d')+')。'+t('充值后立即解锁(后续也可绑定 2 年以上 GitHub 账户)。','Top up to unlock now — or bind a 2-year-old GitHub account later.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值解锁','Top up to unlock')+'</button></div>'
+              : '<div class="notice">'+t('积分不足','Not enough credits')+':'+t('本次需','need')+' '+cost+' '+t('积分,你当前','credits, you have')+' '+bal+'。'+t('充值后即可举办。','Top up to host.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('去充值','Top up')+'</button></div>'))
       + '</div></div>';
     if(canCreate){
-      const sc=$('#hSecret'); if(sc) sc.addEventListener('change', ()=>{ $('#hSecretOpts').style.display = sc.checked ? 'block' : 'none'; const ch=$('#hCostHint'); if(ch) ch.textContent = sc.checked ? (costs.secret!=null?costs.secret:300) : (costs.open!=null?costs.open:80); });
+      const sc=$('#hSecret'); if(sc) sc.addEventListener('change', ()=>{ $('#hSecretOpts').style.display = sc.checked ? 'block' : 'none'; const ch=$('#hCostHint'); if(ch) ch.textContent = sc.checked ? ((costs.secret!=null?costs.secret:300)+' '+t('积分','cr')) : (firstOpenFree ? t('免费(常规首场)','free (1st regular)') : ((costs.open!=null?costs.open:80)+' '+t('积分','cr'))); });
       const bf=$('#hBanner'); if(bf) bf.addEventListener('change', async ev=>{
         const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
         try{ window.__hBanner=await compressBanner(f); $('#hBannerPrev').innerHTML='<img src="'+window.__hBanner+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;margin-top:8px;border:1px solid var(--line)">'; }
