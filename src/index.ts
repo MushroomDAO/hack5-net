@@ -2556,32 +2556,41 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
   // Absolute platform-wide backstop: caps total LLM spend even if an attacker spreads across many
   // tenants/IPs. Per-IP + per-tenant caps above bound a single source; this bounds the whole day.
   if (!(await bumpDailyCap(env, `miniapp:chat:global:${day}`, capNum(env.MINIAPP_CHAT_GLOBAL_CAP, 3000)))) return json({ error: "系统今日对话已达上限,请明天再来 / Service daily chat limit reached" }, 429);
-  const body = await request.json<{ clientSlug?: string; projectSlug?: string; input?: string; projectName?: string; lang?: string }>().catch(() => null);
+  const body = await request.json<{ clientSlug?: string; projectSlug?: string; input?: string; currentSpec?: string; projectName?: string; lang?: string }>().catch(() => null);
   const input = String(body?.input ?? "").trim().slice(0, 1000);
   if (!input) return json({ error: "请说说你的想法 / Describe your idea" }, 400);
-  // Internal communication language: the AI replies in the participant's UI language (WorkBench chat
-  // supports lang; default zh, back-compatible). Only forward a known value.
-  const lang = body?.lang === "en" || body?.lang === "th" ? body.lang : "zh";
+  // AI replies in the participant's UI language. Only forward a known value.
+  const lang: "zh" | "en" | "th" = body?.lang === "en" || body?.lang === "th" ? body.lang : "zh";
   const wb = createWorkbench(env);
-  let clientSlug = String(body?.clientSlug ?? "").trim();
+  // CC-72: /make now calls WorkBench's shared, STATELESS /genspec. clientSlug/projectSlug are just local
+  // ids (for keying make_conversations + the build hold) — NOT WorkBench client/project resources — so
+  // there's no createClient/createProject provisioning and no scoped chat token. clientSlug = tenant
+  // subdomain; projectSlug is minted once from the first idea and echoed back by the client each round.
+  const clientSlug = tenant.subdomain;
   let projectSlug = String(body?.projectSlug ?? "").trim();
+  if (!projectSlug) {
+    const slug = String(body?.projectName ?? input).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "idea";
+    projectSlug = `${slug}-${randomCodeBody(4).toLowerCase()}`;
+  }
+  // The frontend holds the running spec (localStorage) and passes it back each round; server-side
+  // make_conversations is only a cross-device restore copy — so the authoritative currentSpec is the
+  // client's (also lets anonymous users iterate). ≤512K chars (upper bound on loop's byte limit).
+  const currentSpec = String(body?.currentSpec ?? "").slice(0, 512 * 1024);
   try {
-    // First turn (no slugs yet) → provision the tenant's WB client + a fresh project (KV-cached client,
-    // self-healing on a stale cache). Later turns reuse the slugs echoed back by the client. A per-project
-    // random suffix avoids "already exists" collisions when two participants phrase the same idea.
-    if (!clientSlug || !projectSlug) {
-      ({ clientSlug, projectSlug } = await provisionMiniWbProject(env, wb, tid, tenant, String(body?.projectName ?? input)));
-    }
-    const scoped = await mintScopedChatToken(env, clientSlug, projectSlug);
-    const res = await wb.chat({ clientSlug, projectSlug, input, lang }, { scopedToken: scoped });
-    const reply = res.result.reply ?? "";
-    // Persist the running transcript server-side for a returning (registered) participant, so a reload
-    // on another browser/device brings the conversation back. Best-effort — a persistence failure must
-    // never break the chat turn.
-    await persistMakeTurn(env, tid, request, clientSlug, projectSlug, input, reply, res.result.readiness).catch(() => {});
-    return json({ ok: true, clientSlug, projectSlug, readiness: res.result.readiness, reply });
+    const g = await wb.genspec({
+      input,
+      currentSpec: currentSpec || undefined,
+      clientContext: `活动:${tenant.name || tenant.subdomain}`,
+      deliverableContext: "交付物:web app",
+      lang,
+    });
+    const readiness = g.readiness || { score: 0, loop_ready: false };
+    // Persist the running conversation + spec server-side (best-effort) so a returning logged-in
+    // participant gets it back cross-device. Never let a persistence failure break the turn.
+    await persistMakeTurn(env, tid, request, clientSlug, projectSlug, input, g.reply || "", readiness, g.spec_markdown || "").catch(() => {});
+    return json({ ok: true, clientSlug, projectSlug, reply: g.reply || "", openQuestions: g.openQuestions || [], readiness, spec_markdown: g.spec_markdown || "", usage: g.usage || null });
   } catch (e) {
-    console.error("miniAppChat failed", String(e));
+    console.error("miniAppChat genspec failed", String(e));
     return json({ error: "WorkBench 暂不可用,请稍后再试 / WorkBench unavailable" }, 502);
   }
 }
@@ -2599,6 +2608,7 @@ async function persistMakeTurn(
   input: string,
   reply: string,
   readiness: { score?: number; loop_ready?: boolean } | undefined,
+  spec?: string, // CC-72: latest spec_markdown from /genspec (stored for cross-device restore)
 ): Promise<void> {
   const me = await getParticipant(request, env, tid);
   if (!me?.email) return;
@@ -2626,15 +2636,15 @@ async function persistMakeTurn(
   const msgsJson = JSON.stringify(msgs);
   if (row) {
     await env.DB.prepare(
-      "UPDATE make_conversations SET msgs = ?, readiness = ?, ready = ?, last_idea = ?, wb_client = ?, updated_at = ? WHERE id = ?",
+      "UPDATE make_conversations SET msgs = ?, readiness = ?, ready = ?, last_idea = ?, wb_client = ?, spec = ?, updated_at = ? WHERE id = ?",
     )
-      .bind(msgsJson, readinessJson, ready, input.slice(0, 300), clientSlug, now, row.id)
+      .bind(msgsJson, readinessJson, ready, input.slice(0, 300), clientSlug, spec ?? null, now, row.id)
       .run();
   } else {
     await env.DB.prepare(
-      "INSERT INTO make_conversations (id, tenant_id, email_key, wb_client, wb_project, msgs, readiness, ready, last_idea, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO make_conversations (id, tenant_id, email_key, wb_client, wb_project, msgs, readiness, ready, last_idea, spec, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-      .bind(crypto.randomUUID(), tid, emailKey, clientSlug, projectSlug, msgsJson, readinessJson, ready, input.slice(0, 300), now, now)
+      .bind(crypto.randomUUID(), tid, emailKey, clientSlug, projectSlug, msgsJson, readinessJson, ready, input.slice(0, 300), spec ?? null, now, now)
       .run();
   }
 }
@@ -2648,10 +2658,10 @@ async function miniAppHistory(request: Request, env: Env, tenant: Tenant | null,
   if (!me?.email) return json({ authed: false });
   const emailKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${me.email}`)).slice(0, 40);
   const conv = await env.DB.prepare(
-    "SELECT wb_client, wb_project, msgs, readiness, ready, last_idea FROM make_conversations WHERE tenant_id = ? AND email_key = ? ORDER BY updated_at DESC LIMIT 1",
+    "SELECT wb_client, wb_project, msgs, readiness, ready, last_idea, spec FROM make_conversations WHERE tenant_id = ? AND email_key = ? ORDER BY updated_at DESC LIMIT 1",
   )
     .bind(tid, emailKey)
-    .first<{ wb_client: string | null; wb_project: string; msgs: string; readiness: string | null; ready: number; last_idea: string | null }>();
+    .first<{ wb_client: string | null; wb_project: string; msgs: string; readiness: string | null; ready: number; last_idea: string | null; spec: string | null }>();
   let conversation: unknown = null;
   if (conv) {
     let msgs: unknown = [];
@@ -2674,6 +2684,7 @@ async function miniAppHistory(request: Request, env: Env, tenant: Tenant | null,
       readiness,
       ready: conv.ready === 1,
       lastIdea: conv.last_idea || "",
+      spec: conv.spec || "",
     };
   }
   const sub = await env.DB.prepare(
@@ -2720,13 +2731,17 @@ async function sendBuildQueuedEmail(
 // with the WorkBench link + build_state='queued' so it appears on the wall with a build badge.
 async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
-  const body = await request.json<{ clientSlug?: string; projectSlug?: string; repoName?: string; projectName?: string; email?: string; idea?: string }>().catch(() => null);
+  const body = await request.json<{ clientSlug?: string; projectSlug?: string; repoName?: string; projectName?: string; email?: string; idea?: string; spec?: string; lang?: string }>().catch(() => null);
   const clientSlug = String(body?.clientSlug ?? "").trim();
   const projectSlug = String(body?.projectSlug ?? "").trim();
   let email = normalizeEmail(body?.email);
   // Logged-in participant → don't make them re-type their email: fall back to the signed session's address.
   if (!email) { const me = await getParticipant(request, env, tid); email = normalizeEmail(me?.email); }
   const idea = String(body?.idea ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+  // CC-72: the loop-ready SPEC (from /genspec, possibly user-edited) travels INLINE to /plan; `idea` is the
+  // self-heal fallback. Cap at 512K CHARS (an upper bound on loop-engineer's byte limit, which it enforces).
+  const spec = String(body?.spec ?? "").slice(0, 512 * 1024);
+  const lang: "zh" | "en" | "th" = body?.lang === "en" || body?.lang === "th" ? body.lang : "zh";
   if (!clientSlug || !projectSlug) return json({ error: "请先完成对话 / Complete the chat first" }, 400);
   if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
   const nameCheck = validateRepoName(body?.repoName);
@@ -2790,10 +2805,11 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   let repo, jobId: string, queuePos: number;
   try {
     repo = await createParticipantRepo(env, repoName, { description: idea || projectName });
-    // B2: mint a repo-scoped, short-lived push token and hand it only to the commit/push boundary.
-    const push = await mintRepoScopedPushToken(env, repoName);
-    await wb.commit({ clientSlug, projectSlug, push: true, repo: repo.cloneUrl, pushToken: push.token });
-    jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl })).jobId;
+    // CC-72: loop-engineer runs in its OWN container (CC-58) with no shared disk, so the spec must travel
+    // INLINE in /plan — no fde-copilot commit (clientSlug/projectSlug are now local ids the copilot doesn't
+    // know). loop generates the code and pushes it to the repo (clestons) with its own credential. Pass the
+    // loop-ready `spec`; fall back to `idea` (loop self-heals from the conversation) when the spec is absent.
+    jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl, spec: spec || undefined, idea, lang })).jobId;
     queuePos = (await wb.run(jobId)).queuePos;
   } catch (e) {
     // Provisioning failed before any real work — release the reserved hold so credits aren't lost.
@@ -3103,11 +3119,17 @@ async function miniUsage(request: Request, env: Env, tenant: Tenant | null, tid:
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const wb = createWorkbench(env);
-  let usage;
+  // Token usage comes from WorkBench, which is often offline for a brand-new mini (no builds yet) or when
+  // the Mac Mini backend is down. The credit ledger below lives in our OWN D1 and must ALWAYS render — the
+  // 50-credit hosting charge, poster/build spends, balance. So treat the WorkBench fetch as best-effort:
+  // on failure show zeroed token usage + an `usageUnavailable` flag instead of 502-ing the whole page
+  // (which previously hid the organizer's credit records entirely — that looked like "nothing was charged").
+  let usage: Awaited<ReturnType<typeof wb.usage>> | null = null;
+  let usageUnavailable = false;
   try {
     usage = await wb.usage(tenant.subdomain);
   } catch {
-    return json({ error: "用量暂不可用 / usage unavailable" }, 502);
+    usageUnavailable = true;
   }
   // Credit view: organizer balance + this event's spend records (builds + posters) + total used.
   const ownerRow = await env.DB.prepare("SELECT creator_email FROM tenants WHERE id = ?").bind(tid).first<{ creator_email: string }>();
@@ -3121,7 +3143,7 @@ async function miniUsage(request: Request, env: Env, tenant: Tenant | null, tid:
     const who = at < 1 ? (r.email ?? "") : (r.email.slice(0, at).length <= 2 ? r.email[0] + "*" : r.email[0] + "***" + r.email[at - 1]) + r.email.slice(at);
     return { who, kind: r.kind, status: r.status, credits: Number(r.credits || 0), tokens: Number(r.tokens || 0), at: r.created_at };
   });
-  return json({ ok: true, mock: wb.mock, ...shapeMiniUsage(usage), credits: { balance: balRow?.credits ?? 0, totalUsed, records } });
+  return json({ ok: true, mock: wb.mock, usageUnavailable, ...shapeMiniUsage(usage ?? {}), credits: { balance: balRow?.credits ?? 0, totalUsed, records } });
 }
 
 // Usage-shaping smoke test — mock-gated (404 in production).
@@ -4802,9 +4824,9 @@ const APP_HTML = String.raw`<!doctype html>
       ['📧', t('参赛者快速注册','Participants sign up in seconds'), t('邮箱一键报名、免注册,一句想法交给 AI 就能做成作品。','One-tap email sign-up (no account); hand an idea to AI and get a working project.')],
       ['🤖', t('Mini AI 代码 Agent','Mini AI coding agent'), t('Mini 黑客松:一句想法,AI 代码 Agent 自动做成能跑的应用。','In a Mini hackathon, one idea becomes a working app via an AI coding agent.')],
       ['🐙', t('代码自动上 GitHub','Code auto-published to GitHub'), t('参赛作品的代码自动发布到 GitHub 仓库。','Each project’s code is auto-published to a GitHub repo.')],
-      ['☁️', t('自动部署 Cloudflare','Auto-deployed to Cloudflare'), t('参赛作品自动部署上线(内置账号,7 天自动清理)。','Projects auto-deploy live on Cloudflare — a built-in account, cleaned up after 7 days.')],
+      ['☁️', t('自动部署 Cloudflare','Auto-deployed to Cloudflare'), t('参赛作品自动部署上线(内置账号,7 天自动清理,GitHub 代码永久保留,随时可自行部署)。','Projects auto-deploy live on Cloudflare — a built-in account, cleaned up after 7 days (GitHub code is kept forever; redeploy anytime).')],
       ['🖼️', t('作品墙','Project wall'), t('选手交 GitHub 链接,自动抓 star/语言/README 生成作品卡。','Teams submit a GitHub repo; cards auto-load stars, language, README.')],
-      ['⚖️', t('评委独立评审','Judges review independently'), t('评委登录码、四维打分、锁定评审版本,独立登录评价。','Judge login codes, four-dimension scoring, locked review versions — judges log in on their own.')],
+      ['⚖️', t('评委独立评审','Judges review independently'), t('评委登录码、四维打分、锁定评审版本,独立登录评价。AI 裁判开发中,输入评判规则、资料和现场 pitch,秒出中立评判结果。','Judge login codes, four-dimension scoring, locked review versions — judges log in on their own. AI judge in the works: feed it the rules, materials and live pitch for an instant neutral verdict.')],
       ['🏆', t('作品排行榜','Project leaderboard'), t('实时排名 + CSV 导出,作品一目了然。','Live ranking with CSV export makes every project stand out.')],
       ['🏡', t('活动首页 + 地图','Event homepage + map'), t('介绍、时间地点、周期,内嵌地图(自动适配国内外)。','Intro, date & location, schedule, with an embedded map (auto-fits China / overseas).')],
       ['📸', t('照片墙','Photo wall'), t('现场花絮瀑布流,上传自动压缩。','A masonry gallery of event moments; uploads auto-compress.')],
@@ -4967,8 +4989,8 @@ const APP_HTML = String.raw`<!doctype html>
     return '<h2 style="margin:30px 2px 12px;font-size:20px">'+t('媒体资源','Media kit')+'</h2>'
       + '<div class="panel">'
       +   '<div style="display:flex;gap:16px;flex-wrap:wrap">'
-      +     '<div style="flex:1;min-width:240px;border-radius:14px;overflow:hidden;border:1px solid rgba(128,128,128,.14)"><img src="/brand/hack5-logo.png" alt="Hack5" style="width:100%;display:block"></div>'
-      +     '<div style="flex:1;min-width:240px;border-radius:14px;overflow:hidden;border:1px solid rgba(128,128,128,.14)"><img src="/brand/hack5-logo-black.png" alt="Hack5" style="width:100%;display:block"></div>'
+      +     '<div style="flex:1;min-width:240px;border-radius:14px;overflow:hidden;border:1px solid rgba(128,128,128,.14)"><img src="/brand/hack5-logo.png" alt="Hack5" style="width:50%;display:block;margin:0 auto"></div>'
+      +     '<div style="flex:1;min-width:240px;border-radius:14px;overflow:hidden;border:1px solid rgba(128,128,128,.14)"><img src="/brand/hack5-logo-black.png" alt="Hack5" style="width:50%;display:block;margin:0 auto"></div>'
       +   '</div>'
       +   '<div class="muted" style="font-size:12px;margin:14px 0 6px">'+t('完整标识 Hack&lt;5&gt;(即上图):','Full lockup Hack&lt;5&gt; (as shown):')+'</div>'
       +   '<div class="row" style="gap:8px;flex-wrap:wrap">'
@@ -5022,9 +5044,9 @@ const APP_HTML = String.raw`<!doctype html>
           ['📧', t('参赛者快速注册','Participants sign up in seconds'), t('邮箱一键报名、免注册,一句想法交给 AI 就能做成作品。','One-tap email sign-up (no account needed); hand an idea to AI and get a working project.')],
           ['🤖', t('Mini AI 代码 Agent','Mini AI coding agent'), t('Mini 黑客松:一句想法,AI 代码 Agent 自动做成能跑的应用。','In a Mini hackathon, one idea becomes a working app via an AI coding agent.')],
           ['🐙', t('代码自动上 GitHub','Code auto-published to GitHub'), t('参赛作品的代码自动发布到 GitHub 仓库。','Each project’s code is auto-published to a GitHub repo.')],
-          ['☁️', t('自动部署 Cloudflare','Auto-deployed to Cloudflare'), t('参赛作品自动部署上线(内置账号,7 天自动清理)。','Projects auto-deploy live on Cloudflare — a built-in account, cleaned up after 7 days.')],
+          ['☁️', t('自动部署 Cloudflare','Auto-deployed to Cloudflare'), t('参赛作品自动部署上线(内置账号,7 天自动清理,GitHub 代码永久保留,随时可自行部署)。','Projects auto-deploy live on Cloudflare — a built-in account, cleaned up after 7 days (GitHub code is kept forever; redeploy anytime).')],
           ['🧱', t('作品墙','Project wall'), t('选手交 GitHub 链接,自动抓 star / 语言 / README 生成作品卡。','Builders drop a GitHub link; cards are auto-built from stars, language and README.')],
-          ['🧑‍⚖️', t('评委独立评审','Judges review independently'), t('评委登录码、四维打分、锁定评审版本,独立登录评价。','Judge login codes, four-dimension scoring, locked review versions — judges log in on their own.')],
+          ['🧑‍⚖️', t('评委独立评审','Judges review independently'), t('评委登录码、四维打分、锁定评审版本,独立登录评价。AI 裁判开发中,输入评判规则、资料和现场 pitch,秒出中立评判结果。','Judge login codes, four-dimension scoring, locked review versions — judges log in on their own. AI judge in the works: feed it the rules, materials and live pitch for an instant neutral verdict.')],
           ['🏆', t('作品排行榜','Project leaderboard'), t('实时排名 + CSV 导出,作品一目了然。','Live ranking with CSV export makes every project stand out.')],
           ['🏠', t('活动首页 + 地图','Event homepage + map'), t('介绍、时间地点、周期,内嵌地图(国内外自动适配)。','Intro, date & location, schedule, with an embedded map (auto-fits China / overseas).')],
           ['📸', t('照片墙','Photo wall'), t('现场花絮瀑布流,上传自动压缩。','A masonry stream of event photos; uploads are auto-compressed.')],
@@ -5259,7 +5281,7 @@ const APP_HTML = String.raw`<!doctype html>
             + '<label>'+t('起止时间','Date & time')+' <span class="muted">'+t('(至少 4 小时,最长 3 个月,不能选过去)','(≥4h, ≤3 months, not in the past)')+'</span></label>'
             + '<div class="row" style="gap:8px;flex-wrap:wrap"><input id="hStart" type="datetime-local" style="flex:1;min-width:150px"><span class="muted" style="align-self:center">→</span><input id="hEnd" type="datetime-local" style="flex:1;min-width:150px"></div>'
             + '<label>'+t('地点','Location')+' <span class="muted">'+t('(显示在海报/首页)','(on poster & homepage)')+'</span></label>'
-            + '<div class="row" style="gap:8px;flex-wrap:wrap"><input id="hLoc" maxlength="120" placeholder="'+t('例:上海·徐汇 / 线上','e.g. Shanghai / Online')+'" style="flex:1;min-width:180px"><button type="button" class="ghost" id="hMap" style="white-space:nowrap">🗺 '+t('地图选点','Pick on map')+'</button></div>'
+            + '<div class="row" style="gap:8px;flex-wrap:wrap"><input id="hLoc" maxlength="120" placeholder="'+t('例:上海·徐汇 / 线上','e.g. Shanghai / Online')+'" style="flex:1;min-width:180px"><button type="button" class="ghost" id="hMap" style="white-space:nowrap">🗺 '+t('在地图查看','View on map')+'</button></div>'
             + (cm==='mini' ? '' : '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款)','(optional — default used)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>')
             + (cm==='secret' ? '<label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px">' : '')
             + '<div class="muted" style="font-size:12px;margin:8px 0 2px">💳 '+t('本次','This')+' <b id="hCostHint">'+(cost===0?t('免费(常规首场)','free (1st regular)'):(cost+' '+t('积分','cr')))+'</b> · '+t('余额','balance')+' '+bal+'</div>'
@@ -5367,7 +5389,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<input id="fBanner" type="file" accept="image/*"><span id="fBannerMsg" class="muted"></span>'
       + '<label>'+t('起止时间','Date & time')+' <span class="muted">'+t('(至少 4 小时,最长 3 个月,不能选过去)','(≥4h, ≤3 months, not in the past)')+'</span></label>'
       + '<div class="row" style="gap:8px;flex-wrap:wrap"><input id="fStart" type="datetime-local" value="'+esc(toLocalInput(tn.startAt))+'" style="flex:1;min-width:150px"><span class="muted" style="align-self:center">→</span><input id="fEnd" type="datetime-local" value="'+esc(toLocalInput(tn.endAt))+'" style="flex:1;min-width:150px"></div>'
-      + '<label>'+t('地点','Location')+'</label><div class="row" style="gap:8px;flex-wrap:wrap"><input id="fLoc" maxlength="120" value="'+esc(tn.location||'')+'" placeholder="'+t('例:上海·徐汇','e.g. Shanghai')+'" style="flex:1;min-width:180px"><button type="button" class="ghost" id="fMapBtn" style="white-space:nowrap">🗺 '+t('地图选点','Pick on map')+'</button></div>'
+      + '<label>'+t('地点','Location')+'</label><div class="row" style="gap:8px;flex-wrap:wrap"><input id="fLoc" maxlength="120" value="'+esc(tn.location||'')+'" placeholder="'+t('例:上海·徐汇','e.g. Shanghai')+'" style="flex:1;min-width:180px"><button type="button" class="ghost" id="fMapBtn" style="white-space:nowrap">🗺 '+t('在地图查看','View on map')+'</button></div>'
       + '<label>'+t('持续周期','Duration')+'</label><input id="fDur" maxlength="120" value="'+esc(tn.duration||'')+'" placeholder="'+t('例:48 小时','e.g. 48 hours')+'">'
       + '<label>'+t('地址(用于地图)','Address (for the map)')+'</label><input id="fAddr" maxlength="200" value="'+esc(tn.address||'')+'" placeholder="'+t('街道地址','street address')+'">'
       + '<label>'+t('地图搜索词','Map query')+' <span class="muted">'+t('(留空则用地址)','(defaults to address)')+'</span></label><input id="fMap" maxlength="200" value="'+esc(tn.mapQuery||'')+'">'
@@ -5537,6 +5559,14 @@ const APP_HTML = String.raw`<!doctype html>
   // Free preset poster backgrounds — selectable by everyone on both /poster and /share. (Paid tier =
   // AI-custom via gpt-image-1, generated from the event description + info; the upsell link stays.)
   const POSTER_BGS=[['','无背景','None'],['/poster-bg/illustration.jpg','🖼 写实插画','Illustration'],['/poster-bg/cartoon.jpg','🎨 卡通漫画','Cartoon'],['/poster-bg/cyberpunk.jpg','🌃 赛博朋克','Cyberpunk'],['/poster-bg/birds.jpg','🕊 天空飞鸟','Sky birds']];
+  // Custom-poster prompt examples — [chip label zh, chip label en, full prompt zh, full prompt en].
+  // Clicking a chip autofills the textarea with the full prompt so organizers get a complete, editable start.
+  const POSTER_PROMPT_EGS=[
+    ['🌃 赛博朋克夜景','🌃 Cyberpunk night','赛博朋克风格的城市夜景,霓虹紫色与青色光晕,雨后湿润街道的反光,高楼林立,未来科技感,电影级光影,细节丰富,大面积深色背景便于叠加文字','A cyberpunk city at night, neon purple and teal glow, rain-slicked reflective streets, towering skyscrapers, futuristic high-tech mood, cinematic lighting, richly detailed, large dark areas that leave room for text'],
+    ['🌈 极简渐变','🌈 Minimal gradient','柔和的抽象渐变背景,由紫蓝流向粉橙的丝滑色彩,极简现代设计,大面积留白,轻微颗粒质感,构图干净、适合放置活动标题与二维码','A soft abstract gradient background, silky flow from purple-blue into pink-orange, minimal modern design, generous negative space, subtle grain, clean composition with room for the event title and QR code'],
+    ['🚀 科技几何','🚀 Tech geometry','深色科技背景,发光的几何线条与网格,漂浮的粒子与数据流,蓝绿色调,黑客与极客氛围,现代、克制、细腻的光效,中心留白','A dark tech background, glowing geometric lines and grids, floating particles and data streams, blue-green palette, hacker/geek atmosphere, modern and restrained with delicate light effects, empty space in the center'],
+    ['🎨 手绘涂鸦','🎨 Hand-drawn doodle','活泼的手绘涂鸦风格背景,明亮多彩,卡通线条,创意灵感与协作氛围,白色底色,轻松有趣,适合社区或校园黑客松','A playful hand-drawn doodle background, bright and colorful, cartoon linework, creative and collaborative vibe, white base, light and fun, fit for a community or campus hackathon'],
+  ];
   // Fetch a preset bg and return it as a data: URI, so the canvas PNG export isn't tainted by a
   // cross-origin <image href>. '' → no background (the gradient template). Throws on fetch failure.
   async function bgToDataUrl(url){ if(!url) return ''; const r=await fetch(url); if(!r.ok) throw new Error('bg '+r.status); const b=await r.blob(); return await new Promise(function(res,rej){ const fr=new FileReader(); fr.onload=function(){res(fr.result);}; fr.onerror=function(){rej(new Error('read'));}; fr.readAsDataURL(b); }); }
@@ -5645,15 +5675,14 @@ const APP_HTML = String.raw`<!doctype html>
     if(!q.aiEnabled){ box.innerHTML='<b>'+t('AI 海报','AI poster')+'</b><p class="muted">'+t('暂未开通','Not enabled yet')+'</p>'; return; }
     box.innerHTML =
        '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报','AI poster')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">FLUX · Cloudflare</span></div>'
-      +'<div class="row" style="gap:10px;margin:12px 0 4px;align-items:center"><button id="aiFree">'+t('🎨 免费生成(固定风格)','🎨 Free (fixed style)')+'</button><span class="muted">'+t('剩','left')+' '+q.free+'/'+q.freeCap+'</span></div>'
-      +'<p class="muted" style="margin:0 0 4px;font-size:12px">'+t('免费:用你的活动名/简介 + 品牌固定画风生成背景。','Free: a fixed on-brand style built from your event name/intro.')+'</p>'
-      +'<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">'
-      +'<div class="row" style="justify-content:space-between;align-items:center"><b style="font-size:14px">'+t('自定义(付费)','Custom (premium)')+'</b><span class="muted">'+t('每张','each')+' '+q.customCredits+' '+t('积分','cr')+' · '+t('余额','balance')+' '+q.balance+'</span></div>'
-      +'<textarea id="aiPrompt" rows="2" maxlength="500" placeholder="'+t('例:赛博朋克夜景,霓虹紫青配色','e.g. cyberpunk night, neon purple-teal')+'" style="margin-top:8px"></textarea>'
+      +'<div class="row" style="justify-content:space-between;align-items:center;margin-top:12px"><b style="font-size:14px">'+t('自定义海报(积分支付)','Custom poster (credits)')+'</b><span class="muted">'+t('每张','each')+' '+q.customCredits+' '+t('积分','cr')+' · '+t('余额','balance')+' '+q.balance+'</span></div>'
+      +'<p class="muted" style="margin:8px 0 6px;font-size:12px">'+t('点下面的例子自动填入,或自己描述画风:','Tap an example to autofill, or describe your own style:')+'</p>'
+      +'<div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">'+POSTER_PROMPT_EGS.map(function(e,i){return '<button type="button" class="ghost aieg" data-i="'+i+'" style="font-size:12px;padding:5px 10px">'+esc(t(e[0],e[1]))+'</button>';}).join('')+'</div>'
+      +'<textarea id="aiPrompt" rows="3" maxlength="500" placeholder="'+t('例:赛博朋克夜景,霓虹紫青配色','e.g. cyberpunk night, neon purple-teal')+'"></textarea>'
       +'<div class="row" style="margin-top:10px;gap:8px"><button id="aiCustom">'+t('✨ 生成自定义海报','✨ Generate custom')+' ('+q.customCredits+' '+t('积分','cr')+')</button><button class="ghost" id="aiClear">'+t('恢复模板版','Reset to template')+'</button><span id="aiMsg" class="muted"></span></div>';
-    $('#aiFree').addEventListener('click', ()=>genAi('free'));
     $('#aiCustom').addEventListener('click', ()=>genAi('custom'));
     $('#aiClear').addEventListener('click', ()=>{ paint(''); });
+    box.querySelectorAll('.aieg').forEach(function(b){ b.addEventListener('click', function(){ const e=POSTER_PROMPT_EGS[Number(b.dataset.i)]; const ta=$('#aiPrompt'); if(ta){ ta.value=t(e[2],e[3]); ta.focus(); } }); });
   }
   async function genAi(mode){
     const prompt = mode==='custom' ? $('#aiPrompt').value.trim() : '';
@@ -5670,19 +5699,27 @@ const APP_HTML = String.raw`<!doctype html>
     if(!CONFIG.tenant){ go('/'); return; }
     const isAdmin = ME.role==='admin';
     const sub = (CONFIG.tenant.subdomain||'');
-    app.innerHTML = '<div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap"><h1>'+t('宣传海报','Promo poster')+'</h1>'
-      + '<div class="row"><button id="dlPng">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg">'+t('下载 SVG','Download SVG')+'</button></div></div>'
-      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。海报 = 背景图 + 文字,下面随便换背景。','A4 portrait, auto-built from your homepage info. A poster is just a background + text — swap the background below.')+'</p>'
-      + '<div class="panel" style="max-width:640px;margin-bottom:16px"><b>'+t('背景','Background')+'</b>'
-      +   '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px">'
-      +     POSTER_BGS.map(function(b){return '<button class="ghost bgp" data-bg="'+esc(b[0])+'">'+esc(t(b[1],b[2]))+'</button>';}).join('')
-      +     '<label class="ghost" style="cursor:pointer;padding:9px 15px;border-radius:8px;background:var(--ghost-bg);border:1px solid var(--line);font-weight:650">📤 '+t('上传背景','Upload')+'<input id="bgUp" type="file" accept="image/*" style="display:none"></label>'
+    app.innerHTML = '<h1>'+t('宣传海报','Promo poster')+'</h1>'
+      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。海报 = 背景图 + 文字,左侧随便换背景,右侧实时预览并下载。','A4 portrait, auto-built from your homepage info. A poster is just a background + text — swap the background on the left, preview and download on the right.')+'</p>'
+      + '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">'
+      // ---- left: controls ----
+      +   '<div style="flex:1;min-width:300px">'
+      +     '<div class="panel" style="margin-bottom:16px"><b>'+t('背景','Background')+'</b>'
+      +       '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px">'
+      +         POSTER_BGS.map(function(b){return '<button class="ghost bgp" data-bg="'+esc(b[0])+'">'+esc(t(b[1],b[2]))+'</button>';}).join('')
+      +         '<label class="ghost" style="cursor:pointer;padding:9px 15px;border-radius:8px;background:var(--ghost-bg);border:1px solid var(--line);font-weight:650">📤 '+t('上传背景','Upload')+'<input id="bgUp" type="file" accept="image/*" style="display:none"></label>'
+      +       '</div>'
+      +       '<div class="muted" style="font-size:12px;margin-top:8px">'+t('四种背景免费,或上传自己的图。AI 定制(按描述+活动信息生成)见下方,付费。','Four backgrounds free, or upload your own. AI-custom (from your description + event info) below — premium.')
+      +       '</div><div id="bgMsg" class="muted" style="font-size:12px;margin-top:4px"></div></div>'
+      +     posterControlsHtml()
+      +     '<div id="aiPanel" class="panel" style="margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>'
       +   '</div>'
-      +   '<div class="muted" style="font-size:12px;margin-top:8px">'+t('四种背景免费,或上传自己的图。AI 定制(按描述+活动信息生成)见下方,付费。','Four backgrounds free, or upload your own. AI-custom (from your description + event info) below — premium.')
-      +   '</div><div id="bgMsg" class="muted" style="font-size:12px;margin-top:4px"></div></div>'
-      + posterControlsHtml()
-      + '<div id="aiPanel" class="panel" style="max-width:640px;margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>'
-      + '<div id="posterBox" style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>';
+      // ---- right: live preview + download (sticky so it stays in view while editing) ----
+      +   '<div style="flex:0 0 auto;width:340px;max-width:100%;position:sticky;top:16px">'
+      +     '<div id="posterBox" style="width:100%;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>'
+      +     '<div class="row" style="gap:8px;margin-top:12px"><button id="dlPng" style="flex:1">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg" style="flex:1">'+t('下载 SVG','Download SVG')+'</button></div>'
+      +   '</div>'
+      + '</div>';
     paint('');
     qrToPng(sub).then(function(d){ posterOpts.qr=d; paint(window.__posterBg||''); }).catch(function(){}); // embed the join QR into the poster
     wirePosterControls(function(){ paint(window.__posterBg||''); });
@@ -6105,12 +6142,12 @@ const APP_HTML = String.raw`<!doctype html>
   // A3 — mini「做成应用」: multi-turn chat → provision repo + trigger loop, then it appears on the wall.
   async function renderMiniMakeApp(){
     if(!CONFIG.tenant || CONFIG.tenant.mode!=='mini'){ go('/'); return; }
-    let clientSlug='', projectSlug='', ready=false, lastIdea='', msgs=[], lastReadiness=null, myEmail='';
+    let clientSlug='', projectSlug='', ready=false, lastIdea='', msgs=[], lastReadiness=null, myEmail='', currentSpec='';
     // The /make chat only lived in memory, so a reload lost it. Persist the conversation to this
     // browser's localStorage (per tenant) and restore it on return; the user can download it or start
     // over (with a warning). Nothing is stored server-side — download is the way to keep a copy.
     const DKEY = 'hv_make_' + ((CONFIG.tenant && CONFIG.tenant.subdomain) || 'mini');
-    function saveDraft(){ try{ lsSet(DKEY, JSON.stringify({clientSlug,projectSlug,ready,lastIdea,msgs,lastReadiness})); }catch(e){} }
+    function saveDraft(){ try{ lsSet(DKEY, JSON.stringify({clientSlug,projectSlug,ready,lastIdea,msgs,lastReadiness,currentSpec})); }catch(e){} }
     function clearDraft(){ lsSet(DKEY, ''); }
     function loadDraft(){ try{ const raw=lsGet(DKEY); if(!raw) return null; const d=JSON.parse(raw); return (d && Array.isArray(d.msgs) && d.msgs.length) ? d : null; }catch(e){ return null; } }
     app.innerHTML = '<h1>✨ '+t('让 AI 帮我做成应用','Turn your idea into an app')+'</h1>'
@@ -6122,15 +6159,25 @@ const APP_HTML = String.raw`<!doctype html>
       +     '<div id="specForm" style="margin-top:10px"></div>'
       +     '<div id="specMsg" class="muted" style="margin-top:6px;font-size:12px"></div>'
       +   '</div></details>'
-      + '<div class="panel" style="max-width:680px">'
-      + '<div id="chatLog" style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px"></div>'
-      + '<div id="readyBar" style="margin-bottom:8px"></div>'
-      + '<div class="row" style="gap:8px"><textarea id="chatIn" rows="2" maxlength="1000" placeholder="'+t('例:帮小区做一个团购小工具…','e.g. a group-buy tool for my neighborhood…')+'" style="flex:1"></textarea><button id="chatSend">'+t('发送','Send')+'</button></div>'
-      + '<div id="mkTools" class="row" style="gap:8px;margin-top:6px;flex-wrap:wrap"></div>'
-      + '<div id="chatMsg" class="muted" style="margin-top:6px"></div>'
-      + '<div id="launchBox" style="margin-top:12px"></div>'
+      + '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">'
+      // ---- left: chat ----
+      +   '<div class="panel" style="flex:1;min-width:320px">'
+      +     '<div id="chatLog" style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px"></div>'
+      +     '<div id="readyBar" style="margin-bottom:8px"></div>'
+      +     '<div class="row" style="gap:8px"><textarea id="chatIn" rows="2" maxlength="1000" placeholder="'+t('例:帮小区做一个团购小工具…','e.g. a group-buy tool for my neighborhood…')+'" style="flex:1"></textarea><button id="chatSend">'+t('发送','Send')+'</button></div>'
+      +     '<div id="openQ" style="margin-top:8px"></div>'
+      +     '<div id="mkTools" class="row" style="gap:8px;margin-top:6px;flex-wrap:wrap"></div>'
+      +     '<div id="chatMsg" class="muted" style="margin-top:6px"></div>'
+      +     '<div id="launchBox" style="margin-top:12px"></div>'
+      +   '</div>'
+      // ---- right: live, editable SPEC panel (from WorkBench /genspec) ----
+      +   '<div class="panel" style="flex:1;min-width:300px">'
+      +     '<div class="row" style="justify-content:space-between;align-items:center"><b>📋 '+t('规格 SPEC(可编辑)','Spec (editable)')+'</b><span id="specHint" class="muted" style="font-size:12px"></span></div>'
+      +     '<textarea id="specEdit" rows="18" placeholder="'+t('随着对话,AI 会在这里生成结构化规格;你可随时编辑,编辑内容会用于下一轮和最终生成。','As you chat the AI fills a structured spec here — edit it freely; your edits feed the next round and the final build.')+'" style="width:100%;margin-top:8px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.5"></textarea>'
+      +   '</div>'
       + '</div>';
     const log=$('#chatLog');
+    const specEl=$('#specEdit'); if(specEl) specEl.addEventListener('input', function(){ currentSpec=specEl.value; saveDraft(); });
     function addMsg(who, text){
       const d=document.createElement('div');
       d.style.cssText = who==='me'
@@ -6160,6 +6207,17 @@ const APP_HTML = String.raw`<!doctype html>
       $('#readyBar').innerHTML = '<div class="muted" style="font-size:12px;margin-bottom:2px">'+t('规格完备度','Spec readiness')+' '+pct+'%'+(r.loop_ready?' · ✅ '+t('可以开始生成','ready to build'):'')+'</div>'
         + '<div style="height:8px;border-radius:4px;background:var(--line,#333);overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+(r.loop_ready?'#16a34a':'#d97706')+'"></div></div>';
     }
+    // Reflect the current spec into the editable panel — but never clobber what the user is typing.
+    function renderSpec(){
+      const el=$('#specEdit'); if(el && document.activeElement!==el) el.value = currentSpec || '';
+      const h=$('#specHint'); if(h) h.textContent = currentSpec ? t('可编辑,会用于生成','edited spec is used to build') : t('对话后自动生成','fills in as you chat');
+    }
+    function renderOpenQ(qs){
+      const el=$('#openQ'); if(!el) return;
+      if(!Array.isArray(qs)||!qs.length){ el.innerHTML=''; return; }
+      el.innerHTML='<div class="muted" style="font-size:12px;margin-bottom:4px">'+t('还需确认','Open questions')+':</div>'
+        + qs.slice(0,5).map(function(q){ return '<div style="font-size:13px;margin:2px 0">• '+esc(q.question||'')+(q.why?' <span class="muted" style="font-size:12px">('+esc(q.why)+')</span>':'')+'</div>'; }).join('');
+    }
     function renderReady(r){
       lastReadiness=r||null; paintReady(r);
       if(r && r.loop_ready && !ready){ ready=true; showLaunch(); }
@@ -6173,7 +6231,7 @@ const APP_HTML = String.raw`<!doctype html>
         + '<div id="mkEst" class="muted" style="font-size:13px;margin-top:6px"></div>'
         + '<div class="row" style="margin-top:12px"><button id="mkGo">🚀 '+t('开始生成','Build it')+'</button></div><div id="mkMsg"></div>';
       $('#mkGo').addEventListener('click', doLaunch);
-      showEstimate('mkEst', {idea:lastIdea});
+      showEstimate('mkEst', {idea:lastIdea, spec:currentSpec});
     }
     // CC-61 — show a pre-build credit estimate + your balance (test phase: display only, no hard block).
     async function showEstimate(elId, payload){
@@ -6195,9 +6253,11 @@ const APP_HTML = String.raw`<!doctype html>
       msgs.push({who:'me',text:input}); addMsg('me', input); renderTools();
       $('#chatIn').value=''; $('#chatSend').disabled=true; setMsg('chatMsg', t('思考中…','Thinking…'));
       try{
-        const r=await api('/api/tenant/mini/app/chat',{method:'POST',body:{clientSlug,projectSlug,input,lang:LANG}});
+        const r=await api('/api/tenant/mini/app/chat',{method:'POST',body:{clientSlug,projectSlug,input,currentSpec,lang:LANG}});
         clientSlug=r.clientSlug; projectSlug=r.projectSlug;
+        if(typeof r.spec_markdown==='string' && r.spec_markdown){ currentSpec=r.spec_markdown; renderSpec(); }
         if(r.reply){ msgs.push({who:'ai',text:r.reply}); addMsg('ai', r.reply); }
+        renderOpenQ(r.openQuestions);
         renderReady(r.readiness); setMsg('chatMsg','');
         saveDraft(); renderTools();
       }catch(e){ setMsg('chatMsg', e.message, true); }
@@ -6210,7 +6270,8 @@ const APP_HTML = String.raw`<!doctype html>
       if(!repoName){ setMsg('mkMsg', t('请填作品名称','Project name required'), true); return; }
       $('#mkGo').disabled=true; setMsg('mkMsg', t('建仓 + 触发编码中…','Provisioning…'));
       try{
-        const r=await api('/api/tenant/mini/app/launch',{method:'POST',body:{clientSlug,projectSlug,repoName,email,projectName:repoName,idea:lastIdea}});
+        const specVal=(($('#specEdit')&&$('#specEdit').value.trim())||currentSpec||'');
+        const r=await api('/api/tenant/mini/app/launch',{method:'POST',body:{clientSlug,projectSlug,repoName,email,projectName:repoName,idea:lastIdea,spec:specVal,lang:LANG}});
         setMsg('mkMsg','');
         clearDraft(); // build is queued and the repo is the artifact now — drop the saved chat draft
         await pollBuild(r.id, $('#launchBox'), r);
@@ -6222,6 +6283,7 @@ const APP_HTML = String.raw`<!doctype html>
     }
     function hydrateFromDraft(d){
       clientSlug=d.clientSlug||''; projectSlug=d.projectSlug||''; lastIdea=d.lastIdea||''; lastReadiness=d.readiness||d.lastReadiness||null;
+      currentSpec=d.currentSpec||d.spec||''; renderSpec();
       msgs=Array.isArray(d.msgs)?d.msgs.slice():[]; msgs.forEach(m=>addMsg(m.who,m.text));
       paintReady(lastReadiness);
       if(d.ready){ ready=true; showLaunch(); }
@@ -6566,7 +6628,9 @@ const APP_HTML = String.raw`<!doctype html>
         + '<div><div class="muted">'+t('总 token','Total tokens')+'</div><div style="font-size:22px;font-weight:700">'+Number(u.totalTokens||0).toLocaleString()+'</div></div>'
         + '<div><div class="muted">'+t('参赛者','Participants')+'</div><div style="font-size:22px;font-weight:700">'+(u.participants||0)+'</div></div>'
         + (u.mock?'<span class="chip" style="border-color:#d97706;color:#d97706">mock</span>':'')
+        + (u.usageUnavailable?'<span class="chip" style="border-color:#d97706;color:#d97706">'+t('用量暂不可用','usage offline')+'</span>':'')
         + '</div>'
+        + (u.usageUnavailable?'<p class="muted" style="margin:8px 0 0;font-size:12.5px">'+t('token 用量来自 WorkBench,当前离线或尚无构建 —— 不影响上方积分记录。','Token usage comes from WorkBench, currently offline or with no builds yet — this does not affect the credit records above.')+'</p>':'')
         + '<table style="width:100%;margin-top:14px;border-collapse:collapse"><thead><tr><th style="text-align:left;border-bottom:1px solid var(--line,#333)">'+t('参赛作品','Project')+'</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">token</th><th style="text-align:right;border-bottom:1px solid var(--line,#333)">'+t('请求','Requests')+'</th></tr></thead><tbody>'+(rows||'<tr><td colspan="3" class="muted">'+t('暂无用量','No usage yet')+'</td></tr>')+'</tbody></table>'
         + '<div class="muted" style="margin-top:10px">'+esc(u.freeTier?u.freeTier.model:'')+(u.at?' · '+esc(u.at):'')+'</div>';
     }catch(e){ $('#usageBox').innerHTML = '<p class="muted">'+esc(e.message)+'</p>'; }
