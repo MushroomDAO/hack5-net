@@ -2780,7 +2780,7 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   if (launched >= FREE_LAUNCHES) {
     const me = await getParticipant(request, env, tid);
     if (!(me?.verified === true && me.email === email)) {
-      return json({ error: "构建按实际用量扣积分,请先在「我的黑客松」验证邮箱后继续(积分由组织者预充值提供)/ Builds are charged by real token usage — verify your email in My hackathon to continue (credits are pre-funded by the organizer)", upgrade: true, needVerify: true }, 402);
+      return json({ error: "开始生成前需先验证邮箱:报名后在本页或「我的黑客松」收 6 位验证码验证即可。这不是积分不足(你的余额够),而是防止他人盗用你的邮箱消耗积分。/ Verify your email before building — get a 6-digit code on the sign-up page or in My hackathon. (Not a credits issue — it stops someone spending credits under your address.)", upgrade: true, needVerify: true }, 402);
     }
     const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
     const now0 = unixNow();
@@ -2900,7 +2900,7 @@ async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | nu
   if (launched >= FREE_LAUNCHES) {
     const me = await getParticipant(request, env, tid);
     if (!(me?.verified === true && me.email === email)) {
-      return json({ error: "构建按实际用量扣积分,请先在「我的黑客松」验证邮箱后继续(积分由组织者预充值提供)/ Builds are charged by real token usage — verify your email in My hackathon to continue (credits are pre-funded by the organizer)", upgrade: true, needVerify: true }, 402);
+      return json({ error: "开始生成前需先验证邮箱:报名后在本页或「我的黑客松」收 6 位验证码验证即可。这不是积分不足(你的余额够),而是防止他人盗用你的邮箱消耗积分。/ Verify your email before building — get a 6-digit code on the sign-up page or in My hackathon. (Not a credits issue — it stops someone spending credits under your address.)", upgrade: true, needVerify: true }, 402);
     }
     const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
     const now0 = unixNow();
@@ -5778,18 +5778,46 @@ const APP_HTML = String.raw`<!doctype html>
       $('#rgBtn').disabled=true;
       try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note,turnstileToken}});
         const done = r.already ? t('你已经报名过了 ✓','You are already registered ✓') : t('报名成功!🎉','Registered! 🎉');
+        // Email verification right here on the success screen — mini NEEDS it to unlock AI build (it spends
+        // the organizer's pre-funded credits, so we must prove inbox ownership); all modes can verify to read
+        // their own credits/details. Reuses the 6-digit code flow (login/request + login/verify).
+        const verifyHtml = '<div class="panel" style="margin-top:12px" id="rgVerify">'
+          + '<p style="margin:0 0 8px">🔐 <b>'+t('验证邮箱','Verify your email')+'</b> — '
+          + (isMini ? t('验证后即可用 AI 把想法生成应用(用主办方预充的积分),也能查看你的积分余额。','Verify to build your idea into an app with AI (using the organizer’s pre-funded credits) and to see your balance.')
+                    : t('验证后可查看你的作品详情与积分余额。','Verify to see your project details and credit balance.'))+'</p>'
+          + '<div id="rgvCodeArea" class="hidden"><label>'+t('验证码','Code')+'</label><input id="rgvCode" inputmode="numeric" maxlength="6" placeholder="'+t('6 位验证码','6-digit code')+'"></div>'
+          + (CONFIG.turnstileSiteKey ? '<div id="rgvts" style="margin-top:10px"></div>' : '')
+          + '<div class="row" style="margin-top:10px"><button id="rgvSend">📧 '+t('发送验证码','Send code')+'</button><button id="rgvVerify" class="ghost hidden">'+t('验证','Verify')+'</button></div>'
+          + '<div id="rgvMsg" class="muted" style="margin-top:6px;font-size:13px"></div></div>';
         let next;
         if(isMini){
-          next = '<p style="margin:10px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
+          next = '<p style="margin:12px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
             + '<div class="row" style="gap:8px;flex-wrap:wrap"><button onclick="go(\'/submit\')">'+t('提交作品','Submit your work')+'</button>'
             + '<button class="ghost" onclick="go(\'/make\')">✨ '+t('AI 做成应用','Build with AI')+'</button></div>'
             + '<p class="muted" style="margin-top:8px;font-size:13px">'+t('报名确认邮件已发到你的邮箱 📩(没收到看下垃圾箱)。贴上作品链接即可参赛,或让 AI 把想法做成能跑的应用。建议收藏本页 —— mini 无需登录密码,活动都在这里。','A confirmation email is on its way 📩 (check spam if you don’t see it). Submit a link to your work, or let AI turn your idea into a working app. Bookmark this page — mini needs no password, everything happens here.')+'</p>';
         } else {
-          next = '<p style="margin:10px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
+          next = '<p style="margin:12px 0 6px"><b>'+t('下一步','What is next')+'</b></p>'
             + '<p class="muted" style="font-size:13px">'+t('报名确认邮件已发到你的邮箱 📩(没收到看下垃圾箱)。主办方会把你的参赛邀请码发给你(微信 / 邮件 / 群),拿到后到「提交作品」填邀请码提交。建议收藏本页。','A confirmation email is on its way 📩 (check spam if you don’t see it). The organizer will send you an invite code (WeChat / email / group); once you have it, go to Submit and enter it. Bookmark this page.')+'</p>'
             + '<div class="row" style="margin-top:6px"><button onclick="go(\'/submit\')">'+t('去提交作品','Go to Submit')+'</button></div>';
         }
-        $('#regForm').innerHTML='<div class="notice ok">'+done+'</div>'+next;
+        $('#regForm').innerHTML='<div class="notice ok">'+done+'</div>'+verifyHtml+next;
+        // wire the inline verify step
+        let rgvTs=null;
+        if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ rgvTs=window.turnstile.render('#rgvts',{sitekey:CONFIG.turnstileSiteKey}); }catch(e){} });
+        $('#rgvSend').addEventListener('click', async ()=>{
+          let tok; if(CONFIG.turnstileSiteKey){ tok=(window.turnstile&&rgvTs!=null)?window.turnstile.getResponse(rgvTs):''; if(!tok){ setMsg('rgvMsg',t('请先完成人机验证','Please complete the check'),true); return; } }
+          setMsg('rgvMsg', t('发送中…','Sending…'));
+          try{ const rr=await api('/api/tenant/participant/login/request',{method:'POST',body:{email,turnstileToken:tok}});
+            $('#rgvCodeArea').classList.remove('hidden'); $('#rgvVerify').classList.remove('hidden');
+            setMsg('rgvMsg', t('验证码已发送,请查收邮箱 📩','Code sent — check your email 📩')+(rr.debugCode?(' [dev: '+rr.debugCode+']'):''));
+          }catch(e){ setMsg('rgvMsg', e.message, true); if(window.turnstile&&rgvTs!=null) try{ window.turnstile.reset(rgvTs); }catch(_){} }
+        });
+        $('#rgvVerify').addEventListener('click', async ()=>{
+          const code=$('#rgvCode').value.trim(); if(!code){ setMsg('rgvMsg',t('请填写验证码','Enter the code'),true); return; }
+          try{ await api('/api/tenant/participant/login/verify',{method:'POST',body:{email,code}});
+            $('#rgVerify').innerHTML='<div class="notice ok">✅ '+t('邮箱已验证 —— 现在可以「开始生成」了!','Email verified — you can build now!')+'</div>';
+          }catch(e){ setMsg('rgvMsg', e.message, true); }
+        });
       }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; if(window.turnstile && rgTs!=null) try{ window.turnstile.reset(rgTs); }catch(_){} }
     });
   }
