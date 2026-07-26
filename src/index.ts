@@ -1540,23 +1540,34 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
   // Issue an email-verification code NOW (registration already passed Turnstile), so the participant gets
   // the code together with their sign-up email and the success screen can ask for it directly — no separate
   // "send code" click / second email. 6-digit, 10-min TTL; same email_codes flow as login/request.
-  const code = generateCode();
-  await env.DB.prepare(
-    "INSERT INTO email_codes (id, email, code_hash, request_ip, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-  )
-    .bind(crypto.randomUUID(), email, await hashSecret(env, `${email}:${code}`), ip, now, now + 10 * 60)
-    .run();
+  // Rate-limit the mint with the SAME guard participantLoginRequest uses (≥5 codes / 15 min / email → skip):
+  // the per-IP registration cap can't cover a resubmit for an already-registered email (INSERT OR IGNORE
+  // adds no row, so the counter never moves) and Turnstile is a no-op on frictionless mini tenants — so
+  // without this, repeated /register with a victim's email would email-bomb their inbox with codes.
+  const recentCodes = await env.DB.prepare("SELECT COUNT(*) AS c FROM email_codes WHERE email = ? AND created_at > ?")
+    .bind(email, now - 15 * 60)
+    .first<{ c: number }>();
+  const codeIssued = (recentCodes?.c ?? 0) < 5;
+  let code = "";
+  if (codeIssued) {
+    code = generateCode();
+    await env.DB.prepare(
+      "INSERT INTO email_codes (id, email, code_hash, request_ip, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind(crypto.randomUUID(), email, await hashSecret(env, `${email}:${code}`), ip, now, now + 10 * 60)
+      .run();
+  }
   const site = new URL(request.url).origin;
   if (res.meta.changes !== 1) {
-    // Already registered — just email the fresh code so they can still verify from the success screen.
-    await sendEmailCode(env, email, code).catch(() => {});
-    return json({ ok: true, already: true, codeIssued: true }, 200, cookie);
+    // Already registered — email the fresh code (if one was minted this window) so they can still verify.
+    if (codeIssued) await sendEmailCode(env, email, code).catch(() => {});
+    return json({ ok: true, already: true, codeIssued }, 200, cookie);
   }
-  // New registration: the confirmation email carries the code. Beijing time by offset; best-effort — the
-  // send helpers never throw, so a mail hiccup can't fail the signup.
+  // New registration: the confirmation email carries the code (omitted if rate-limited — they already have
+  // recent codes to use). Beijing time by offset; best-effort — the send helpers never throw.
   const when = new Date((now + 8 * 3600) * 1000).toISOString().slice(0, 16).replace("T", " ") + " (北京时间)";
-  await sendRegistrationConfirmEmail(env, email, tenant.name, site, tenant.mode || "open", when, code);
-  return json({ ok: true, codeIssued: true }, 200, cookie);
+  await sendRegistrationConfirmEmail(env, email, tenant.name, site, tenant.mode || "open", when, code || undefined);
+  return json({ ok: true, codeIssued }, 200, cookie);
 }
 
 async function listRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
