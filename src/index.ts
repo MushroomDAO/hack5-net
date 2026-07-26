@@ -1307,13 +1307,15 @@ async function sendRegistrationConfirmEmail(
   url: string,
   mode: string,
   when: string,
+  code?: string,
 ): Promise<void> {
   if (!env.RESEND_API_KEY) return;
   const isMini = mode === "mini";
   const nextText = isMini
     ? `接下来你可以:\n· 提交作品(贴链接即可参赛):${url}/submit\n· 让 AI 把想法做成能跑的应用:${url}/make`
     : `接下来:主办方会把参赛邀请码发给你(微信 / 邮件 / 群),拿到后到「提交作品」填码提交:${url}/submit`;
-  const text = `你已成功报名「${hackathonName}」🎉\n报名时间:${when}\n活动主页:${url}\n\n${nextText}\n\n请收藏活动主页,随时回来查看进度。${isMini ? "Mini 黑客松无需登录密码 —— 凭本邮件与主页即可参与。" : ""}\n\nYou are registered for "${hackathonName}". Site: ${url}\n\n— hack5.net`;
+  const codeText = code ? `\n\n📮 邮箱验证码:${code}(10 分钟内有效)—— 回到活动页填入即可验证邮箱、解锁 AI 生成。` : "";
+  const text = `你已成功报名「${hackathonName}」🎉\n报名时间:${when}${codeText}\n活动主页:${url}\n\n${nextText}\n\n请收藏活动主页,随时回来查看进度。${isMini ? "Mini 黑客松无需登录密码 —— 凭本邮件与主页即可参与。" : ""}\n\nYou are registered for "${hackathonName}". Site: ${url}\n\n— hack5.net`;
   const nextHtml = isMini
     ? `<a href="${url}/submit" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:10px 18px;border-radius:9px;margin:4px 6px 4px 0">提交作品 · Submit</a>` +
       `<a href="${url}/make" style="display:inline-block;background:#0f9d6b;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:10px 18px;border-radius:9px;margin:4px 0">✨ AI 做成应用</a>`
@@ -1331,6 +1333,13 @@ async function sendRegistrationConfirmEmail(
     `<p style="color:#5f6675;font-size:15px;margin:0 0 14px">报名成功 · You are registered</p>` +
     `<p style="margin:0 0 4px;color:#5f6675;font-size:14px">报名时间 · Registered at</p>` +
     `<p style="margin:0 0 16px;font-size:15px;font-weight:700;color:#14161c">${escapeHtml(when)}</p>` +
+    (code
+      ? `<div style="margin:0 0 16px;padding:14px 16px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);border-radius:11px">` +
+        `<p style="margin:0 0 6px;color:#5f6675;font-size:13px">📮 邮箱验证码 · Email verification code(10 分钟内有效)</p>` +
+        `<p style="margin:0;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:30px;font-weight:800;letter-spacing:8px;color:#14532d">${escapeHtml(code)}</p>` +
+        `<p style="margin:8px 0 0;color:#7a8090;font-size:12px">回到活动页填入即可验证邮箱、解锁 AI 生成 · Enter it back on the site to verify your email.</p>` +
+        `</div>`
+      : "") +
     `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:0 0 16px">${nextNote}</p>` +
     `${nextHtml}` +
     `</td></tr>` +
@@ -1528,14 +1537,26 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
   // could read a victim's data by registering under their email. Full access requires the #47 code flow.
   const token = await signParticipant(env, { email, tenant: tenant.id, exp: now + 30 * 24 * 60 * 60, verified: false });
   const cookie = { "Set-Cookie": participantCookie(request, token, 30 * 24 * 60 * 60) };
-  if (res.meta.changes !== 1) return json({ ok: true, already: true }, 200, cookie); // idempotent: already registered
-  // New registration only: send a best-effort confirmation so the participant has a record (mini has
-  // no login password). Beijing time computed by offset (avoids relying on Intl tz support); awaited
-  // best-effort — sendRegistrationConfirmEmail never throws, so a mail hiccup can't fail the signup.
+  // Issue an email-verification code NOW (registration already passed Turnstile), so the participant gets
+  // the code together with their sign-up email and the success screen can ask for it directly — no separate
+  // "send code" click / second email. 6-digit, 10-min TTL; same email_codes flow as login/request.
+  const code = generateCode();
+  await env.DB.prepare(
+    "INSERT INTO email_codes (id, email, code_hash, request_ip, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+  )
+    .bind(crypto.randomUUID(), email, await hashSecret(env, `${email}:${code}`), ip, now, now + 10 * 60)
+    .run();
   const site = new URL(request.url).origin;
+  if (res.meta.changes !== 1) {
+    // Already registered — just email the fresh code so they can still verify from the success screen.
+    await sendEmailCode(env, email, code).catch(() => {});
+    return json({ ok: true, already: true, codeIssued: true }, 200, cookie);
+  }
+  // New registration: the confirmation email carries the code. Beijing time by offset; best-effort — the
+  // send helpers never throw, so a mail hiccup can't fail the signup.
   const when = new Date((now + 8 * 3600) * 1000).toISOString().slice(0, 16).replace("T", " ") + " (北京时间)";
-  await sendRegistrationConfirmEmail(env, email, tenant.name, site, tenant.mode || "open", when);
-  return json({ ok: true }, 200, cookie);
+  await sendRegistrationConfirmEmail(env, email, tenant.name, site, tenant.mode || "open", when, code);
+  return json({ ok: true, codeIssued: true }, 200, cookie);
 }
 
 async function listRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
@@ -5785,9 +5806,10 @@ const APP_HTML = String.raw`<!doctype html>
           + '<p style="margin:0 0 8px">🔐 <b>'+t('验证邮箱','Verify your email')+'</b> — '
           + (isMini ? t('验证后即可用 AI 把想法生成应用(用主办方预充的积分),也能查看你的积分余额。','Verify to build your idea into an app with AI (using the organizer’s pre-funded credits) and to see your balance.')
                     : t('验证后可查看你的作品详情与积分余额。','Verify to see your project details and credit balance.'))+'</p>'
-          + '<div id="rgvCodeArea" class="hidden"><label>'+t('验证码','Code')+'</label><input id="rgvCode" inputmode="numeric" maxlength="6" placeholder="'+t('6 位验证码','6-digit code')+'"></div>'
-          + (CONFIG.turnstileSiteKey ? '<div id="rgvts" style="margin-top:10px"></div>' : '')
-          + '<div class="row" style="margin-top:10px"><button id="rgvSend">📧 '+t('发送验证码','Send code')+'</button><button id="rgvVerify" class="ghost hidden">'+t('验证','Verify')+'</button></div>'
+          + '<p class="muted" style="margin:0 0 8px;font-size:13px">'+t('验证码已随报名成功邮件发到你的邮箱 📩(没收到看下垃圾箱)。填进来即可:','A 6-digit code was sent with your sign-up email 📩 (check spam). Just enter it below:')+'</p>'
+          + '<label>'+t('验证码','Code')+'</label><input id="rgvCode" inputmode="numeric" maxlength="6" placeholder="'+t('6 位验证码','6-digit code')+'">'
+          + (CONFIG.turnstileSiteKey ? '<div id="rgvts" style="margin-top:10px" class="hidden"></div>' : '')
+          + '<div class="row" style="margin-top:10px"><button id="rgvVerify">'+t('验证','Verify')+'</button><button id="rgvResend" class="ghost">'+t('没收到?重新发送','Resend')+'</button></div>'
           + '<div id="rgvMsg" class="muted" style="margin-top:6px;font-size:13px"></div></div>';
         let next;
         if(isMini){
@@ -5801,22 +5823,33 @@ const APP_HTML = String.raw`<!doctype html>
             + '<div class="row" style="margin-top:6px"><button onclick="go(\'/submit\')">'+t('去提交作品','Go to Submit')+'</button></div>';
         }
         $('#regForm').innerHTML='<div class="notice ok">'+done+'</div>'+verifyHtml+next;
-        // wire the inline verify step
+        // wire the inline verify step — the code was already emailed with the sign-up confirmation, so we
+        // ask for it directly. "Resend" is a fallback that re-requests a code (reveals Turnstile on demand).
         let rgvTs=null;
-        if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ rgvTs=window.turnstile.render('#rgvts',{sitekey:CONFIG.turnstileSiteKey}); }catch(e){} });
-        $('#rgvSend').addEventListener('click', async ()=>{
-          let tok; if(CONFIG.turnstileSiteKey){ tok=(window.turnstile&&rgvTs!=null)?window.turnstile.getResponse(rgvTs):''; if(!tok){ setMsg('rgvMsg',t('请先完成人机验证','Please complete the check'),true); return; } }
-          setMsg('rgvMsg', t('发送中…','Sending…'));
-          try{ const rr=await api('/api/tenant/participant/login/request',{method:'POST',body:{email,turnstileToken:tok}});
-            $('#rgvCodeArea').classList.remove('hidden'); $('#rgvVerify').classList.remove('hidden');
-            setMsg('rgvMsg', t('验证码已发送,请查收邮箱 📩','Code sent — check your email 📩')+(rr.debugCode?(' [dev: '+rr.debugCode+']'):''));
-          }catch(e){ setMsg('rgvMsg', e.message, true); if(window.turnstile&&rgvTs!=null) try{ window.turnstile.reset(rgvTs); }catch(_){} }
-        });
         $('#rgvVerify').addEventListener('click', async ()=>{
           const code=$('#rgvCode').value.trim(); if(!code){ setMsg('rgvMsg',t('请填写验证码','Enter the code'),true); return; }
           try{ await api('/api/tenant/participant/login/verify',{method:'POST',body:{email,code}});
             $('#rgVerify').innerHTML='<div class="notice ok">✅ '+t('邮箱已验证 —— 现在可以「开始生成」了!','Email verified — you can build now!')+'</div>';
           }catch(e){ setMsg('rgvMsg', e.message, true); }
+        });
+        $('#rgvResend').addEventListener('click', async ()=>{
+          if(CONFIG.turnstileSiteKey){
+            const box=$('#rgvts');
+            if(rgvTs==null){ box.classList.remove('hidden'); await ensureTurnstile(); try{ rgvTs=window.turnstile.render('#rgvts',{sitekey:CONFIG.turnstileSiteKey}); }catch(e){}
+              setMsg('rgvMsg', t('请完成人机验证后再点一次「重新发送」','Complete the check, then tap Resend again')); return; }
+            const tok=(window.turnstile&&rgvTs!=null)?window.turnstile.getResponse(rgvTs):'';
+            if(!tok){ setMsg('rgvMsg',t('请先完成人机验证','Please complete the check'),true); return; }
+            setMsg('rgvMsg', t('发送中…','Sending…'));
+            try{ const rr=await api('/api/tenant/participant/login/request',{method:'POST',body:{email,turnstileToken:tok}});
+              setMsg('rgvMsg', t('验证码已重新发送,请查收 📩','Code resent — check your email 📩')+(rr.debugCode?(' [dev: '+rr.debugCode+']'):''));
+              try{ window.turnstile.reset(rgvTs); }catch(_){}
+            }catch(e){ setMsg('rgvMsg', e.message, true); try{ window.turnstile.reset(rgvTs); }catch(_){} }
+          } else {
+            setMsg('rgvMsg', t('发送中…','Sending…'));
+            try{ const rr=await api('/api/tenant/participant/login/request',{method:'POST',body:{email}});
+              setMsg('rgvMsg', t('验证码已重新发送,请查收 📩','Code resent — check your email 📩')+(rr.debugCode?(' [dev: '+rr.debugCode+']'):''));
+            }catch(e){ setMsg('rgvMsg', e.message, true); }
+          }
         });
       }catch(e){ setMsg('rgMsg', e.message, true); $('#rgBtn').disabled=false; if(window.turnstile && rgTs!=null) try{ window.turnstile.reset(rgTs); }catch(_){} }
     });
