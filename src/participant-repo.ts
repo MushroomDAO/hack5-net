@@ -217,21 +217,15 @@ export async function createParticipantRepo(env: RepoBotEnv, rawName: string, op
   };
   const path = isOrg ? `/orgs/${encodeURIComponent(owner)}/repos` : `/user/repos`;
   const res = await githubApi("POST", path, token, body);
-  // Idempotent create: a 422 means the repo name already exists — typically an orphan from a prior launch
-  // that created the repo but failed at a LATER step (commit/plan/run), so retrying the same name used to
-  // 422 forever. Instead, look the repo up and reuse it (only if it's actually under our bot owner). This
-  // makes "开始编码" retries safe without changing the name.
-  const toRepo = (j: unknown): ParticipantRepo => {
-    const d = j as { name: string; owner?: { login?: string }; full_name: string; html_url: string; clone_url: string; url: string };
-    return { owner: d.owner?.login || owner, name: d.name, fullName: d.full_name, htmlUrl: d.html_url, cloneUrl: d.clone_url, apiUrl: d.url };
-  };
-  if (res.status === 422) {
-    const existing = await githubApi("GET", `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, token);
-    if (existing.ok && existing.json) return toRepo(existing.json);
-    throw new Error(`repo create failed: ${res.status} ${res.message}`);
-  }
+  // A 422 means the repo name is already taken. Do NOT reuse the existing repo: participant repo names are
+  // a flat, participant-controlled namespace under ONE shared bot owner, with no per-tenant/per-participant
+  // namespacing and no pre-create ownership check — so a name collision may be ANOTHER participant's repo.
+  // Reusing it on 422 would let loop-engineer push this participant's code into someone else's repo. Throw
+  // instead, so the caller surfaces a clean "pick another name" (miniAppLaunch → 409). (A safe idempotent
+  // retry would require tying the name to the current tenant+participant in our DB first — see CC-72 PR.)
   if (!res.ok) throw new Error(`repo create failed: ${res.status} ${res.message}`);
-  return toRepo(res.json);
+  const d = res.json as { name: string; owner?: { login?: string }; full_name: string; html_url: string; clone_url: string; url: string };
+  return { owner: d.owner?.login || owner, name: d.name, fullName: d.full_name, htmlUrl: d.html_url, cloneUrl: d.clone_url, apiUrl: d.url };
 }
 
 // Mint the repo-scoped PUSH token (B2). Secret — use only at the push boundary, never log it.

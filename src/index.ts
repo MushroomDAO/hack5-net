@@ -2574,7 +2574,7 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
   }
   // The frontend holds the running spec (localStorage) and passes it back each round; server-side
   // make_conversations is only a cross-device restore copy — so the authoritative currentSpec is the
-  // client's (also lets anonymous users iterate). ≤512KB.
+  // client's (also lets anonymous users iterate). ≤512K chars (upper bound on loop's byte limit).
   const currentSpec = String(body?.currentSpec ?? "").slice(0, 512 * 1024);
   try {
     const g = await wb.genspec({
@@ -2739,7 +2739,7 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   if (!email) { const me = await getParticipant(request, env, tid); email = normalizeEmail(me?.email); }
   const idea = String(body?.idea ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
   // CC-72: the loop-ready SPEC (from /genspec, possibly user-edited) travels INLINE to /plan; `idea` is the
-  // self-heal fallback. Cap at loop-engineer's 512KB limit.
+  // self-heal fallback. Cap at 512K CHARS (an upper bound on loop-engineer's byte limit, which it enforces).
   const spec = String(body?.spec ?? "").slice(0, 512 * 1024);
   const lang: "zh" | "en" | "th" = body?.lang === "en" || body?.lang === "th" ? body.lang : "zh";
   if (!clientSlug || !projectSlug) return json({ error: "请先完成对话 / Complete the chat first" }, 400);
