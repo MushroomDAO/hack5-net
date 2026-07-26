@@ -130,6 +130,30 @@ export interface PlanInput {
   // container and builds directly from it (no fde-copilot commit, no repo read). Omitted → loop reads
   // the spec from the repo as before. ≤512KB (enforced by loop-engineer and by the caller).
   spec?: string;
+  // CC-69 container-split fix: loop-engineer runs in its OWN container (CC-58) and can't read the
+  // frontend's filesystem, so the chat-driven flow (which has no committed spec loop can see) must
+  // inline the conversation. loop self-heals (Version f62cf49f): given `idea` and no `spec`, it
+  // generates the spec from the conversation before planning. Pass the /make transcript / idea here.
+  idea?: string;
+  lang?: "zh" | "en" | "th"; // CC-72: build/user-facing language for the coding loop
+}
+// CC-72: shared, STATELESS spec generation. Both frontends (fde-copilot + hack5) call this ONE loop
+// endpoint so the SPEC standard never drifts. loop stores nothing — the caller keeps spec_markdown and
+// passes it back as `currentSpec` next round. Uses the admin x-workbench-token (not a scoped chat token).
+export interface GenspecInput {
+  input: string; // this round's new user input / one-line idea (required)
+  currentSpec?: string; // full spec_markdown from the previous round ("" or omitted on the first round)
+  clientContext?: string;
+  deliverableContext?: string;
+  history?: string; // recent conversation text (optional)
+  lang?: "zh" | "en" | "th";
+}
+export interface GenspecResult {
+  reply: string; // user-facing text for the chat bubble
+  openQuestions?: Array<{ id: string; question: string; why?: string }>;
+  readiness: WbReadiness & { missing?: string[] };
+  spec_markdown: string; // full SPEC.md — store it, show in the editable panel, inline into /plan when ready
+  usage?: { costUsd?: number; [k: string]: unknown };
 }
 export interface DeployInput {
   clientSlug: string;
@@ -160,6 +184,7 @@ export interface WorkbenchClient {
   createClient(input: CreateClientInput): Promise<{ client: WbClient }>;
   createProject(clientSlug: string, input: CreateProjectInput): Promise<{ project: WbProject }>;
   chat(input: ChatInput, opts?: { scopedToken?: string }): Promise<WbChatResult>;
+  genspec(input: GenspecInput): Promise<GenspecResult>; // CC-72 shared spec-gen
   commit(input: CommitInput): Promise<WbCommitResult>;
   plan(input: PlanInput): Promise<WbPlanResult>;
   run(jobId: string): Promise<WbRunResult>;
@@ -246,8 +271,11 @@ class HttpError extends Error {
 function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
   // Two hosts (CC-52): fde-copilot on WORKBENCH_BASE_URL; loop-engineer (plan/run/status) on
   // WORKBENCH_LOOP_URL. loopBase falls back to base if the loop URL is not set separately.
-  const base = String(env.WORKBENCH_BASE_URL ?? "").replace(/\/+$/, "");
-  const loopBase = String(env.WORKBENCH_LOOP_URL ?? env.WORKBENCH_BASE_URL ?? "").replace(/\/+$/, "");
+  // Normalize both hosts: trim stray whitespace/newlines (a common `echo | wrangler secret put`
+  // mistake leaves a trailing \n) and drop trailing slashes. loop-engineer matches routes EXACTLY
+  // (`p === "/plan"`), so a trailing slash or newline in the URL would yield `//plan`/`/plan\n` → 404.
+  const base = String(env.WORKBENCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  const loopBase = String(env.WORKBENCH_LOOP_URL ?? env.WORKBENCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
   const adminToken = env.WORKBENCH_TOKEN ?? "";
 
   const timeoutMs = Number(env.WORKBENCH_TIMEOUT_MS) > 0 ? Number(env.WORKBENCH_TIMEOUT_MS) : 45000;
@@ -258,8 +286,11 @@ function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
     // Bound the request: a hung/slow upstream (e.g. a chat turn that never returns) must not make the
     // hack5 Worker hang until the platform kills it — abort and surface a clean 504 instead.
     let res: Response;
+    // Force exactly one slash at the host/path join, so even a mis-set host can never emit `//plan`
+    // (loop-engineer's router is exact-match; a doubled slash is a different, unregistered path → 404).
+    const target = `${host.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
     try {
-      res = await fetch(`${host}${path}`, {
+      res = await fetch(target, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -267,12 +298,14 @@ function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
       });
     } catch (e) {
       if (e instanceof Error && e.name === "TimeoutError") {
-        throw new HttpError(`WorkBench ${method} ${path} timed out after ${timeoutMs}ms`, 504, "");
+        throw new HttpError(`WorkBench ${method} ${JSON.stringify(target)} timed out after ${timeoutMs}ms`, 504, "");
       }
       throw e;
     }
     const text = await res.text();
-    if (!res.ok) throw new HttpError(`WorkBench ${method} ${path} -> ${res.status}`, res.status, text.slice(0, 500));
+    // On failure, surface the REAL target URL + loop's response body (the old message printed the `path`
+    // CONSTANT, which hid the actual URL and cost hours on CC-69). This stays as a permanent improvement.
+    if (!res.ok) throw new HttpError(`WorkBench ${method} ${JSON.stringify(target)} -> ${res.status} · ${text.slice(0, 300)}`, res.status, text.slice(0, 500));
     return (text ? JSON.parse(text) : {}) as T;
   }
 
@@ -282,6 +315,7 @@ function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
     createClient: (input) => call(base, "POST", "/api/clients", input),
     createProject: (clientSlug, input) => call(base, "POST", `/api/clients/${encodeURIComponent(clientSlug)}/projects`, input),
     chat: (input, opts) => call(base, "POST", "/api/chat", input, opts?.scopedToken),
+    genspec: (input) => call(loopBase, "POST", "/genspec", input), // CC-72 loop shared spec-gen (admin token)
     commit: (input) => call(base, "POST", "/api/commit", input),
     usage: (clientSlug) => call(base, "GET", clientSlug ? `/api/usage?client=${encodeURIComponent(clientSlug)}` : "/api/usage"),
     // loop-engineer (WORKBENCH_LOOP_URL)
@@ -342,6 +376,18 @@ function createMockClient(env: WorkbenchEnv): WorkbenchClient {
             : "再多说说:目标用户、核心功能、想要的样子? / Tell me more: who is it for, the core feature, the look?",
         },
         commit: { sha: "mock" + slugify(input.projectSlug, "sha").slice(0, 7), pushed: false },
+      };
+    },
+    async genspec(input) {
+      const readiness = mockReadiness(input.input + (input.currentSpec || ""));
+      return {
+        reply: readiness.loop_ready
+          ? "规格已足够,可以开始生成了 / Spec looks ready — start building."
+          : "再补充点:目标用户、核心功能、想要的样子? / Tell me more: users, core feature, the look?",
+        openQuestions: readiness.loop_ready ? [] : [{ id: "core", question: "核心功能还有哪些? / What are the core features?", why: "决定实现范围 / defines scope" }],
+        readiness: { ...readiness, missing: readiness.loop_ready ? [] : ["核心功能/数据模型待补全"] },
+        spec_markdown: (input.currentSpec ? input.currentSpec + "\n\n" : "## 一句话定位\n") + input.input,
+        usage: { costUsd: 0, calls: 1 },
       };
     },
     async commit(input) {
