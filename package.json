@@ -7,12 +7,16 @@
     "dev": "wrangler dev --local --port 8787",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:migrate:local": "wrangler d1 migrations apply hackvideo-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply hackvideo-db --remote"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
     "@cloudflare/workers-types": "5.20260718.1",
     "typescript": "^5.9.3",
+    "vitest": "^4.1.10",
     "wrangler": "4.112.0"
   },
   "dependencies": {

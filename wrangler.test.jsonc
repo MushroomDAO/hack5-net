@@ -1,0 +1,33 @@
+{
+  // Minimal, isolated Worker config for the vitest-pool-workers test runtime. Deliberately strips the
+  // production config's custom-domain routes, cron triggers, static assets, KV/AI bindings we don't
+  // exercise, and real secrets — the credit-settlement e2e only needs D1 + the WorkBench http seam.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hackvideo-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-18",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hackvideo-db",
+      "database_id": "test"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SHOTS",
+      "id": "test"
+    }
+  ],
+  "vars": {
+    "APP_NAME": "Hack5",
+    "EVENT_NAME": "Hackathon",
+    "ROOT_DOMAIN": "hack5.net",
+    "AUTH_SECRET": "test-auth-secret",
+    // Set WORKBENCH_BASE_URL (and leave WORKBENCH_MOCK unset) so createWorkbench() returns the REAL
+    // http client — the test then drives usage() through fetchMock to reproduce the prod /api/usage 404.
+    "WORKBENCH_BASE_URL": "https://workbench.test",
+    "WORKBENCH_CALLBACK_SECRET": "test-callback-secret",
+    "MINIAPP_AUTO_DEPLOY": "off"
+  }
+}
