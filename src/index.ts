@@ -2342,12 +2342,23 @@ async function miniAppBuildStatus(request: Request, env: Env, tenant: Tenant | n
 // build (no hold) is just recorded for accounting. Idempotent (claims the 'reserved' row atomically);
 // never throws.
 async function settleBuildCost(env: Env, submissionId: string, email: string, tenantId: string, clientSlug: string, projectSlug: string): Promise<void> {
+  type UsageShape = {
+    perProject?: Array<{ client?: string; project?: string; usage?: { costUsd?: number; inputTokens?: number; outputTokens?: number } }>;
+    perParticipant?: Array<{ project?: string; usage?: { costUsd?: number; inputTokens?: number; outputTokens?: number } }>;
+  };
+  // Fetch the build's actual usage in its OWN failure boundary. A WorkBench /api/usage outage must NOT
+  // leave the reserved hold stuck: a `deployed` build is terminal, so the stale-build reaper (which only
+  // claims non-terminal rows) never sweeps it — the participant's credits would be trapped forever.
+  // Fail open: if we can't learn the cost, release the hold (full refund) rather than trap it.
+  let u: UsageShape = {};
   try {
-    const wb = createWorkbench(env);
-    const u = (await wb.usage(clientSlug)) as unknown as {
-      perProject?: Array<{ client?: string; project?: string; usage?: { costUsd?: number; inputTokens?: number; outputTokens?: number } }>;
-      perParticipant?: Array<{ project?: string; usage?: { costUsd?: number; inputTokens?: number; outputTokens?: number } }>;
-    };
+    u = (await createWorkbench(env).usage(clientSlug)) as unknown as UsageShape;
+  } catch (err) {
+    console.log("settleBuildCost: usage lookup failed, releasing hold (fail-open)", `${clientSlug}/${projectSlug}`, String(err));
+    await releaseBuildHold(env, clientSlug, projectSlug);
+    return;
+  }
+  try {
     // WorkBench /api/usage returns per-project rows under different keys by shape: the client-scoped
     // form (GET /api/usage?client=<c>, which wb.usage(clientSlug) hits) nests them in `perParticipant`;
     // the no-client form uses `perProject`. Read whichever is present, else nothing matched → cost 0.
@@ -2383,7 +2394,10 @@ async function settleBuildCost(env: Env, submissionId: string, email: string, te
       .bind(`build:${submissionId}`, tenantId, email, tokens, actual, `${clientSlug}/${projectSlug}`, now, now)
       .run();
   } catch (err) {
-    console.log("settleBuildCost error", String(err));
+    // A DB reconciliation error must also never trap the hold — release it. Idempotent: releaseBuildHold
+    // only refunds a still-'reserved' row, so it's a no-op if the hold was already claimed as 'settled'.
+    console.log("settleBuildCost error, releasing hold (fail-open)", String(err));
+    await releaseBuildHold(env, clientSlug, projectSlug);
   }
 }
 
