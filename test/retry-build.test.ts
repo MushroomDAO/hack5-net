@@ -126,6 +126,23 @@ describe("miniAppRetry — resume a failed build", () => {
     expect((await balanceOf(email))?.credits).toBe(70);
   });
 
+  it("concurrent double-retry: exactly one wins, charged once, one hold (no orphaned credits)", async () => {
+    const email = "owner@example.com";
+    await seedFailedBuild({ project: "idea-race", email, balance: 100 });
+    const calls = stubLoop();
+    const cookie = await verifiedCookie(email);
+    const fire = () =>
+      SELF.fetch(`${HOST}/api/tenant/mini/app/retry`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ id: "sub-idea-race" }) });
+
+    const [a, b] = await Promise.all([fire(), fire()]);
+    const codes = [a.status, b.status].sort((x, y) => x - y);
+    expect(codes).toEqual([200, 409]); // one winner, one clean loser — never two winners (the CAS guarantee)
+    expect(calls.plan).toBe(1); // only the winner re-triggered loop
+    expect((await balanceOf(email))?.credits).toBe(70); // charged exactly once (30), not 60
+    const holds = await env.DB.prepare("SELECT COUNT(*) AS c FROM credit_ledger WHERE id = ?").bind(`hold:${TID}/idea-race`).first<{ c: number }>();
+    expect(holds?.c).toBe(1); // exactly one reserved hold, none orphaned by an overwrite
+  });
+
   it("a non-failed build is not resumable (no double-run) → 409, no charge", async () => {
     const email = "owner@example.com";
     await seedFailedBuild({ project: "idea-live", email, balance: 100, buildState: "deployed" });

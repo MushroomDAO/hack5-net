@@ -2909,12 +2909,12 @@ async function miniAppRetry(request: Request, env: Env, tenant: Tenant | null, t
   const id = String(body?.id ?? "").trim();
   if (!id) return json({ error: "missing id" }, 400);
   const sub = await env.DB.prepare(
-    "SELECT id, email, description, repo_url, wb_client, wb_project, build_state FROM submissions WHERE id = ? AND tenant_id = ?",
+    "SELECT id, email, description, repo_url, wb_client, wb_project, build_state, build_error FROM submissions WHERE id = ? AND tenant_id = ?",
   )
     .bind(id, tid)
-    .first<{ id: string; email: string | null; description: string | null; repo_url: string | null; wb_client: string | null; wb_project: string | null; build_state: string | null }>();
+    .first<{ id: string; email: string | null; description: string | null; repo_url: string | null; wb_client: string | null; wb_project: string | null; build_state: string | null; build_error: string | null }>();
   if (!sub) return json({ error: "作品不存在 / Not found" }, 404);
-  // Only a failed build is resumable — a live/terminal-success one must not be re-triggered (would double-run).
+  // Friendly fast-path 409 for the common case; the AUTHORITATIVE guard is the atomic CAS claim below.
   if (sub.build_state !== "failed") return json({ error: "只有构建失败的作品可以续跑 / Only a failed build can be retried" }, 409);
   const clientSlug = String(sub.wb_client ?? "").trim();
   const projectSlug = String(sub.wb_project ?? "").trim();
@@ -2930,25 +2930,39 @@ async function miniAppRetry(request: Request, env: Env, tenant: Tenant | null, t
     return json({ error: "续跑构建需先用该作品的邮箱登录并验证 / Sign in and verify with this project's email to retry", upgrade: true, needVerify: true }, 402);
   }
 
-  // A retry is a fresh coding-loop run — count it against the same per-IP / per-tenant / global launch caps.
-  const day = Math.floor(unixNow() / 86400);
-  const ip = request.headers.get("cf-connecting-ip") ?? "local";
-  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
-  if (!(await bumpDailyCap(env, `miniapp:launch:ip:${ipHash}:${day}`, capNum(env.MINIAPP_LAUNCH_IP_CAP, 3)))) return json({ error: "今日生成次数已达上限,请明天再来 / Daily build limit reached" }, 429);
-  if (!(await bumpDailyCap(env, `miniapp:launch:t:${tid}:${day}`, capNum(env.MINIAPP_LAUNCH_TENANT_CAP, 10)))) return json({ error: "本场今日生成已达上限 / Event daily build limit reached" }, 429);
-  if (!(await bumpDailyCap(env, `miniapp:launch:global:${day}`, capNum(env.MINIAPP_LAUNCH_GLOBAL_CAP, 30)))) return json({ error: "系统今日生成已达上限,请明天再来 / Service daily build limit reached" }, 429);
+  // Serialize the retry with a compare-and-swap on the state transition, claimed BEFORE any billing or loop
+  // trigger. Without this, two concurrent requests (a double-click, two tabs, or an API replay — the frontend
+  // button-disable is client-side only) both pass the plain build_state check above, both deduct credits and
+  // trigger a loop job, and both INSERT OR REPLACE the SAME `hold:<client>/<project>` ledger row — the second
+  // silently overwrites the first, orphaning one hold's credits forever. Only the CAS winner proceeds; the
+  // loser gets a clean 409 having spent nothing.
+  const prevError = sub.build_error ?? null;
+  const claim = await env.DB.prepare(
+    "UPDATE submissions SET build_state = 'queued', build_error = NULL, updated_at = ? WHERE id = ? AND tenant_id = ? AND build_state = 'failed'",
+  )
+    .bind(unixNow(), id, tid)
+    .run();
+  if (claim.meta.changes !== 1) return json({ error: "该作品正在构建或已被重试 / Build already retried or in progress" }, 409);
+  // Undo the claim (restore failed + its reason) if we bail before the build is actually re-triggered.
+  const revertToFailed = () =>
+    env.DB.prepare("UPDATE submissions SET build_state = 'failed', build_error = ?, updated_at = ? WHERE id = ? AND build_state = 'queued'")
+      .bind(prevError, unixNow(), id)
+      .run()
+      .catch(() => {});
 
   // Reserve a fresh hold (atomic conditional deduct — never overdraws). The prior failed attempt cost the
-  // participant nothing (its hold was released on failure); this one settles to real cost on deploy.
+  // participant nothing (its hold was released on failure); this one settles to real cost on deploy. A 402
+  // here spent nothing → restore the failed state so the participant can try again later.
   const idea = String(sub.description ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
   const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
   const now0 = unixNow();
   const gateResp = await affordabilityGate(env, email, hold, { idea });
-  if (gateResp) return gateResp;
+  if (gateResp) { await revertToFailed(); return gateResp; }
   const held = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
     .bind(hold, now0, email, hold)
     .run();
   if (held.meta.changes !== 1) {
+    await revertToFailed();
     return json({ error: "积分不足,请充值后再续跑 / Not enough credits — top up to retry", pricingUrl: "/pricing", upgrade: true }, 402);
   }
   await env.DB.prepare(
@@ -2956,6 +2970,21 @@ async function miniAppRetry(request: Request, env: Env, tenant: Tenant | null, t
   )
     .bind(`hold:${clientSlug}/${projectSlug}`, tid, email, hold, `${clientSlug}/${projectSlug}`, now0, now0)
     .run();
+
+  // Daily launch caps — charged only now that the retry has CLAIMED the slot AND paid, so a 409 loser or a
+  // 402 (can't afford) never burns one. Over-cap here refunds the hold and restores the failed state.
+  const day = Math.floor(unixNow() / 86400);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
+  const overCap =
+    !(await bumpDailyCap(env, `miniapp:launch:ip:${ipHash}:${day}`, capNum(env.MINIAPP_LAUNCH_IP_CAP, 3))) ||
+    !(await bumpDailyCap(env, `miniapp:launch:t:${tid}:${day}`, capNum(env.MINIAPP_LAUNCH_TENANT_CAP, 10))) ||
+    !(await bumpDailyCap(env, `miniapp:launch:global:${day}`, capNum(env.MINIAPP_LAUNCH_GLOBAL_CAP, 30)));
+  if (overCap) {
+    await releaseBuildHold(env, clientSlug, projectSlug).catch(() => {});
+    await revertToFailed();
+    return json({ error: "今日生成次数已达上限,请明天再来 / Daily build limit reached" }, 429);
+  }
 
   // The loop-ready SPEC, if we still hold a copy, travels inline; else fall back to `idea` (loop self-heals
   // from it / its own SPEC.md). Keyed by wb_project (a per-tenant-unique minted slug), independent of device.
@@ -2968,17 +2997,18 @@ async function miniAppRetry(request: Request, env: Env, tenant: Tenant | null, t
   let jobId: string, queuePos: number;
   try {
     jobId = (await wb.plan({ clientSlug, projectSlug, repo: repoUrl, spec: spec || undefined, idea, lang: "zh" })).jobId;
+    // A 200 with a falsy jobId would otherwise sail past this catch → wb.run(undefined) + a `queued` build
+    // with no job behind it (stuck until #104 reaps the hold). Treat it as a trigger failure → 502 + refund.
+    if (!jobId) throw new Error("loop /plan returned no jobId");
     queuePos = (await wb.run(jobId)).queuePos;
   } catch (e) {
-    // Couldn't re-trigger the build — refund the hold we just reserved so a failed retry never costs credits.
+    // Couldn't re-trigger — refund the hold and restore the failed state so a failed retry costs nothing.
     await releaseBuildHold(env, clientSlug, projectSlug).catch(() => {});
+    await revertToFailed();
     console.error("miniAppRetry re-plan failed", String(e));
     return json({ error: "续跑触发失败,请稍后再试 / Retry failed to start" }, 502);
   }
-  // Back to queued; clear the prior failure reason so the view shows a fresh in-progress build.
-  await env.DB.prepare("UPDATE submissions SET build_state = 'queued', build_error = NULL, updated_at = ? WHERE id = ?")
-    .bind(unixNow(), id)
-    .run();
+  // Success — the build was already claimed as `queued` up-front (failure reason cleared then); nothing left.
   return json({ ok: true, id, viewUrl: `/s/${id}`, repoUrl, jobId, queuePos });
 }
 
