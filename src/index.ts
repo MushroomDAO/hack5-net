@@ -6178,7 +6178,7 @@ const APP_HTML = String.raw`<!doctype html>
           // from the failed step (finished steps aren't redone), instead of starting a fresh /make.
           + (isMini && s.buildState==='failed' && s.wbClient && s.wbProject
               ? '<div id="retryBox" style="margin-top:10px">'
-                + '<div class="muted" style="font-size:12px;margin-bottom:6px">'+t('构建中断了。可从失败的步骤续跑(已完成的步骤不会重做),无需从头再来。','The build stopped. Retry to resume from the failed step — finished steps aren\'t redone.')+'</div>'
+                + '<div class="muted" style="font-size:12px;margin-bottom:6px">'+t('构建中断了。','The build stopped. ')+resumeHint(s.phases)+'</div>'
                 + '<button id="dRetry">🔄 '+t('重试 / 续跑构建','Retry / resume build')+'</button>'
                 + '<div id="retryMsg" style="margin-top:8px"></div>'
                 + '</div>'
@@ -6531,22 +6531,36 @@ const APP_HTML = String.raw`<!doctype html>
     // CC-64: per-step cost breakdown from WorkBench phases[]. Display only — the real charge is the
     // event-level total (settle), NOT the sum of these (per-node ceil rounds up). On a failed build the
     // last phase is where it stopped, so highlight it.
+    // CC-79 收尾 — summarise which steps a failed build already FINISHED (its phases[] are the completed
+    // steps; the task that actually failed isn't reported among them), so the retry hint states exactly
+    // what a resume won't redo. Derived purely from data hack5 already has — no WorkBench /status change.
+    function resumeHint(phases){
+      const done = Array.isArray(phases) ? phases.map(function(p){ return String(p && p.stage!=null ? p.stage : ''); }).filter(Boolean) : [];
+      if(!done.length) return t('可从失败的步骤续跑,已完成的不会重做,无需从头再来。','Retry to resume from the failed step — finished steps aren\'t redone.');
+      const list = done.map(esc).join(' · ');
+      return t('上次已完成 '+done.length+' 步('+list+')。续跑会从中断处继续,不重做已完成的。','Finished '+done.length+' step(s) last time ('+list+'). Retry resumes from where it stopped, without redoing them.');
+    }
     function phasesTimeline(phases, st){
       if(!Array.isArray(phases) || !phases.length) return '';
+      // A failed build's listed phases are the steps that COMPLETED (their cost was reported); the task that
+      // actually failed isn't among them — so show them all as done and append ONE trailing interrupted
+      // marker, rather than red-flagging the last GOOD step (which used to read as if that step had failed).
       const rows = phases.map(function(ph, i){
-        const failedHere = (st==='failed' && i===phases.length-1);
         const usd = (typeof ph.costUsd==='number') ? ('$'+ph.costUsd.toFixed(3)) : '';
         const cr = (typeof ph.credits==='number') ? ph.credits : ((typeof ph.costUsd==='number') ? Math.ceil(ph.costUsd*100) : null);
-        return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px'+(failedHere?';color:#dc2626;font-weight:600':'')+'">'
-          + '<span>'+(failedHere?'⚠️':'•')+'</span>'
+        return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">'
+          + '<span>•</span>'
           + '<span style="flex:none;min-width:72px;font-family:ui-monospace,Menlo,monospace">'+esc(String(ph.stage!=null?ph.stage:('#'+(i+1))))+'</span>'
           + '<span class="muted" style="flex:1">'+esc(usd)+'</span>'
           + (cr!=null?'<span style="flex:none">≈ '+cr+' '+t('积分','cr')+'</span>':'')
           + '</div>';
       }).join('');
+      const interrupted = st==='failed'
+        ? '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px;color:#dc2626;font-weight:600"><span>⚠️</span><span style="flex:1">'+t('后续步骤中断 —— 可「续跑」从此处继续','Interrupted here — “Retry / resume” continues from this point')+'</span></div>'
+        : '';
       return '<div style="margin-top:8px;border-top:1px solid var(--line,#333);padding-top:8px">'
         + '<div class="muted" style="font-size:12px;margin-bottom:4px">💠 '+t('每步花费','Per-step cost')+' <span style="opacity:.65">('+t('仅展示','display only')+')</span></div>'
-        + rows + '</div>';
+        + rows + interrupted + '</div>';
     }
     function buildProgressLine(st, extra, pct, current){
       const map={queued:['⏳',t('排队中','Queued'),15],planning:['🛠',t('规划中','Planning'),35],coding:['🛠',t('编码中','Coding'),60],reviewing:['🔍',t('审查中','Reviewing'),85],deployed:['✅',t('已上线','Live'),100],failed:['⚠️',t('构建失败','Build failed'),100]};
