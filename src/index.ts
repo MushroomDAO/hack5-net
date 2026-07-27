@@ -223,6 +223,7 @@ export default {
       if (path === "/api/tenant/mini/app/launch-spec" && method === "POST") return miniAppLaunchSpec(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/deploy" && method === "POST") return miniAppDeploy(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/build-status" && method === "GET") return miniAppBuildStatus(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/app/retry" && method === "POST") return miniAppRetry(request, env, tenant, tid); // CC-79 resume a failed build
       if (path === "/api/tenant/mini/app/estimate" && method === "POST") return miniAppEstimate(request, env, tenant, tid);
       // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
       if (path === "/api/wb/usage-selftest" && method === "GET") return usageSelftest(env);
@@ -2894,6 +2895,91 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   }
   await sendBuildQueuedEmail(env, email, { projectName, repoUrl: repo.htmlUrl, viewUrl: `https://${tenant.subdomain}.hack5.net/s/${id}`, editToken }).catch(() => {});
   return json({ ok: true, id, editToken, viewUrl: `/s/${id}`, repoUrl: repo.htmlUrl, jobId, queuePos });
+}
+
+// CC-79 — retry/resume a FAILED build. Re-triggers loop /plan with the SAME wb_project + the existing repo,
+// so loop continues the unfinished coding tasks (PR #81 resume semantics: re-submitting the same projectSlug
+// skips already-done tasks and picks up where it stopped) instead of forcing the participant to start a
+// brand-new /make from scratch. Only a terminal `failed` build can be retried. Billing mirrors miniAppLaunch:
+// reserve a fresh hold up-front (the failed attempt's hold was already released → refunded), settle it to the
+// build's real cost on the deployed callback, release it on failure — with #104's fail-safe it's never trapped.
+async function miniAppRetry(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const body = await request.json<{ id?: string }>().catch(() => null);
+  const id = String(body?.id ?? "").trim();
+  if (!id) return json({ error: "missing id" }, 400);
+  const sub = await env.DB.prepare(
+    "SELECT id, email, description, repo_url, wb_client, wb_project, build_state FROM submissions WHERE id = ? AND tenant_id = ?",
+  )
+    .bind(id, tid)
+    .first<{ id: string; email: string | null; description: string | null; repo_url: string | null; wb_client: string | null; wb_project: string | null; build_state: string | null }>();
+  if (!sub) return json({ error: "作品不存在 / Not found" }, 404);
+  // Only a failed build is resumable — a live/terminal-success one must not be re-triggered (would double-run).
+  if (sub.build_state !== "failed") return json({ error: "只有构建失败的作品可以续跑 / Only a failed build can be retried" }, 409);
+  const clientSlug = String(sub.wb_client ?? "").trim();
+  const projectSlug = String(sub.wb_project ?? "").trim();
+  const repoUrl = String(sub.repo_url ?? "").trim();
+  if (!clientSlug || !projectSlug || !isHttpUrl(repoUrl)) return json({ error: "该作品不是可续跑的 AI build / Not a resumable AI build" }, 400);
+  const email = normalizeEmail(sub.email);
+  if (!email) return json({ error: "该作品缺少参赛者邮箱,无法计费续跑 / Missing participant email" }, 400);
+
+  // Same identity gate as launch: only the VERIFIED owner of this email may spend its credits (a public
+  // detail page means anyone can hit this route — the gate stops a stranger burning the owner's balance).
+  const me = await getParticipant(request, env, tid);
+  if (!(me?.verified === true && me.email === email)) {
+    return json({ error: "续跑构建需先用该作品的邮箱登录并验证 / Sign in and verify with this project's email to retry", upgrade: true, needVerify: true }, 402);
+  }
+
+  // A retry is a fresh coding-loop run — count it against the same per-IP / per-tenant / global launch caps.
+  const day = Math.floor(unixNow() / 86400);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
+  if (!(await bumpDailyCap(env, `miniapp:launch:ip:${ipHash}:${day}`, capNum(env.MINIAPP_LAUNCH_IP_CAP, 3)))) return json({ error: "今日生成次数已达上限,请明天再来 / Daily build limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:launch:t:${tid}:${day}`, capNum(env.MINIAPP_LAUNCH_TENANT_CAP, 10)))) return json({ error: "本场今日生成已达上限 / Event daily build limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:launch:global:${day}`, capNum(env.MINIAPP_LAUNCH_GLOBAL_CAP, 30)))) return json({ error: "系统今日生成已达上限,请明天再来 / Service daily build limit reached" }, 429);
+
+  // Reserve a fresh hold (atomic conditional deduct — never overdraws). The prior failed attempt cost the
+  // participant nothing (its hold was released on failure); this one settles to real cost on deploy.
+  const idea = String(sub.description ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+  const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
+  const now0 = unixNow();
+  const gateResp = await affordabilityGate(env, email, hold, { idea });
+  if (gateResp) return gateResp;
+  const held = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
+    .bind(hold, now0, email, hold)
+    .run();
+  if (held.meta.changes !== 1) {
+    return json({ error: "积分不足,请充值后再续跑 / Not enough credits — top up to retry", pricingUrl: "/pricing", upgrade: true }, 402);
+  }
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO credit_ledger (id, tenant_id, email, kind, status, tokens, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'build', 'reserved', 0, ?, ?, ?, ?)",
+  )
+    .bind(`hold:${clientSlug}/${projectSlug}`, tid, email, hold, `${clientSlug}/${projectSlug}`, now0, now0)
+    .run();
+
+  // The loop-ready SPEC, if we still hold a copy, travels inline; else fall back to `idea` (loop self-heals
+  // from it / its own SPEC.md). Keyed by wb_project (a per-tenant-unique minted slug), independent of device.
+  const conv = await env.DB.prepare("SELECT spec FROM make_conversations WHERE tenant_id = ? AND wb_project = ? ORDER BY updated_at DESC LIMIT 1")
+    .bind(tid, projectSlug)
+    .first<{ spec: string | null }>();
+  const spec = String(conv?.spec ?? "").slice(0, 512 * 1024);
+
+  const wb = createWorkbench(env);
+  let jobId: string, queuePos: number;
+  try {
+    jobId = (await wb.plan({ clientSlug, projectSlug, repo: repoUrl, spec: spec || undefined, idea, lang: "zh" })).jobId;
+    queuePos = (await wb.run(jobId)).queuePos;
+  } catch (e) {
+    // Couldn't re-trigger the build — refund the hold we just reserved so a failed retry never costs credits.
+    await releaseBuildHold(env, clientSlug, projectSlug).catch(() => {});
+    console.error("miniAppRetry re-plan failed", String(e));
+    return json({ error: "续跑触发失败,请稍后再试 / Retry failed to start" }, 502);
+  }
+  // Back to queued; clear the prior failure reason so the view shows a fresh in-progress build.
+  await env.DB.prepare("UPDATE submissions SET build_state = 'queued', build_error = NULL, updated_at = ? WHERE id = ?")
+    .bind(unixNow(), id)
+    .run();
+  return json({ ok: true, id, viewUrl: `/s/${id}`, repoUrl, jobId, queuePos });
 }
 
 // CC-59 — "upload a ready spec (markdown) → one-click build", skipping the multi-turn chat. The user
@@ -6058,6 +6144,15 @@ const APP_HTML = String.raw`<!doctype html>
                 + '<div id="deployMsg" style="margin-top:8px"></div>'
                 + '</div>'
               : '')
+          // CC-79 — retry/resume once a build has failed: re-runs the SAME wb_project so loop continues
+          // from the failed step (finished steps aren't redone), instead of starting a fresh /make.
+          + (isMini && s.buildState==='failed' && s.wbClient && s.wbProject
+              ? '<div id="retryBox" style="margin-top:10px">'
+                + '<div class="muted" style="font-size:12px;margin-bottom:6px">'+t('构建中断了。可从失败的步骤续跑(已完成的步骤不会重做),无需从头再来。','The build stopped. Retry to resume from the failed step — finished steps aren\'t redone.')+'</div>'
+                + '<button id="dRetry">🔄 '+t('重试 / 续跑构建','Retry / resume build')+'</button>'
+                + '<div id="retryMsg" style="margin-top:8px"></div>'
+                + '</div>'
+              : '')
         : '')
       + (s.secret && s.demoUrl?'<div class="kv"><span>'+t('在线 Demo','Live demo')+'</span><b><a href="'+esc(s.demoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
       + (s.secret && s.demoUser?'<div class="kv"><span>'+t('Demo 账号','Demo user')+'</span><b>'+esc(s.demoUser)+'</b></div>':'')
@@ -6100,6 +6195,22 @@ const APP_HTML = String.raw`<!doctype html>
           + (r.selfDeployHint?'<div class="muted" style="font-size:12px;margin-top:6px">'+esc(r.selfDeployHint)+'</div>':'')
           + '<div class="muted" style="font-size:12px;margin-top:4px">'+t('此托管 7 天后自动删除;用你自己的 Cloudflare 账号可长期自部署。','This hosting is auto-removed after 7 days; self-deploy on your own Cloudflare account to keep it.')+'</div>';
       }catch(e){ msg.innerHTML='<div class="notice err">'+esc(e.message)+'</div>'; dep.disabled=false; dep.textContent=o; }
+    });
+    // CC-79 — retry/resume a failed build: re-trigger loop on the same wb_project, then poll like a fresh launch.
+    const rtr=$('#dRetry'); if(rtr) rtr.addEventListener('click', async ()=>{
+      const rmsg=$('#retryMsg');
+      rtr.disabled=true; const ro=rtr.textContent; rtr.textContent='⏳ '+t('重新触发中…','Restarting…');
+      try{
+        const r=await api('/api/tenant/mini/app/retry',{method:'POST',body:{id:s.id}});
+        // Hand the live poller the same box: it replaces the button with a progress bar until deployed/failed.
+        const box=$('#retryBox'); if(box) box.innerHTML=buildProgressLine('queued');
+        await pollBuild(r.id, box||$('#retryBox'), r);
+      }catch(e){
+        rtr.disabled=false; rtr.textContent=ro;
+        // Not verified / not enough credits → send them to the right place, like the deploy/launch flows do.
+        if(e.data && (e.data.needVerify||e.data.upgrade)){ rmsg.innerHTML='<div class="notice err">'+esc(e.message)+'</div>'; setTimeout(()=>go(e.data.needVerify?'/register':'/pricing'), 900); return; }
+        rmsg.innerHTML='<div class="notice err">'+esc(e.message)+'</div>';
+      }
     });
     // github meta — skipped for secret (private repo) and mini (no repo)
     if(!s.secret && !s.linkUrl) api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
