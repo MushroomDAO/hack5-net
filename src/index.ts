@@ -145,6 +145,7 @@ export default {
       // ---- platform user (email login) + hackathon creation (not tenant-scoped) ----
       if (path === "/api/platform/me" && method === "GET") return platformMe(request, env);
       if (path === "/api/platform/stats" && method === "GET") return platformStats(env);
+      if (path === "/api/platform/explore" && method === "GET") return platformExplore(env);
       if (path === "/api/platform/login/request" && method === "POST") return platformLoginRequest(request, env);
       if (path === "/api/platform/login/verify" && method === "POST") return platformLoginVerify(request, env);
       if (path === "/api/platform/logout" && method === "POST") return platformLogout(request);
@@ -537,6 +538,43 @@ async function platformStats(env: Env): Promise<Response> {
   const grant = Math.max(0, Math.floor(Number(env.CREDITS_SIGNUP_GRANT ?? "100")) || 100);
   const cnt = Number((await env.DB.prepare("SELECT COUNT(*) AS c FROM participant_credits").first<{ c: number }>())?.c ?? 0);
   return json({ registered: cnt, grantCap: cap, grant, grantRemaining: Math.max(0, cap - cnt) });
+}
+
+// Public: list running/public hackathons for the landing "现场" strip and the /plaza page.
+// Secret-mode events are invite-only and are never listed here. Each row carries a phase
+// (live / upcoming / ended) computed from start_at/end_at, ordered live → upcoming → recent-ended.
+async function platformExplore(env: Env): Promise<Response> {
+  const now = unixNow();
+  const rows = (await env.DB.prepare(
+    `SELECT t.id, t.subdomain, t.name, t.mode, t.intro, t.banner, t.start_at, t.end_at, t.location, t.created_at,
+            (SELECT COUNT(*) FROM submissions s WHERE s.tenant_id = t.id AND s.status = 'ready') AS works
+       FROM tenants t
+      WHERE t.status = 'active' AND (t.mode IS NULL OR t.mode != 'secret') AND t.subdomain NOT IN ('www', 'api', 'demo')
+      ORDER BY t.created_at DESC
+      LIMIT 60`,
+  ).all<{ id: string; subdomain: string; name: string; mode: string | null; intro: string | null; banner: string | null; start_at: number | null; end_at: number | null; location: string | null; created_at: number; works: number }>()).results;
+  const phaseOf = (start: number | null, end: number | null): "live" | "upcoming" | "ended" => {
+    if (start && now < start) return "upcoming";
+    if (end && now > end) return "ended";
+    return "live"; // within window, or no dates set → treat as ongoing/open
+  };
+  const items = rows.map((r) => ({
+    subdomain: r.subdomain,
+    name: r.name,
+    mode: r.mode === "mini" ? "mini" : "open",
+    intro: (r.intro || "").slice(0, 160),
+    hasBanner: r.banner === "1",
+    bannerUrl: r.banner === "1" ? `https://${r.subdomain}.hack5.net/banner/${r.subdomain}` : null,
+    location: r.location || "",
+    startAt: r.start_at,
+    endAt: r.end_at,
+    works: Number(r.works) || 0,
+    url: `https://${r.subdomain}.hack5.net`,
+    phase: phaseOf(r.start_at, r.end_at),
+  }));
+  const rank = { live: 0, upcoming: 1, ended: 2 } as const;
+  items.sort((a, b) => rank[a.phase] - rank[b.phase] || (b.startAt ?? b.endAt ?? 0) - (a.startAt ?? a.endAt ?? 0));
+  return json({ hackathons: items, now });
 }
 
 async function platformMe(request: Request, env: Env): Promise<Response> {
@@ -4334,6 +4372,45 @@ const APP_HTML = String.raw`<!doctype html>
     .entry-card .ec-sub{color:var(--brand);font-weight:700;font-size:13px}
     .entry-card p{margin:6px 0 10px;font-size:14px;color:var(--ink2)}
     .entry-card .ec-go{margin-top:auto;color:var(--brand);font-weight:700;font-size:14px}
+    /* compact mode cards (landing, shrunk ~half): icon + title + one-line sub + go, no paragraph */
+    .entry-grid.compact{gap:10px;max-width:760px;margin:14px auto 0}
+    .entry-card.mini{padding:12px 14px;border-radius:13px;gap:2px;flex-direction:row;align-items:center;flex-wrap:wrap}
+    .entry-card.mini .ec-ico{font-size:20px;margin-right:4px}
+    .entry-card.mini h3{margin:0;font-size:15px}
+    .entry-card.mini .ec-sub{font-size:11.5px;width:100%;order:3}
+    .entry-card.mini .ec-go{margin:0 0 0 auto;font-size:13px}
+    @media(max-width:760px){.entry-grid.compact{grid-template-columns:1fr}}
+    /* landing "现场" live strip */
+    .land-live{max-width:940px;margin:26px auto 0}
+    .ll-head{display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 12px;gap:10px}
+    .ll-head h2{margin:0;font-size:19px}
+    .ll-all{color:var(--brand);font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap}
+    .live-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+    @media(max-width:860px){.live-grid{grid-auto-flow:column;grid-template-columns:none;grid-auto-columns:70%;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:6px}.live-grid>*{scroll-snap-align:start}}
+    .live-card{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--card);box-shadow:var(--shadow);cursor:pointer;transition:transform .12s,border-color .12s;text-decoration:none;color:inherit}
+    .live-card:hover{transform:translateY(-3px);border-color:var(--brand)}
+    .lc-art{position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#5b4be6,#8f7ff0);display:flex;align-items:center;justify-content:center}
+    .lc-art.mini{background:linear-gradient(135deg,#ff8a3d,#f6b73c)}
+    .lc-art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+    .lc-art .lc-emoji{font-size:34px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.25))}
+    .lc-badge{position:absolute;top:7px;left:7px;font-size:11px;font-weight:800;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.55);color:#fff;backdrop-filter:blur(2px)}
+    .lc-badge.live{background:#e8402f}
+    .lc-badge.upcoming{background:#2563eb}
+    .lc-badge.ended{background:#6b7280}
+    .lc-body{padding:9px 11px 11px;display:flex;flex-direction:column;gap:3px;flex:1}
+    .lc-body h3{margin:0;font-size:14.5px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .lc-meta{margin-top:auto;font-size:11.5px;color:var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .lc-chip{font-size:10.5px;font-weight:700;color:var(--brand)}
+    /* plaza page (广场) — full list with intros */
+    .plaza-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+    @media(max-width:820px){.plaza-grid{grid-template-columns:1fr}}
+    .plaza-card{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--card);box-shadow:var(--shadow);text-decoration:none;color:inherit;transition:transform .12s,border-color .12s}
+    .plaza-card:hover{transform:translateY(-3px);border-color:var(--brand)}
+    .plaza-card .lc-art{aspect-ratio:2/1}
+    .plaza-card .pc-body{padding:14px 16px 16px;display:flex;flex-direction:column;gap:6px;flex:1}
+    .plaza-card .pc-body h3{margin:0;font-size:17px}
+    .plaza-card .pc-body p{margin:0;font-size:13px;color:var(--ink2);line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+    .plaza-sec{margin:26px 0 12px;font-size:16px;font-weight:800}
     .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
     .sponsor-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:14px;margin-bottom:12px;font-size:13px}
     .sponsor-bar .muted{text-transform:uppercase;letter-spacing:.1em;font-size:11px;font-weight:700}
@@ -4783,6 +4860,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(CONFIG.platform){
       if(p === '/about') return renderAbout();
       if(p === '/guide') return renderGuide();
+      if(p === '/plaza') return renderPlaza();
       if(p === '/media') return renderMedia();
       if(p === '/pricing') return renderPricing();
       if(p === '/rewards') return renderRewards();
@@ -5279,25 +5357,72 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   // ---------------- platform landing (hack5.net apex) ----------------
-  function renderPlatformLanding(){
-    const feats = [
-      ['⚡', t('三步 · 10 分钟','3 steps · 10 min'), t('登录 → 取名 → 一键部署你专属的黑客松站点。','Log in → name it → deploy your own hackathon site.')],
-      ['🆓', t('首场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
-      ['🌱', t('数字公共物品','Digital public good'), t('Hack5 隶属于 Mycelium,为开放的创造者社区而建。','Hack5 is part of Mycelium, built for open makers.')],
-    ];
-    app.innerHTML = '<div class="guide">'
-      + '<div class="guide-hero" style="padding:44px 0 8px">'
-      + '<h1 style="font-size:clamp(30px,6vw,54px)">'+t('人人可办的黑客松平台','The hackathon platform anyone can run')+'</h1>'
-      + '<p class="guide-sub">'+t('三种规模,一键发起 · 独立域名 · 首场免费','Three scales, one click · your own domain · first free')+'</p>'
-      + '<div class="entry-grid">'
-      + '<div class="entry-card" onclick="startMode(\'open\')"><div class="ec-ico">⚡</div><h3>'+t('常规黑客松','Regular')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 200 人以下','10 min · under 200 people')+'</div><p>'+t('公开报名、作品墙、评审打分——通用规模。','Public sign-up, gallery, judging — general scale.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
-      + '<div class="entry-card" onclick="startMode(\'secret\')"><div class="ec-ico">🔒</div><h3>'+t('企业私密黑客松','Enterprise')+'</h3><div class="ec-sub">'+t('10 分钟启动 · 邀请制','10 min · invite-only')+'</div><p>'+t('访问码门禁、不公开源码、Demo 评审。付费。','Access-gated, no source exposed, demo review. Paid.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
-      + '<div class="entry-card" onclick="startMode(\'mini\')"><div class="ec-ico">✨</div><h3>'+t('Mini 黑客松','Mini')+'</h3><div class="ec-sub">'+t('5 分钟启动 · AI 驱动 · 50 人以下','5 min · AI-powered · under 50')+'</div><p>'+t('面向非开发者:AI 驱动,一句想法就能自动做成能跑的应用。构建按实际用量扣积分,组织者预充值。','For non-coders — AI-powered: one idea auto-built into a working app. Builds metered by usage, pre-funded by the organizer.')+'</p><span class="ec-go">'+t('启动 →','Start →')+'</span></div>'
+  // Phase label for a hackathon card badge (live / upcoming / ended).
+  function hackPhaseLabel(ph){ return ph==='live' ? t('进行中','Live') : ph==='upcoming' ? t('即将开始','Soon') : t('已结束','Ended'); }
+  // Small card for the landing "现场" strip. h is an explore item (or the pinned demo).
+  function liveCardHtml(h){
+    return '<a class="live-card" href="'+esc(h.url)+'"'+(h.isDemo?' target="_blank" rel="noopener"':'')+'>'
+      + '<div class="lc-art'+(h.mode==='mini'?' mini':'')+'">'
+      +   (h.bannerUrl?'<img src="'+esc(h.bannerUrl)+'" alt="" loading="lazy" onerror="this.remove()">':'')
+      +   '<span class="lc-emoji">'+(h.isDemo?'👀':(h.mode==='mini'?'✨':'⚡'))+'</span>'
+      +   '<span class="lc-badge '+esc(h.phase)+'">'+(h.isDemo?'DEMO':hackPhaseLabel(h.phase))+'</span>'
       + '</div>'
-      + '<div style="text-align:center;margin-top:16px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 看 Demo 示例 → demo.hack5.net','👀 See the demo → demo.hack5.net')+'</a></div>'
-      + '<div class="guide-steps" style="margin-top:38px">'
-      + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
-      + '</div></div>';
+      + '<div class="lc-body"><h3>'+esc(h.name)+'</h3>'
+      +   '<div class="lc-meta"><span class="lc-chip">'+(h.mode==='mini'?'Mini':t('常规','Regular'))+'</span>'
+      +     (h.works?'<span>'+h.works+' '+t('作品','works')+'</span>':'')+'</div>'
+      + '</div></a>';
+  }
+  // Bigger card (with intro) for the /plaza page.
+  function plazaCardHtml(h){
+    return '<a class="plaza-card" href="'+esc(h.url)+'">'
+      + '<div class="lc-art'+(h.mode==='mini'?' mini':'')+'">'
+      +   (h.bannerUrl?'<img src="'+esc(h.bannerUrl)+'" alt="" loading="lazy" onerror="this.remove()">':'')
+      +   '<span class="lc-emoji">'+(h.mode==='mini'?'✨':'⚡')+'</span>'
+      +   '<span class="lc-badge '+esc(h.phase)+'">'+hackPhaseLabel(h.phase)+'</span>'
+      + '</div>'
+      + '<div class="pc-body"><h3>'+esc(h.name)+'</h3>'
+      +   (h.intro?'<p>'+esc(h.intro)+'</p>':'')
+      +   '<div class="lc-meta" style="margin-top:8px"><span class="lc-chip">'+(h.mode==='mini'?'Mini':t('常规','Regular'))+'</span>'
+      +     (h.location?'<span>📍 '+esc(h.location)+'</span>':'')
+      +     (h.works?'<span>'+h.works+' '+t('作品','works')+'</span>':'')+'</div>'
+      + '</div></a>';
+  }
+  function demoCard(){ return { isDemo:true, name:t('Demo · 示例黑客松','Demo · sample hackathon'), url:'https://demo.hack5.net', bannerUrl:'https://demo.hack5.net/banner/demo', mode:'open', phase:'live', works:0 }; }
+
+  async function renderPlatformLanding(){
+    app.innerHTML = '<div class="guide land">'
+      + '<div class="guide-hero" style="padding:28px 0 4px">'
+      + '<h1 style="font-size:clamp(26px,5.2vw,46px)">'+t('人人可办的黑客松平台','The hackathon platform anyone can run')+'</h1>'
+      + '<p class="guide-sub">'+t('三种规模,一键发起 · 独立域名 · 首场免费','Three scales, one click · your own domain · first free')+'</p></div>'
+      // three mode cards — compact (shrunk ~half): icon + title + go + one-line sub
+      + '<div class="entry-grid compact">'
+      + '<div class="entry-card mini" onclick="startMode(\'open\')"><div class="ec-ico">⚡</div><h3>'+t('常规黑客松','Regular')+'</h3><span class="ec-go">'+t('启动 →','Start →')+'</span><div class="ec-sub">'+t('10 分钟 · 200 人以下','10 min · under 200')+'</div></div>'
+      + '<div class="entry-card mini" onclick="startMode(\'secret\')"><div class="ec-ico">🔒</div><h3>'+t('企业私密','Enterprise')+'</h3><span class="ec-go">'+t('启动 →','Start →')+'</span><div class="ec-sub">'+t('邀请制 · 私有代码','invite-only · private')+'</div></div>'
+      + '<div class="entry-card mini" onclick="startMode(\'mini\')"><div class="ec-ico">✨</div><h3>'+t('Mini 黑客松','Mini')+'</h3><span class="ec-go">'+t('启动 →','Start →')+'</span><div class="ec-sub">'+t('AI 驱动 · 一句想法成应用','AI · idea → app')+'</div></div>'
+      + '</div>'
+      // 现场:demo + 正在进行的黑客松 → 卡片列表,「进广场看全部」跳 /plaza
+      + '<div class="land-live"><div class="ll-head"><h2>🔥 '+t('正在进行的黑客松','Live hackathons')+'</h2>'
+      + '<a class="ll-all" onclick="go(\'/plaza\')">'+t('进广场看全部 →','Explore all →')+'</a></div>'
+      + '<div class="live-grid" id="liveGrid"><div class="muted" style="padding:14px">'+t('加载中…','Loading…')+'</div></div></div>'
+      // one-line trust bar (replaces the old three feature cards to keep the page within one screen)
+      + '<p class="muted" style="text-align:center;margin:20px auto 0;font-size:12.5px;max-width:760px;line-height:1.9">⚡ '+t('三步 10 分钟','3 steps · 10 min')+' &nbsp;·&nbsp; 🆓 '+t('首场免费','first event free')+' &nbsp;·&nbsp; 🌱 '+t('Mycelium 数字公共物品','a Mycelium digital public good')+'</p>'
+      + '</div>';
+    let list=[]; try{ const d=await api('/api/platform/explore'); list=(d&&d.hackathons)?d.hackathons:[]; }catch(e){}
+    const cards=[demoCard()].concat(list.slice(0,3)); // demo pinned first, then up to 3 running events
+    const grid=$('#liveGrid'); if(grid) grid.innerHTML=cards.map(liveCardHtml).join('');
+  }
+
+  // ---------------- plaza (广场): all public hackathons with intros ----------------
+  async function renderPlaza(){
+    app.innerHTML = '<div class="guide"><div class="guide-hero" style="padding:30px 0 8px"><h1>'+t('黑客松广场','Hackathon plaza')+'</h1>'
+      + '<p class="guide-sub">'+t('看看 Hack5 上正在发生的一切 —— 挑一个进去参加','Everything happening on Hack5 — pick one and join')+'</p></div>'
+      + '<div id="plazaBody"><div class="muted" style="padding:20px">'+t('加载中…','Loading…')+'</div></div>'
+      + '<div class="guide-cta"><h2>'+t('也想办一场?','Want to run one?')+'</h2><a href="https://hack5.net/start"><button>🚀 '+t('现在就发起 →','Start now →')+'</button></a></div></div>';
+    let list=[]; try{ const d=await api('/api/platform/explore'); list=(d&&d.hackathons)?d.hackathons:[]; }catch(e){}
+    const body=$('#plazaBody'); if(!body) return;
+    if(!list.length){ body.innerHTML='<div class="panel" style="text-align:center;padding:34px"><p class="muted" style="margin-bottom:14px">'+t('还没有公开的黑客松 —— 第一个就是你的。','No public hackathons yet — be the first.')+'</p><button onclick="go(\'/start\')">'+t('发起黑客松 →','Start one →')+'</button></div>'; return; }
+    const groups=[['live',t('🔴 正在进行','Live now')],['upcoming',t('🔵 即将开始','Upcoming')],['ended',t('⚪ 已结束','Past events')]];
+    body.innerHTML=groups.map(g=>{ const gs=list.filter(h=>h.phase===g[0]); if(!gs.length) return ''; return '<div class="plaza-sec">'+g[1]+' · '+gs.length+'</div><div class="plaza-grid">'+gs.map(plazaCardHtml).join('')+'</div>'; }).join('');
   }
 
   function renderTenantNotFound(){
