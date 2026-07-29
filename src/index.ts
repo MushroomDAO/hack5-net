@@ -5298,7 +5298,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderPricing(){
     const TOPUPS = [[10,500],[50,2500],[100,5000]]; // [USD, credits] — 1 积分 = $0.02
     app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('积分与价格','Credits & pricing')+'</h1>'
-      + '<p class="guide-sub">'+t('按积分举办黑客松 · 新用户注册即送 100 积分','Host hackathons with credits · new accounts get 100 free credits')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('更多赚积分方式 →','More ways to earn →')+'</a></p></div>'
+      + '<p class="guide-sub">'+t('按积分举办黑客松 · 前 100 名注册送 100 积分','Host hackathons with credits · first 100 sign-ups get 100 free credits')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('更多赚积分方式 →','More ways to earn →')+'</a></p></div>'
       + '<div class="price-grid">'
       // Regular
       + '<div class="price-card"><div class="pc-ico">⚡</div><h2>'+t('常规黑客松','Regular')+'</h2>'
@@ -5322,7 +5322,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="pc-price"><b>300 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
       + '<button class="pc-btn" data-plan="secret">'+t('去举办','Host one')+'</button></div>'
       + '</div>'
-      + '<p class="muted" style="text-align:center;margin-top:18px;font-size:13px">'+t('常规黑客松首场免费;之后与 mini/企业一样按积分扣。1 积分 = $0.02,注册即送 100 积分。','Your first regular hackathon is free; after that everything runs on credits. 1 credit = $0.02, and new accounts get 100 free.')+'</p>'
+      + '<p class="muted" style="text-align:center;margin-top:18px;font-size:13px">'+t('常规黑客松首场免费;之后与 mini/企业一样按积分扣。1 积分 = $0.02,前 100 名注册送 100 积分。','Your first regular hackathon is free; after that everything runs on credits. 1 credit = $0.02, and the first 100 sign-ups get 100 free.')+'</p>'
       // ---- top-up packages ($ → credits) ----
       + '<h2 style="text-align:center;margin:26px 0 2px;font-size:20px">'+t('充值包','Top up')+'</h2>'
       + '<p class="guide-sub" style="text-align:center;margin-bottom:14px">'+t('1 积分 = $0.02','1 credit = $0.02')+'</p>'
