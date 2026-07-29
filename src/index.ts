@@ -541,15 +541,17 @@ async function platformStats(env: Env): Promise<Response> {
 }
 
 // Public: list running/public hackathons for the landing "现场" strip and the /plaza page.
-// Secret-mode events are invite-only and are never listed here. Each row carries a phase
-// (live / upcoming / ended) computed from start_at/end_at, ordered live → upcoming → recent-ended.
+// Secret-mode events ARE listed now (so the plaza doesn't look empty when only private events
+// run), but as a locked card — only what's already public at the subdomain gate (name + mode +
+// phase) is exposed; the intro, banner, location and work count stay gated. Each row carries a
+// phase (live / upcoming / ended) computed from start_at/end_at, ordered live → upcoming → ended.
 async function platformExplore(env: Env): Promise<Response> {
   const now = unixNow();
   const rows = (await env.DB.prepare(
     `SELECT t.id, t.subdomain, t.name, t.mode, t.intro, t.banner, t.start_at, t.end_at, t.location, t.created_at,
             (SELECT COUNT(*) FROM submissions s WHERE s.tenant_id = t.id AND s.status = 'ready') AS works
        FROM tenants t
-      WHERE t.status = 'active' AND (t.mode IS NULL OR t.mode != 'secret') AND t.subdomain NOT IN ('www', 'api', 'demo')
+      WHERE t.status = 'active' AND t.subdomain NOT IN ('www', 'api', 'demo')
       ORDER BY t.created_at DESC
       LIMIT 60`,
   ).all<{ id: string; subdomain: string; name: string; mode: string | null; intro: string | null; banner: string | null; start_at: number | null; end_at: number | null; location: string | null; created_at: number; works: number }>()).results;
@@ -558,22 +560,32 @@ async function platformExplore(env: Env): Promise<Response> {
     if (end && now > end) return "ended";
     return "live"; // within window, or no dates set → treat as ongoing/open
   };
-  const items = rows.map((r) => ({
-    subdomain: r.subdomain,
-    name: r.name,
-    mode: r.mode === "mini" ? "mini" : "open",
-    intro: (r.intro || "").slice(0, 160),
-    hasBanner: r.banner === "1",
-    bannerUrl: r.banner === "1" ? `https://${r.subdomain}.hack5.net/banner/${r.subdomain}` : null,
-    location: r.location || "",
-    startAt: r.start_at,
-    endAt: r.end_at,
-    works: Number(r.works) || 0,
-    url: `https://${r.subdomain}.hack5.net`,
-    phase: phaseOf(r.start_at, r.end_at),
-  }));
+  // Sort on the RAW timestamps (before redaction) so ordering stays exact even for secret rows,
+  // then map to the public shape. The gate for an anonymous visitor discloses only {subdomain,
+  // name, mode} — so secret rows here must redact everything else, timestamps included.
   const rank = { live: 0, upcoming: 1, ended: 2 } as const;
-  items.sort((a, b) => rank[a.phase] - rank[b.phase] || (b.startAt ?? b.endAt ?? 0) - (a.startAt ?? a.endAt ?? 0));
+  const sorted = rows
+    .map((r) => ({ r, phase: phaseOf(r.start_at, r.end_at) }))
+    .sort((a, b) => rank[a.phase] - rank[b.phase] || (b.r.start_at ?? b.r.end_at ?? 0) - (a.r.start_at ?? a.r.end_at ?? 0));
+  const items = sorted.map(({ r, phase }) => {
+    // Secret events: reveal only what the subdomain gate already shows (name/mode/phase); keep the
+    // intro, banner, location, work count AND exact start/end timestamps private — all gated.
+    const secret = r.mode === "secret";
+    return {
+      subdomain: r.subdomain,
+      name: r.name,
+      mode: secret ? "secret" : r.mode === "mini" ? "mini" : "open",
+      intro: secret ? "" : (r.intro || "").slice(0, 160),
+      hasBanner: secret ? false : r.banner === "1",
+      bannerUrl: secret || r.banner !== "1" ? null : `https://${r.subdomain}.hack5.net/banner/${r.subdomain}`,
+      location: secret ? "" : r.location || "",
+      startAt: secret ? null : r.start_at,
+      endAt: secret ? null : r.end_at,
+      works: secret ? 0 : Number(r.works) || 0,
+      url: `https://${r.subdomain}.hack5.net`,
+      phase,
+    };
+  });
   return json({ hackathons: items, now });
 }
 
@@ -4626,6 +4638,10 @@ const APP_HTML = String.raw`<!doctype html>
     // === batch2: pricing / media / about / ops / settings / create / manage / photos / share / poster ===
     '购买 / 充值':'ซื้อ / เติมเงิน', '常规黑客松首场免费;Mini 与企业私密为付费产品。':'แฮกกาธอนทั่วไปงานแรกฟรี Mini และองค์กรส่วนตัวเป็นแบบเสียเงิน',
     'Mini 黑客松':'แฮกกาธอน Mini', '充值制 · 按用量':'แบบเติมเงิน · ตามการใช้งาน',
+    // hackathon type labels (chip / badge / plaza lock hint)
+    '常规':'ทั่วไป', '企业私密':'องค์กร (ส่วนตัว)', '需登录':'ต้องเข้าสู่ระบบ',
+    '⚡ 常规黑客松':'⚡ แฮกกาธอนทั่วไป', '✨ Mini 黑客松':'✨ มินิแฮกกาธอน', '🔒 企业私密黑客松':'🔒 แฮกกาธอนองค์กร (ส่วนตัว)',
+    '私密赛 · 详情需登录查看':'ส่วนตัว · เข้าสู่ระบบเพื่อดูรายละเอียด',
     '面向非开发者:AI 帮你把想法做成能跑的应用。每建一个应用都会消耗 AI token,所以按充值使用。':'สำหรับผู้ที่ไม่ใช่นักพัฒนา: AI ช่วยเปลี่ยนไอเดียเป็นแอปที่รันได้ ทุกครั้งที่สร้างแอปจะใช้ AI token จึงคิดตามการเติมเงิน',
     '每人首场免费':'ฟรีงานแรกต่อคน', '之后按 token 充值继续':'หลังจากนั้นเติม token เพื่อใช้ต่อ', '可由赞助商代付':'ผู้สนับสนุนจ่ายแทนได้',
     '充值包':'แพ็กเกจเติมเงิน', '充值':'เติมเงิน', '企业私密黑客松':'แฮกกาธอนองค์กรส่วนตัว', '直接购买 · 按场':'ซื้อโดยตรง · ต่องาน',
@@ -5362,16 +5378,21 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- platform landing (hack5.net apex) ----------------
   // Phase label for a hackathon card badge (live / upcoming / ended).
   function hackPhaseLabel(ph){ return ph==='live' ? t('进行中','Live') : ph==='upcoming' ? t('即将开始','Soon') : t('已结束','Ended'); }
+  // Hackathon type (mode) — three kinds. Chip = short label for cards; emoji = card art; badge = full label for the tenant homepage. All three are 中/英/泰 via t().
+  function hackTypeChip(m){ return m==='mini' ? 'Mini' : m==='secret' ? t('企业私密','Enterprise') : t('常规','Regular'); }
+  function hackTypeEmoji(m){ return m==='mini' ? '✨' : m==='secret' ? '🔒' : '⚡'; }
+  function hackTypeBadge(m){ return m==='mini' ? t('✨ Mini 黑客松','✨ Mini hackathon') : m==='secret' ? t('🔒 企业私密黑客松','🔒 Enterprise private hackathon') : t('⚡ 常规黑客松','⚡ Regular hackathon'); }
   // Small card for the landing "现场" strip. h is an explore item (or the pinned demo).
   function liveCardHtml(h){
     return '<a class="live-card" href="'+esc(h.url)+'"'+(h.isDemo?' target="_blank" rel="noopener"':'')+'>'
       + '<div class="lc-art'+(h.mode==='mini'?' mini':'')+'">'
       +   (h.bannerUrl?'<img src="'+esc(h.bannerUrl)+'" alt="" loading="lazy" onerror="this.remove()">':'')
-      +   '<span class="lc-emoji">'+(h.isDemo?'👀':(h.mode==='mini'?'✨':'⚡'))+'</span>'
+      +   '<span class="lc-emoji">'+(h.isDemo?'👀':hackTypeEmoji(h.mode))+'</span>'
       +   '<span class="lc-badge '+esc(h.phase)+'">'+(h.isDemo?'DEMO':hackPhaseLabel(h.phase))+'</span>'
       + '</div>'
       + '<div class="lc-body"><h3>'+esc(h.name)+'</h3>'
-      +   '<div class="lc-meta"><span class="lc-chip">'+(h.mode==='mini'?'Mini':t('常规','Regular'))+'</span>'
+      +   '<div class="lc-meta"><span class="lc-chip">'+hackTypeChip(h.mode)+'</span>'
+      +     (h.mode==='secret'?'<span>🔒 '+t('需登录','Log in')+'</span>':'')
       +     (h.works?'<span>'+h.works+' '+t('作品','works')+'</span>':'')+'</div>'
       + '</div></a>';
   }
@@ -5380,12 +5401,13 @@ const APP_HTML = String.raw`<!doctype html>
     return '<a class="plaza-card" href="'+esc(h.url)+'">'
       + '<div class="lc-art'+(h.mode==='mini'?' mini':'')+'">'
       +   (h.bannerUrl?'<img src="'+esc(h.bannerUrl)+'" alt="" loading="lazy" onerror="this.remove()">':'')
-      +   '<span class="lc-emoji">'+(h.mode==='mini'?'✨':'⚡')+'</span>'
+      +   '<span class="lc-emoji">'+hackTypeEmoji(h.mode)+'</span>'
       +   '<span class="lc-badge '+esc(h.phase)+'">'+hackPhaseLabel(h.phase)+'</span>'
       + '</div>'
       + '<div class="pc-body"><h3>'+esc(h.name)+'</h3>'
       +   (h.intro?'<p>'+esc(h.intro)+'</p>':'')
-      +   '<div class="lc-meta" style="margin-top:8px"><span class="lc-chip">'+(h.mode==='mini'?'Mini':t('常规','Regular'))+'</span>'
+      +   (h.mode==='secret'?'<p class="muted" style="font-size:12.5px">🔒 '+t('私密赛 · 详情需登录查看','Private · log in to view details')+'</p>':'')
+      +   '<div class="lc-meta" style="margin-top:8px"><span class="lc-chip">'+hackTypeChip(h.mode)+'</span>'
       +     (h.location?'<span>📍 '+esc(h.location)+'</span>':'')
       +     (h.works?'<span>'+h.works+' '+t('作品','works')+'</span>':'')+'</div>'
       + '</div></a>';
@@ -5659,6 +5681,8 @@ const APP_HTML = String.raw`<!doctype html>
       : '<div class="hero-banner hero-default"><span class="hd-badge">&#8249;5&#8250;</span><span class="hd-name">'+esc(tn.name||'Hackathon')+'</span><span class="hd-sub">'+esc((tn.subdomain||'')+'.hack5.net')+'</span></div>';
     return '<div class="panel tenant-hero">'
       + banner
+      // Disclose the hackathon type right under the banner so visitors know its nature (中/英/泰).
+      + '<div style="margin:12px 0 8px"><span style="display:inline-block;font-size:13px;font-weight:700;padding:5px 13px;border-radius:999px;background:rgba(91,75,230,.1);color:var(--brand)">'+hackTypeBadge(tn.mode)+'</span></div>'
       + (tn.intro?'<p style="font-size:16px;color:var(--ink2);white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
       + (bits.length?'<div class="hero-meta">'+bits.join('')+'</div>':'')
       + (tn.address?'<div class="muted" style="margin-top:6px">📮 '+esc(tn.address)+'</div>':'')
