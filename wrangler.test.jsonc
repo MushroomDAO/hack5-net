@@ -24,6 +24,10 @@
     "EVENT_NAME": "Hackathon",
     "ROOT_DOMAIN": "hack5.net",
     "AUTH_SECRET": "test-auth-secret",
+    // Fake key so the invite-send tests exercise the real reserve→send→rollback path (outbound
+    // fetch to Resend is stubbed) WITHOUT depending on the gitignored .dev.vars. Empty → the
+    // endpoint 503s before any send logic runs, which would make those tests pass for the wrong reason.
+    "RESEND_API_KEY": "re_test_dummy_key",
     // Set WORKBENCH_BASE_URL (and leave WORKBENCH_MOCK unset) so createWorkbench() returns the REAL
     // http client — the test then drives usage() through fetchMock to reproduce the prod /api/usage 404.
     "WORKBENCH_BASE_URL": "https://workbench.test",

@@ -263,6 +263,7 @@ export default {
       // ---- invite codes (admin, tenant-scoped) ----
       if (path === "/api/invites" && method === "GET") return listInvites(request, env, tid);
       if (path === "/api/invites" && method === "POST") return generateInvites(request, env, tid);
+      if (path === "/api/invites/send" && method === "POST") return sendInvites(request, env, tenant, tid);
 
       // ---- judge codes (admin, tenant-scoped) ----
       if (path === "/api/judges" && method === "GET") return listJudges(request, env, tid);
@@ -3898,16 +3899,120 @@ async function listInvites(request: Request, env: Env, tid: string | null): Prom
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const rows = await env.DB.prepare(
-    "SELECT code, used_by, created_at, used_at FROM invite_codes WHERE tenant_id = ? ORDER BY (used_by IS NOT NULL), created_at DESC LIMIT 1000",
+    "SELECT code, used_by, sent_to, sent_at, created_at, used_at FROM invite_codes WHERE tenant_id = ? ORDER BY (used_by IS NOT NULL), (sent_to IS NOT NULL), created_at DESC LIMIT 1000",
   )
     .bind(tid)
-    .all<{ code: string; used_by: string | null; created_at: number; used_at: number | null }>();
-  const codes = rows.results.map((r) => ({ code: r.code, used: r.used_by != null }));
+    .all<{ code: string; used_by: string | null; sent_to: string | null; sent_at: number | null; created_at: number; used_at: number | null }>();
+  const codes = rows.results.map((r) => ({ code: r.code, used: r.used_by != null, sentTo: r.sent_to ?? null, sentAt: r.sent_at ?? null }));
   return json({
     total: codes.length,
-    unused: codes.filter((c) => !c.used).length,
+    unused: codes.filter((c) => !c.used).length, // not yet redeemed (may already be emailed)
+    available: codes.filter((c) => !c.used && !c.sentTo).length, // free to email out
+    sent: codes.filter((c) => !c.used && c.sentTo).length, // emailed, awaiting redemption
+    redeemed: codes.filter((c) => c.used).length,
     codes,
   });
+}
+
+// Email a specific/next-available invite code to one or more recipients. Single-send may pin a
+// code (`code`); batch (`emails`) auto-assigns the oldest available code per recipient. A code is
+// reserved (used_by IS NULL AND sent_to IS NULL) BEFORE the email goes out and released again if
+// the send fails, so a code is never marked sent unless the email actually left — and once sent it
+// can't be re-emailed to anyone else.
+async function sendInvites(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon" }, 404);
+  if (!env.RESEND_API_KEY) return json({ error: "邮件服务未配置,无法发送 / Email service not configured" }, 503);
+  const body = await request.json<{ email?: string; code?: string; emails?: string[] }>().catch(() => null);
+  const pinnedCode = typeof body?.code === "string" ? body.code.trim() : "";
+  // Accept a single email, or a list; split each on comma/semicolon/whitespace, lowercase, dedupe.
+  const raw = Array.isArray(body?.emails) ? body!.emails! : body?.email ? [body.email] : [];
+  const emails = [...new Set(raw.flatMap((e) => String(e).split(/[\s,;]+/)).map((e) => e.trim().toLowerCase()).filter(Boolean))];
+  const valid = emails.filter((e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+  if (!valid.length) return json({ error: "请提供有效邮箱 / Provide a valid email" }, 400);
+  if (valid.length > 50) return json({ error: "一次最多发 50 个 / 50 recipients max per batch" }, 400);
+
+  const now = unixNow();
+  const results: { email: string; code: string | null; ok: boolean; error?: string }[] = [];
+  for (const email of valid) {
+    // Reserve a code first: the pinned one (single-send only), else the oldest still-available code.
+    let code: string | null = null;
+    if (pinnedCode && valid.length === 1) {
+      const upd = await env.DB.prepare("UPDATE invite_codes SET sent_to = ?, sent_at = ? WHERE code = ? AND tenant_id = ? AND used_by IS NULL AND sent_to IS NULL")
+        .bind(email, now, pinnedCode, tid).run();
+      if (upd.meta.changes !== 1) { results.push({ email, code: pinnedCode, ok: false, error: "该邀请码不可用(已使用或已发送) / code already used or sent" }); continue; }
+      code = pinnedCode;
+    } else {
+      const avail = await env.DB.prepare("SELECT code FROM invite_codes WHERE tenant_id = ? AND used_by IS NULL AND sent_to IS NULL ORDER BY created_at ASC LIMIT 1")
+        .bind(tid).first<{ code: string }>();
+      if (!avail) { results.push({ email, code: null, ok: false, error: "没有可用的邀请码,请先生成 / no available code — generate more" }); continue; }
+      const upd = await env.DB.prepare("UPDATE invite_codes SET sent_to = ?, sent_at = ? WHERE code = ? AND tenant_id = ? AND used_by IS NULL AND sent_to IS NULL")
+        .bind(email, now, avail.code, tid).run();
+      if (upd.meta.changes !== 1) { results.push({ email, code: avail.code, ok: false, error: "并发占用,请重试 / raced, retry" }); continue; }
+      code = avail.code;
+    }
+    // Send; on failure release the reservation so the admin can retry (only if not yet redeemed).
+    const ok = await sendInviteEmail(env, tenant, email, code).catch(() => false);
+    if (!ok) {
+      await env.DB.prepare("UPDATE invite_codes SET sent_to = NULL, sent_at = NULL WHERE code = ? AND tenant_id = ? AND used_by IS NULL")
+        .bind(code, tid).run().catch(() => {});
+      results.push({ email, code, ok: false, error: "邮件发送失败 / send failed" });
+    } else {
+      results.push({ email, code, ok: true });
+    }
+  }
+  return json({ ok: true, sent: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length, results });
+}
+
+// The invite email itself — mode-aware: a secret event's code is the site ACCESS code (typed on the
+// gate), an open/regular event's code is the SUBMISSION code (typed when submitting a project).
+async function sendInviteEmail(env: Env, tenant: Tenant, email: string, code: string): Promise<boolean> {
+  if (!env.RESEND_API_KEY) return false;
+  const root = env.ROOT_DOMAIN || "hack5.net";
+  const url = `https://${tenant.subdomain}.${root}`;
+  const name = tenant.name;
+  const secret = tenant.mode === "secret";
+  const codeLabelZh = secret ? "访问码" : "邀请码";
+  const codeLabelEn = secret ? "Access code" : "Invite code";
+  const howZh = secret
+    ? `这是一场受邀的私密黑客松。打开活动站点,在首页输入下面的访问码即可进入。`
+    : `打开活动站点,提交你的作品时填写下面的邀请码即可参赛。`;
+  const howEn = secret
+    ? `A private, invite-only hackathon — open the site and enter the access code below on the homepage to get in.`
+    : `Open the site and enter the invite code below when you submit your project.`;
+  const text =
+    `你被邀请参加黑客松「${name}」!\n\n${howZh}\n\n${codeLabelZh}:${code}\n站点:${url}\n\n` +
+    `You're invited to the "${name}" hackathon.\n${howEn}\n${codeLabelEn}: ${code}\nSite: ${url}\n\n— hack5.net`;
+  const html =
+    `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
+    `<table role="presentation" width="460" cellpadding="0" cellspacing="0" style="max-width:460px;width:100%">` +
+    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></td></tr>` +
+    `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
+    `<h1 style="font-size:20px;margin:0 0 6px;color:#14161c">🎉 ${escapeHtml(name)}</h1>` +
+    `<p style="color:#5f6675;font-size:15px;margin:0 0 16px">${escapeHtml(secret ? "你被邀请参加这场私密黑客松 · You're invited to this private hackathon" : "你被邀请参加这场黑客松 · You're invited to this hackathon")}</p>` +
+    `<p style="margin:0 0 6px;color:#5f6675;font-size:14px">${escapeHtml(codeLabelZh)} · ${escapeHtml(codeLabelEn)}</p>` +
+    `<div style="font-size:22px;font-weight:800;letter-spacing:2px;color:#14161c;background:#f2f0fe;border-radius:8px;padding:12px 14px;font-family:ui-monospace,Menlo,monospace">${escapeHtml(code)}</div>` +
+    `<p style="margin:16px 0 6px;color:#5f6675;font-size:14px">站点 · Site</p>` +
+    `<p style="margin:0 0 4px"><a href="${url}" style="font-size:16px;font-weight:700;color:#5b4be6">${url}</a></p>` +
+    `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:14px 0 0">${escapeHtml(howZh)}<br>${escapeHtml(howEn)}</p>` +
+    `</td></tr>` +
+    `<tr><td align="center" style="padding:18px 0 8px"><a href="${url}" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:9px">🚀 ${escapeHtml(secret ? "进入活动 →" : "去参加 →")}</a></td></tr>` +
+    `<tr><td align="center" style="color:#9aa1ac;font-size:12px;line-height:1.7;padding-top:14px">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks</td></tr>` +
+    `</table></td></tr></table></div>`;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: env.MAIL_FROM || "Hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 邀请你参加「${name}」黑客松`, text, html }),
+    });
+    if (!res.ok) { console.log("invite-email send failed", res.status, (await res.text().catch(() => "")).slice(0, 200)); return false; }
+    return true;
+  } catch (err) {
+    console.log("invite-email fetch error", String(err));
+    return false;
+  }
 }
 
 async function createJudges(request: Request, env: Env, tid: string | null): Promise<Response> {
@@ -4642,6 +4747,17 @@ const APP_HTML = String.raw`<!doctype html>
     '常规':'ทั่วไป', '企业私密':'องค์กร (ส่วนตัว)', '需登录':'ต้องเข้าสู่ระบบ',
     '⚡ 常规黑客松':'⚡ แฮกกาธอนทั่วไป', '✨ Mini 黑客松':'✨ มินิแฮกกาธอน', '🔒 企业私密黑客松':'🔒 แฮกกาธอนองค์กร (ส่วนตัว)',
     '私密赛 · 详情需登录查看':'ส่วนตัว · เข้าสู่ระบบเพื่อดูรายละเอียด',
+    // email-invite panel
+    '邮件邀请':'เชิญทางอีเมล', '单个发送':'ส่งทีละคน', '发送':'ส่ง', '批量发送':'ส่งเป็นชุด',
+    '批量发送(自动分配)':'ส่งเป็นชุด (จัดรหัสอัตโนมัติ)', '复制全部未发送':'คัดลอกที่ยังไม่ส่งทั้งหมด',
+    '把访问码直接发到受邀人邮箱。':'ส่งรหัสเข้าถึงไปยังอีเมลผู้รับเชิญโดยตรง',
+    '把邀请码直接发到受邀人邮箱。':'ส่งรหัสเชิญไปยังอีเมลผู้รับเชิญโดยตรง',
+    '每个码只能发一次,发出后不能再发给别人。':'แต่ละรหัสส่งได้ครั้งเดียว ส่งแล้วส่งให้คนอื่นอีกไม่ได้',
+    '(逗号或换行分隔,最多 50 个;自动分配可用码)':'(คั่นด้วยจุลภาคหรือขึ้นบรรทัดใหม่ สูงสุด 50 · จัดรหัสอัตโนมัติ)',
+    '可用 ':'ว่าง ', '已发 ':'ส่งแล้ว ', '已用 ':'ใช้แล้ว', '已使用':'ใช้แล้ว', '已发送给 ':'ส่งให้ ',
+    '没有可用的邀请码,请先生成':'ไม่มีรหัสว่าง กรุณาสร้างก่อน', '没有未发送的邀请码':'ไม่มีรหัสที่ยังไม่ส่ง',
+    '请填写邮箱':'กรุณากรอกอีเมล', '请填写至少一个邮箱':'กรุณากรอกอีเมลอย่างน้อยหนึ่ง', '无可用码':'ไม่มีรหัสว่าง',
+    '已发送 ':'ส่งแล้ว ', '失败 ':'ล้มเหลว ', '失败':'ล้มเหลว',
     '面向非开发者:AI 帮你把想法做成能跑的应用。每建一个应用都会消耗 AI token,所以按充值使用。':'สำหรับผู้ที่ไม่ใช่นักพัฒนา: AI ช่วยเปลี่ยนไอเดียเป็นแอปที่รันได้ ทุกครั้งที่สร้างแอปจะใช้ AI token จึงคิดตามการเติมเงิน',
     '每人首场免费':'ฟรีงานแรกต่อคน', '之后按 token 充值继续':'หลังจากนั้นเติม token เพื่อใช้ต่อ', '可由赞助商代付':'ผู้สนับสนุนจ่ายแทนได้',
     '充值包':'แพ็กเกจเติมเงิน', '充值':'เติมเงิน', '企业私密黑客松':'แฮกกาธอนองค์กรส่วนตัว', '直接购买 · 按场':'ซื้อโดยตรง · ต่องาน',
@@ -7050,6 +7166,7 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- invite codes (admin) ----------------
   async function renderInvites(){
     if(ME.role !== 'admin'){ go('/judge'); return; }
+    const secret = CONFIG.tenant && CONFIG.tenant.mode==='secret';
     app.innerHTML = '<h1>'+t('邀请码','Invite codes')+'</h1><p>'+t('每队一个,单次有效。生成后发给各队,选手提交时填。','One per team, single-use. Generate, hand out, teams enter it when submitting.')+'</p>'
       + '<div class="panel" style="max-width:640px">'
       + '<div class="row"><div style="flex:1"><label>'+t('生成数量','Count')+'</label><input id="invCount" type="number" min="1" max="500" value="100"></div>'
@@ -7057,8 +7174,22 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div style="align-self:flex-end"><button id="genBtn">'+t('生成','Generate')+'</button></div></div>'
       + '<div id="genOut"></div>'
       + '</div>'
+      // ---- email invites: send a code straight to an invitee's inbox (single + batch) ----
+      + '<div class="panel" style="max-width:640px;margin-top:16px">'
+      + '<div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">✉️ '+t('邮件邀请','Email invites')+'</h2>'
+      + '<span class="muted" style="font-size:12px">'+t('可用 ','Available ')+'<b id="sendAvail">–</b></span></div>'
+      + '<p class="muted" style="font-size:12.5px;margin:6px 0 12px">'+(secret?t('把访问码直接发到受邀人邮箱。','Email the access code straight to the invitee.'):t('把邀请码直接发到受邀人邮箱。','Email the invite code straight to the invitee.'))+' '+t('每个码只能发一次,发出后不能再发给别人。','Each code sends once — never re-sent to anyone else.')+'</p>'
+      + '<label>'+t('单个发送','Single')+'</label>'
+      + '<div class="row"><input id="sendEmail" type="email" placeholder="someone@example.com" style="flex:2">'
+      + '<select id="sendCode" style="flex:1"></select>'
+      + '<button id="sendOne" style="align-self:stretch">'+t('发送','Send')+'</button></div>'
+      + '<label style="margin-top:12px">'+t('批量发送','Batch')+' <span class="muted">'+t('(逗号或换行分隔,最多 50 个;自动分配可用码)','(comma or newline, up to 50; auto-assigns codes)')+'</span></label>'
+      + '<textarea id="sendEmails" rows="4" placeholder="a@example.com, b@example.com&#10;c@example.com"></textarea>'
+      + '<div class="row" style="margin-top:6px"><button id="sendBatch" class="ghost">'+t('批量发送(自动分配)','Batch send (auto-assign)')+'</button></div>'
+      + '<div id="sendOut" style="margin-top:10px"></div>'
+      + '</div>'
       + '<div class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">'+t('已有邀请码','Existing codes')+'</h2>'
-      + '<button class="ghost" id="copyUnused">'+t('复制全部未使用','Copy all unused')+'</button></div>'
+      + '<button class="ghost" id="copyUnused">'+t('复制全部未发送','Copy all unsent')+'</button></div>'
       + '<div id="invList" style="margin-top:12px"><p class="muted">'+t('加载中…','Loading…')+'</p></div></div>';
 
     $('#genBtn').addEventListener('click', async ()=>{
@@ -7072,22 +7203,73 @@ const APP_HTML = String.raw`<!doctype html>
       } catch(e){ $('#genOut').innerHTML = '<div class="notice err">'+esc(e.message)+'</div>'; }
       finally { $('#genBtn').disabled = false; }
     });
+    // Single send — a specific picked code to one email.
+    $('#sendOne').addEventListener('click', async ()=>{
+      const email = $('#sendEmail').value.trim(), code = $('#sendCode').value;
+      if(!email){ setMsg('sendOut', t('请填写邮箱','Enter an email'), true); return; }
+      if(!code){ setMsg('sendOut', t('没有可用的邀请码,请先生成','No available code — generate first'), true); return; }
+      $('#sendOne').disabled=true;
+      try {
+        const r = await api('/api/invites/send',{method:'POST',body:{email,code}});
+        renderSendResult(r);
+        if(r.sent) $('#sendEmail').value='';
+        loadInviteList();
+      } catch(e){ setMsg('sendOut', e.message, true); }
+      finally { $('#sendOne').disabled=false; }
+    });
+    // Batch send — many emails, server auto-assigns one available code each.
+    $('#sendBatch').addEventListener('click', async ()=>{
+      const emails = $('#sendEmails').value.split(/[\s,;]+/).map(s=>s.trim()).filter(Boolean);
+      if(!emails.length){ setMsg('sendOut', t('请填写至少一个邮箱','Enter at least one email'), true); return; }
+      $('#sendBatch').disabled=true;
+      try {
+        const r = await api('/api/invites/send',{method:'POST',body:{emails}});
+        renderSendResult(r);
+        if(r.sent) $('#sendEmails').value='';
+        loadInviteList();
+      } catch(e){ setMsg('sendOut', e.message, true); }
+      finally { $('#sendBatch').disabled=false; }
+    });
     $('#copyUnused').addEventListener('click', async ()=>{
-      const unused = (window.__invites||[]).filter(c=>!c.used).map(c=>c.code);
-      if(!unused.length){ alert(t('没有未使用的邀请码','No unused codes')); return; }
-      try { await navigator.clipboard.writeText(unused.join('\n')); $('#copyUnused').textContent=t('已复制 ','Copied ')+unused.length+t(' 个 ✓',' ✓'); }
-      catch { alert(unused.join('\n')); }
+      const unsent = (window.__invites||[]).filter(c=>!c.used && !c.sentTo).map(c=>c.code);
+      if(!unsent.length){ alert(t('没有未发送的邀请码','No unsent codes')); return; }
+      try { await navigator.clipboard.writeText(unsent.join('\n')); $('#copyUnused').textContent=t('已复制 ','Copied ')+unsent.length+t(' 个 ✓',' ✓'); }
+      catch { alert(unsent.join('\n')); }
     });
     loadInviteList();
+  }
+
+  // Render a /api/invites/send response: per-recipient success (code) or failure (reason).
+  function renderSendResult(r){
+    const rows = (r.results||[]).map(function(x){
+      return x.ok
+        ? '<div class="notice ok" style="margin:4px 0">✅ '+esc(x.email)+' → <code>'+esc(x.code||'')+'</code></div>'
+        : '<div class="notice err" style="margin:4px 0">⚠️ '+esc(x.email)+' — '+esc(x.error||t('失败','failed'))+'</div>';
+    }).join('');
+    $('#sendOut').innerHTML = '<div class="muted" style="font-size:12px;margin-bottom:4px">'+t('已发送 ','Sent ')+'<b>'+(r.sent||0)+'</b>'+(r.failed?(' · '+t('失败 ','failed ')+r.failed):'')+'</div>'+rows;
   }
 
   async function loadInviteList(){
     try {
       const r = await api('/api/invites');
       window.__invites = r.codes;
-      $('#invList').innerHTML = '<div class="muted" style="margin-bottom:8px">'+t('共 ','Total ')+r.total+t(' 个,未使用 ',', unused ')+'<b>'+r.unused+'</b></div>'
-        + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px">'
-        + r.codes.map(c=>'<code style="padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:'+(c.used?'#f3f4f6;color:#9aa1ac;text-decoration:line-through':'#fff')+'">'+esc(c.code)+'</code>').join('')
+      // Populate the single-send picker with only still-available (unsent, unredeemed) codes.
+      const avail = r.codes.filter(c=>!c.used && !c.sentTo);
+      const sel = $('#sendCode');
+      if(sel) sel.innerHTML = avail.length ? avail.map(c=>'<option value="'+esc(c.code)+'">'+esc(c.code)+'</option>').join('') : '<option value="">'+t('无可用码','none')+'</option>';
+      const availEl=$('#sendAvail'); if(availEl) availEl.textContent = String(r.available!=null?r.available:avail.length);
+      // Status chip per code: redeemed (used) → strikethrough; emailed (sentTo) → amber + recipient; free → white.
+      const chip=function(c){
+        if(c.used) return '<code title="'+t('已使用','redeemed')+'" style="padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:#f3f4f6;color:#9aa1ac;text-decoration:line-through">'+esc(c.code)+'</code>';
+        if(c.sentTo) return '<code title="'+t('已发送给 ','sent to ')+esc(c.sentTo)+'" style="padding:5px 8px;border-radius:6px;border:1px solid #f0c674;background:#fff8e6;color:#8a6d1f">✉️ '+esc(c.code)+'</code>';
+        return '<code style="padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:#fff">'+esc(c.code)+'</code>';
+      };
+      $('#invList').innerHTML = '<div class="muted" style="margin-bottom:8px">'+t('共 ','Total ')+r.total
+          +' · '+t('可用 ','available ')+'<b>'+(r.available!=null?r.available:avail.length)+'</b>'
+          +' · ✉️ '+t('已发 ','sent ')+(r.sent!=null?r.sent:0)
+          +' · '+t('已用 ','redeemed ')+(r.redeemed!=null?r.redeemed:r.codes.filter(c=>c.used).length)+'</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px">'
+        + r.codes.map(chip).join('')
         + '</div>';
     } catch(e){ $('#invList').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
   }
