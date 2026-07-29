@@ -6953,7 +6953,7 @@ const APP_HTML = String.raw`<!doctype html>
 
   // ---------------- judge login ----------------
   function renderJudge(){
-    if(ME.role){ go('/leaderboard'); return; }
+    if(ME.role){ go(ME.role==='admin'?'/manage':'/leaderboard'); return; }
     app.innerHTML = '<h1>'+t('评审入口','Judge login')+'</h1><div class="panel" style="max-width:440px">'
       + '<p>'+t('评委:输入主办方发给你的<b>专属登录码</b>(姓名由码决定)。管理员:输入管理口令。','Judges: enter your <b>personal login code</b> from the organizer (your name comes from the code). Admin: enter the admin passcode.')+'</p>'
       + '<label>'+t('登录码 / 口令','Login code / passcode')+' *</label><input id="jCode" placeholder="'+t('评委登录码,或管理口令','judge code, or admin passcode')+'">'
@@ -6963,7 +6963,11 @@ const APP_HTML = String.raw`<!doctype html>
     $('#jLogin').addEventListener('click', async ()=>{
       try {
         ME = await api('/api/auth/login',{method:'POST',body:{code:$('#jCode').value.trim(), name:$('#jName').value.trim()}});
-        renderNav(); go('/');
+        // An admin/judge session unlocks a secret tenant server-side (hasSecretAccess), but the
+        // client's gated flag was snapshotted pre-login — clear it so the router stops bouncing to
+        // the access gate. Land admins on the management page, judges on the leaderboard.
+        if(CONFIG.tenant) CONFIG.tenant.gated = false;
+        renderNav(); go(ME.role==='admin'?'/manage':'/');
       } catch(e){ setMsg('jMsg', e.message, true); }
     });
   }
