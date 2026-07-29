@@ -1303,7 +1303,7 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
 
 async function sendHackathonReadyEmail(env: Env, email: string, name: string, url: string, adminPass: string): Promise<void> {
   if (!env.RESEND_API_KEY) return;
-  const text = `你的黑客松「${name}」已就绪!\n站点:${url}\n管理员密码:${adminPass}(请妥善保存)\n\n用管理员密码在站点登录即可管理:生成邀请码/评委码、编辑首页、上传照片、评审打分。\n\nYour hackathon "${name}" is live: ${url}\nAdmin password: ${adminPass}\n\n— hack5.net`;
+  const text = `你的黑客松「${name}」已就绪!\n站点:${url}\n管理员登录入口:${url}/judge\n管理员密码:${adminPass}(请妥善保存)\n\n从「管理员登录入口」用管理员密码登录即可管理:生成邀请码/评委码、编辑首页、上传照片、评审打分。\n(私密赛提示:站点首页的「访问码」框是给参赛选手的,请勿把管理员密码填进去。)\n\nYour hackathon "${name}" is live: ${url}\nAdmin login: ${url}/judge\nAdmin password: ${adminPass}\n\n— hack5.net`;
   const html =
     `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
@@ -1314,11 +1314,13 @@ async function sendHackathonReadyEmail(env: Env, email: string, name: string, ur
     `<p style="color:#5f6675;font-size:15px;margin:0 0 16px">你的黑客松已就绪 · Your hackathon is live</p>` +
     `<p style="margin:0 0 6px;color:#5f6675;font-size:14px">站点 · Site</p>` +
     `<p style="margin:0 0 16px"><a href="${url}" style="font-size:16px;font-weight:700;color:#5b4be6">${url}</a></p>` +
+    `<p style="margin:0 0 6px;color:#5f6675;font-size:14px">管理员登录入口 · Admin login</p>` +
+    `<p style="margin:0 0 16px"><a href="${url}/judge" style="font-size:16px;font-weight:700;color:#5b4be6">${url}/judge</a></p>` +
     `<p style="margin:0 0 6px;color:#5f6675;font-size:14px">管理员密码 · Admin password</p>` +
     `<div style="font-size:20px;font-weight:800;letter-spacing:1px;color:#14161c;background:#f2f0fe;border-radius:8px;padding:12px 14px;font-family:ui-monospace,Menlo,monospace">${escapeHtml(adminPass)}</div>` +
-    `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:14px 0 0">用这个密码登录站点即可管理:生成邀请码/评委码、编辑首页、上传照片、评审。请妥善保存。<br>Log in with this password to manage your event. Keep it safe.</p>` +
+    `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:14px 0 0">从上面的「管理员登录入口」用这个密码登录即可管理:生成邀请码/评委码、编辑首页、上传照片、评审。<br>私密赛提示:首页的「访问码」框是给参赛选手的,请勿把管理员密码填进去。<br>Log in at the admin link above with this password. On private events, the homepage "access code" box is for participants — don't enter the admin password there.</p>` +
     `</td></tr>` +
-    `<tr><td align="center" style="padding:18px 0 8px"><a href="${url}" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:9px">🚀 进入你的黑客松 →</a></td></tr>` +
+    `<tr><td align="center" style="padding:18px 0 8px"><a href="${url}/judge" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:9px">🚀 用管理员密码登录管理 →</a></td></tr>` +
     `<tr><td align="center" style="color:#9aa1ac;font-size:12px;line-height:1.7;padding-top:14px">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks</td></tr>` +
     `</table></td></tr></table></div>`;
   // Best-effort: the admin password is also shown on-screen, so a mail failure must not break
@@ -4520,7 +4522,7 @@ const APP_HTML = String.raw`<!doctype html>
     '邀请码':'รหัสเชิญ', '评委':'กรรมการ', '用量':'การใช้งาน', '退出':'ออกจากระบบ',
     '加载中…':'กำลังโหลด…', '查看':'ดู', '提交':'ส่ง', '发送':'ส่ง', '更多':'เพิ่มเติม',
     '分享':'แชร์', '关于':'เกี่ยวกับ', '照片墙':'อัลบั้มภาพ', '作品':'ผลงาน',
-    '我是评委,去登录 →':'ฉันเป็นกรรมการ →', '导出 CSV':'ส่งออก CSV', '已报名':'ลงทะเบียนแล้ว',
+    '我是评委 / 主办方,去登录 →':'ฉันเป็นกรรมการ / ผู้จัด →', '主办方用管理员密码从这里登录,不要填在上面的访问码框。':'ผู้จัดเข้าสู่ระบบที่นี่ด้วยรหัสผู้ดูแล ไม่ใช่ช่องรหัสเข้าถึงด้านบน', '导出 CSV':'ส่งออก CSV', '已报名':'ลงทะเบียนแล้ว',
     // register
     '报名参加':'ลงทะเบียนเข้าร่วม', '报名':'ลงทะเบียน', '姓名':'ชื่อ', '邮箱':'อีเมล',
     '用户名将自动取自邮箱':'ชื่อที่แสดงจะดึงจากอีเมลของคุณ',
@@ -4906,7 +4908,8 @@ const APP_HTML = String.raw`<!doctype html>
       + '<input id="gCode" placeholder="'+t('访问码','Access code')+'" style="text-align:center;margin-top:10px">'
       + '<div class="row" style="margin-top:12px;justify-content:center"><button id="gBtn">'+t('进入','Enter')+'</button></div>'
       + '<div id="gMsg" class="muted" style="margin-top:8px"></div>'
-      + '<div class="muted" style="margin-top:12px;font-size:12px"><a href="/judge" onclick="go(\'/judge\');return false">'+t('我是评委,去登录 →','I am a judge →')+'</a></div>'
+      + '<div class="muted" style="margin-top:12px;font-size:12px"><a href="/judge" onclick="go(\'/judge\');return false">'+t('我是评委 / 主办方,去登录 →','I am a judge / organizer →')+'</a></div>'
+      + '<div class="muted" style="margin-top:4px;font-size:12px">'+t('主办方用管理员密码从这里登录,不要填在上面的访问码框。','Organizers log in there with the admin password — not in the access-code box above.')+'</div>'
       + '</div></div>';
     $('#gBtn').addEventListener('click', async ()=>{
       const code = $('#gCode').value.trim();
@@ -5617,7 +5620,7 @@ const APP_HTML = String.raw`<!doctype html>
           const cp = document.getElementById('pwCopy');
           cp.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(window.__hpw); cp.textContent='✓ '+t('已复制','Copied'); }catch{ prompt(t('复制这个密码','Copy this password'), window.__hpw); } });
           ME_USER = await api('/api/platform/me'); renderNav();
-          let n=5; const go=document.getElementById('pwGo');
+          let n=30; const go=document.getElementById('pwGo');
           const timer=setInterval(()=>{ n--; if(n<=0){ clearInterval(timer); location.href=r.url; } else if(go){ go.textContent=n+t(' 秒后自动进入你的黑客松站点…',' s — taking you to your hackathon site…'); } },1000);
         } catch(e){ if(e.data && e.data.upgrade){ setMsg('hMsg', e.message+' →', true); setTimeout(()=>go('/pricing'), 900); return; } setMsg('hMsg', e.message, true); $('#hCreate').disabled=false; }
       });
