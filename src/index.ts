@@ -2826,6 +2826,42 @@ async function sendBuildQueuedEmail(
   }).catch(() => {});
 }
 
+// Submission confirmation → the participant's inbox. The EDIT TOKEN is otherwise shown once on the
+// success screen and lost on refresh; emailing it (plus a one-click edit link that pre-loads the
+// token) means the participant can always come back and revise. Best-effort (never throws).
+async function sendSubmissionConfirmEmail(
+  env: Env,
+  tenant: Tenant,
+  email: string,
+  info: { projectName: string; id: string; editToken: string },
+): Promise<void> {
+  if (!env.RESEND_API_KEY || !email) return;
+  const base = `https://${tenant.subdomain}.${env.ROOT_DOMAIN || "hack5.net"}`;
+  const viewUrl = `${base}/p/${info.id}`;
+  const editUrl = `${base}/submit?edit=${encodeURIComponent(info.editToken)}`;
+  const name = tenant.name;
+  const proj = info.projectName;
+  const text =
+    `你的作品「${proj}」已提交成功 ✅(${name})\n\n` +
+    `作品详情:${viewUrl}\n\n` +
+    `想修改作品信息?打开下面的编辑链接(已带编辑令牌),改完重新提交即可覆盖:\n编辑链接:${editUrl}\n编辑令牌(请妥善保存):${info.editToken}\n\n` +
+    `Your project "${proj}" was submitted ✅ (${name}).\nDetails: ${viewUrl}\nTo edit later, open ${editUrl} (it carries your edit token) and resubmit.\nEdit token: ${info.editToken}\n\n— Hack5`;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;color:#14161c">` +
+    `<div style="text-align:center;padding:8px 0 16px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></div>` +
+    `<p style="font-size:16px">🎉 你的作品 <b>${escapeHtml(proj)}</b> 已提交成功!<br><span style="color:#5f6675;font-size:14px">Your project was submitted successfully · ${escapeHtml(name)}</span></p>` +
+    `<p style="font-size:14px;color:#3c4250">作品详情 · Details:<br><a href="${viewUrl}" style="color:#5b4be6;font-weight:700">${viewUrl}</a></p>` +
+    `<p style="font-size:14px;color:#3c4250">想改稿?用这个编辑令牌 · To edit later, use this token:<br><code style="font-size:15px;background:#f6f7fb;border:1px solid #e2e6ee;border-radius:6px;padding:4px 8px;display:inline-block;margin-top:4px">${escapeHtml(info.editToken)}</code></p>` +
+    `<p style="text-align:center;padding:8px 0 4px"><a href="${editUrl}" style="display:inline-block;background:#5b4be6;color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:9px">✏️ 编辑我的作品 · Edit my entry →</a></p>` +
+    `<p style="font-size:12px;color:#9aa1ac;text-align:center">编辑链接已带上你的令牌,改完重新提交即可覆盖。请保存本邮件。<br>The edit link carries your token — change the fields and resubmit to overwrite.</p>` +
+    `</div>`;
+  await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: env.MAIL_FROM || "Hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 提交成功 · ${proj}`, text, html }),
+  }).catch(() => {});
+}
+
 // Once the spec is loop_ready: create the participant's public repo (B2), push the spec, and
 // enqueue the coding loop. Records/refreshes the participant's submission (email-hash identity)
 // with the WorkBench link + build_state='queued' so it appears on the wall with a build badge.
@@ -3371,7 +3407,7 @@ async function usageSelftest(env: Env): Promise<Response> {
 
 // Mini-mode submission: no code required. Any work link (no-code app / site / doc / video) + a
 // one-line description + optional screenshots. Open (no invite code); one per email (edit via token).
-async function createMiniSubmission(request: Request, env: Env, tid: string): Promise<Response> {
+async function createMiniSubmission(request: Request, env: Env, tenant: Tenant | null, tid: string): Promise<Response> {
   const body = await request
     .json<{ projectName?: string; linkUrl?: string; description?: string; email?: string; teamName?: string; shots?: string[]; editToken?: string }>()
     .catch(() => null);
@@ -3434,6 +3470,7 @@ async function createMiniSubmission(request: Request, env: Env, tid: string): Pr
   )
     .bind(id, tid, projectName, teamName, email, owner, repo, description, decoded.length, shotsMeta, shareToken, editToken, linkUrl, now, now)
     .run();
+  if (tenant) await sendSubmissionConfirmEmail(env, tenant, email, { projectName, id, editToken }).catch(() => {});
   return json({ ok: true, id, editToken, viewUrl: `/p/${id}` });
 }
 
@@ -3487,13 +3524,14 @@ async function createSecretSubmission(request: Request, env: Env, tenant: Tenant
   )
     .bind(id, tid, projectName, teamName, email, repo.owner, repo.repo, repoUrl(repo), videoUrl, shareToken, editToken, demoUrl, demoUser, demoPass, readmeMd, now, now)
     .run();
+  await sendSubmissionConfirmEmail(env, tenant, email, { projectName, id, editToken }).catch(() => {});
   return json({ ok: true, id, editToken, viewUrl: `/p/${id}` });
 }
 
 async function createSubmission(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tid) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
   if (tenant?.mode === "secret") return createSecretSubmission(request, env, tenant, tid);
-  if (tenant?.mode === "mini") return createMiniSubmission(request, env, tid);
+  if (tenant?.mode === "mini") return createMiniSubmission(request, env, tenant, tid);
   const body = await request
     .json<{
       passcode?: string;
@@ -3615,6 +3653,8 @@ async function createSubmission(request: Request, env: Env, tenant: Tenant | nul
     await clearShots(env, id, decoded.length).catch(() => {});
     throw error;
   }
+  // Confirm to the participant + preserve their edit token by email (best-effort).
+  if (tenant) await sendSubmissionConfirmEmail(env, tenant, email, { projectName, id, editToken }).catch(() => {});
   return json({ ok: true, id, editToken, viewUrl: `/p/${id}` });
 }
 
@@ -4859,6 +4899,8 @@ const APP_HTML = String.raw`<!doctype html>
     '张,自动裁切为 16:9,单张≤':'รูป ครอปอัตโนมัติเป็น 16:9 ต่อรูป≤', '主办方发给你队的专属码':'รหัสเฉพาะที่ผู้จัดส่งให้ทีมคุณ', '每队一个,如 HV-xxxxxx':'ทีมละหนึ่งรหัส เช่น HV-xxxxxx',
     ' 张':' รูป', '图片处理失败:':'ประมวลผลรูปไม่สำเร็จ:', '请选择图片':'กรุณาเลือกรูป', '图片太大,换一张更简单的':'รูปใหญ่เกินไป เปลี่ยนเป็นรูปที่เรียบง่ายกว่า',
     '请填齐产品名、仓库、视频链接':'กรุณากรอกชื่อผลิตภัณฑ์ ที่เก็บโค้ด และลิงก์วิดีโอให้ครบ', '请填写有效邮箱':'กรุณากรอกอีเมลที่ถูกต้อง', '请填写邀请码':'กรุณากรอกรหัสเชิญ',
+    '编辑模式:修改下面的信息后重新提交,将覆盖你之前的作品。':'โหมดแก้ไข: แก้ข้อมูลด้านล่างแล้วส่งใหม่ จะเขียนทับผลงานเดิมของคุณ',
+    ' 提交确认与编辑令牌已发到你的邮箱 📩':' ส่งการยืนยันและโทเคนแก้ไขไปที่อีเมลของคุณแล้ว 📩',
     '请至少上传 ':'กรุณาอัปโหลดอย่างน้อย ', ' 张截图':' ภาพหน้าจอ', '查看作品':'ดูผลงาน',
     '评委:输入主办方发给你的<b>专属登录码</b>(姓名由码决定)。管理员:输入管理口令。':'กรรมการ: กรอก<b>รหัสเข้าเฉพาะ</b>ที่ผู้จัดส่งให้ (ชื่อกำหนดโดยรหัส) ผู้ดูแล: กรอกรหัสผู้ดูแล',
     '登录码 / 口令':'รหัสเข้า / รหัสผู้ดูแล', '评委登录码,或管理口令':'รหัสเข้ากรรมการ หรือรหัสผู้ดูแล', '仅管理员可填':'เฉพาะผู้ดูแลกรอกได้', '管理员姓名(可选)':'ชื่อผู้ดูแล (ไม่บังคับ)',
@@ -4894,6 +4936,10 @@ const APP_HTML = String.raw`<!doctype html>
   function themeBtn(){ return '<button class="ghost" onclick="toggleTheme()" title="'+t('深色 / 浅色','Dark / Light')+'">'+(document.documentElement.dataset.theme==='dark'?'☀️':'🌙')+'</button>'; }
 
   function go(path){ history.pushState(null, '', path); route(); }
+  // Edit token from the emailed edit link (/submit?edit=<token>) — resubmitting the same repo with it
+  // updates the entry instead of 409ing. '' when not editing.
+  function currentEditToken(){ try{ return new URLSearchParams(location.search).get('edit')||''; }catch(e){ return ''; } }
+  function editBanner(){ return currentEditToken() ? '<div class="notice">✏️ '+t('编辑模式:修改下面的信息后重新提交,将覆盖你之前的作品。','Edit mode: change the fields below and resubmit to overwrite your entry.')+'</div>' : ''; }
   // ---- event date/time helpers (create + /manage) ----
   function eventDatesError(startMs, endMs){
     if(!startMs || !endMs) return t('请选择起止时间','Pick a start & end time');
@@ -6609,6 +6655,7 @@ const APP_HTML = String.raw`<!doctype html>
         + '</tbody></table><p class="muted" style="font-size:12px;margin:8px 2px 0">'+t('在你的仓库 Settings → Collaborators 逐个添加上面账号,评审期保持,结束后可移除。','Add each handle in your repo Settings → Collaborators; keep during judging, remove after.')+'</p></div>'
       : '<div class="panel" style="max-width:720px;margin-bottom:16px"><span class="muted">'+t('评委名单尚未公布,可先提交,稍后回来加协作者。','Judge roster not published yet — you can submit and add collaborators later.')+'</span></div>';
     app.innerHTML = '<h1>'+t('提交作品(私密赛)','Submit (private track)')+'</h1>'
+      + editBanner()
       + '<div class="notice">'+t('私密赛不公开源码:提供在线 Demo + 账号密码给评委体验;代码放 GitHub 私有仓库,把评委加为协作者。','Private track — no public source: give judges an online demo + credentials; keep code in a private repo and add the judges as collaborators.')+'</div>'
       + rosterHtml
       + '<div class="panel" style="max-width:720px">'
@@ -6626,11 +6673,11 @@ const APP_HTML = String.raw`<!doctype html>
     $('#sBtn').addEventListener('click', doSecretSubmit);
   }
   async function doSecretSubmit(){
-    const body = { projectName:$('#sProj').value.trim(), demoUrl:$('#sDemo').value.trim(), demoUser:$('#sUser').value.trim(), demoPass:$('#sPass').value.trim(), readmeMd:$('#sReadme').value.trim(), repoUrl:$('#sRepo').value.trim(), videoUrl:$('#sVideo').value.trim(), email:$('#sEmail').value.trim(), teamName:$('#sTeam').value.trim() };
+    const body = { projectName:$('#sProj').value.trim(), demoUrl:$('#sDemo').value.trim(), demoUser:$('#sUser').value.trim(), demoPass:$('#sPass').value.trim(), readmeMd:$('#sReadme').value.trim(), repoUrl:$('#sRepo').value.trim(), videoUrl:$('#sVideo').value.trim(), email:$('#sEmail').value.trim(), teamName:$('#sTeam').value.trim(), editToken:currentEditToken() };
     if(!body.projectName||!body.demoUrl||!body.demoUser||!body.demoPass||!body.readmeMd||!body.repoUrl||!body.email){ setMsg('sMsg', t('请填齐带 * 的必填项','Fill in all required (*) fields'), true); return; }
     $('#sBtn').disabled=true; setMsg('sMsg', t('提交中…','Submitting…'));
     try{ const r=await api('/api/submissions',{method:'POST',body});
-      setMsg('sMsg', t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看','View')+'</a ><br>'+t('编辑令牌(改稿用,请保存):','Edit token (save it to edit later): ')+'<code>'+esc(r.editToken)+'</code>', false, true);
+      setMsg('sMsg', t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看','View')+'</a ><br>'+t('编辑令牌(改稿用,请保存):','Edit token (save it to edit later): ')+'<code>'+esc(r.editToken)+'</code><br><span class="muted" style="font-size:12px">'+t(' 提交确认与编辑令牌已发到你的邮箱 📩',' A confirmation + edit token was emailed to you 📩')+'</span>', false, true);
     }catch(e){ setMsg('sMsg', e.message, true); }
     finally{ $('#sBtn').disabled=false; }
   }
@@ -6921,6 +6968,7 @@ const APP_HTML = String.raw`<!doctype html>
   async function renderMiniSubmit(){
     if(!CONFIG.tenant){ go('/'); return; }
     app.innerHTML = '<h1>'+t('提交作品','Submit')+'</h1>'
+      + editBanner()
       + '<div class="notice">'+t('Mini 赛:不用写代码,交一个作品链接就行 —— no-code 应用 / 网站 / 文档 / 视频都可以。','Mini track: no coding — just submit a work link (no-code app / site / doc / video).')+'</div>'
       + '<div class="guide-banner" onclick="go(\'/make\')" style="cursor:pointer"><span>✨ '+t('还没做出来?让 AI 把你的想法直接做成应用','No app yet? Let AI turn your idea into one')+'</span><b>→</b></div>'
       + '<div class="panel" style="max-width:640px">'
@@ -6960,11 +7008,11 @@ const APP_HTML = String.raw`<!doctype html>
       $('#mAI').disabled=false;
     });
     $('#mBtn').addEventListener('click', async ()=>{
-      const body={ projectName:$('#mProj').value.trim(), linkUrl:$('#mLink').value.trim(), description:$('#mDesc').value.trim(), email:$('#mEmail').value.trim(), teamName:$('#mTeam').value.trim(), shots:SHOTS };
+      const body={ projectName:$('#mProj').value.trim(), linkUrl:$('#mLink').value.trim(), description:$('#mDesc').value.trim(), email:$('#mEmail').value.trim(), teamName:$('#mTeam').value.trim(), shots:SHOTS, editToken:currentEditToken() };
       if(!body.projectName||!body.linkUrl||!body.email){ setMsg('mMsg', t('请填齐作品名、链接、邮箱','Fill in name, link and email'), true); return; }
       $('#mBtn').disabled=true; setMsg('mMsg', t('提交中…','Submitting…'));
       try{ const r=await api('/api/submissions',{method:'POST',body});
-        setMsg('mMsg', t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看','View')+'</a ><br>'+t('编辑令牌(改稿用):','Edit token: ')+'<code>'+esc(r.editToken)+'</code>', false, true);
+        setMsg('mMsg', t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看','View')+'</a ><br>'+t('编辑令牌(改稿用):','Edit token: ')+'<code>'+esc(r.editToken)+'</code><br><span class="muted" style="font-size:12px">'+t(' 提交确认与编辑令牌已发到你的邮箱 📩',' A confirmation + edit token was emailed to you 📩')+'</span>', false, true);
         SHOTS=[];
       }catch(e){ setMsg('mMsg', e.message, true); }
       finally{ $('#mBtn').disabled=false; }
@@ -6979,6 +7027,7 @@ const APP_HTML = String.raw`<!doctype html>
     const mb = Math.round(CONFIG.maxShotBytes/1048576*10)/10;
     app.innerHTML =
       '<h1>'+t('提交作品','Submit a project')+'</h1>'
+      + editBanner()
       + '<div class="panel" style="max-width:720px">'
       + '<div class="notice">'+t('规则:① 视频请传到 <b>B站/YouTube</b>,这里贴链接(别塞进 Git);② 仓库必须 <b>Public</b>,否则评委看不到;③ PPT 放仓库 <code>/docs</code> 里的 <b>PDF</b>(GitHub 可在线预览);④ 截止后建议打 Release tag 锁版本。','Rules: ① host the video on <b>Bilibili/YouTube</b> and paste the link (keep it out of Git); ② the repo must be <b>Public</b>; ③ put the slides as a <b>PDF</b> under <code>/docs</code> (GitHub previews it); ④ tag a Release after the deadline to lock the version.')+'</div>'
       + '<label>'+t('产品名称','Product name')+' * <span class="muted">('+t('作品的主标题','the main title')+')</span></label><input id="projectName" maxlength="80" placeholder="'+t('你的产品 / 作品名','Your product name')+'">'
@@ -7076,6 +7125,7 @@ const APP_HTML = String.raw`<!doctype html>
       description: $('#description').value.trim(),
       videoUrl: $('#videoUrl').value.trim(),
       shots: SHOTS,
+      editToken: currentEditToken(),
     };
     if(!body.projectName || !body.repoUrl || !body.videoUrl){ setMsg('submitMsg',t('请填齐产品名、仓库、视频链接','Fill in product name, repo and video link'),true); return; }
     if(!body.email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)){ setMsg('submitMsg',t('请填写有效邮箱','Enter a valid email'),true); return; }
@@ -7084,7 +7134,7 @@ const APP_HTML = String.raw`<!doctype html>
     $('#submitBtn').disabled = true; setMsg('submitMsg',t('提交中…','Submitting…'));
     try {
       const r = await api('/api/submissions',{method:'POST',body});
-      setMsg('submitMsg',t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看作品','View project')+'</a ><br>'+t('编辑令牌(改稿用,请保存):','Edit token (save it to edit later): ')+'<code>'+esc(r.editToken)+'</code>', false, true);
+      setMsg('submitMsg',t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看作品','View project')+'</a ><br>'+t('编辑令牌(改稿用,请保存):','Edit token (save it to edit later): ')+'<code>'+esc(r.editToken)+'</code><br><span class="muted" style="font-size:12px">'+t(' 提交确认与编辑令牌已发到你的邮箱 📩',' A confirmation + edit token was emailed to you 📩')+'</span>', false, true);
       SHOTS = []; renderThumbs();
       ['#projectName','#repoUrl','#videoUrl','#description','#teamName','#email','#contact','#passcode'].forEach(id=>{ const el = $(id); if(el) el.value = ''; });
     } catch(e){ setMsg('submitMsg', e.message, true); }
