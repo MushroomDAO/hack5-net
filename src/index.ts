@@ -560,9 +560,16 @@ async function platformExplore(env: Env): Promise<Response> {
     if (end && now > end) return "ended";
     return "live"; // within window, or no dates set → treat as ongoing/open
   };
-  const items = rows.map((r) => {
+  // Sort on the RAW timestamps (before redaction) so ordering stays exact even for secret rows,
+  // then map to the public shape. The gate for an anonymous visitor discloses only {subdomain,
+  // name, mode} — so secret rows here must redact everything else, timestamps included.
+  const rank = { live: 0, upcoming: 1, ended: 2 } as const;
+  const sorted = rows
+    .map((r) => ({ r, phase: phaseOf(r.start_at, r.end_at) }))
+    .sort((a, b) => rank[a.phase] - rank[b.phase] || (b.r.start_at ?? b.r.end_at ?? 0) - (a.r.start_at ?? a.r.end_at ?? 0));
+  const items = sorted.map(({ r, phase }) => {
     // Secret events: reveal only what the subdomain gate already shows (name/mode/phase); keep the
-    // intro, banner, location and work count private — those are gated behind an access session.
+    // intro, banner, location, work count AND exact start/end timestamps private — all gated.
     const secret = r.mode === "secret";
     return {
       subdomain: r.subdomain,
@@ -572,15 +579,13 @@ async function platformExplore(env: Env): Promise<Response> {
       hasBanner: secret ? false : r.banner === "1",
       bannerUrl: secret || r.banner !== "1" ? null : `https://${r.subdomain}.hack5.net/banner/${r.subdomain}`,
       location: secret ? "" : r.location || "",
-      startAt: r.start_at,
-      endAt: r.end_at,
+      startAt: secret ? null : r.start_at,
+      endAt: secret ? null : r.end_at,
       works: secret ? 0 : Number(r.works) || 0,
       url: `https://${r.subdomain}.hack5.net`,
-      phase: phaseOf(r.start_at, r.end_at),
+      phase,
     };
   });
-  const rank = { live: 0, upcoming: 1, ended: 2 } as const;
-  items.sort((a, b) => rank[a.phase] - rank[b.phase] || (b.startAt ?? b.endAt ?? 0) - (a.startAt ?? a.endAt ?? 0));
   return json({ hackathons: items, now });
 }
 
