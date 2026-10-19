@@ -140,7 +140,8 @@ export default {
       // block every data API and content-asset route. Allow only config, auth (judge/admin login),
       // the access-code redemption, and the SPA shell so the gate page can render.
       if (tenant && tenant.mode === "secret" && !(await hasSecretAccess(request, env, tenant))) {
-        const allowedApi = path === "/api/config" || path === "/api/tenant/access" || path.startsWith("/api/auth/");
+        // /api/platform/me is the visitor's own account, not this event's content.
+        const allowedApi = path === "/api/config" || path === "/api/platform/me" || path === "/api/tenant/access" || path.startsWith("/api/auth/");
         const blockedAsset =
           path.startsWith("/photo/") || path.startsWith("/banner/") || path.startsWith("/qr/") || path.startsWith("/shot/") || path.startsWith("/media/");
         if ((path.startsWith("/api/") && !allowedApi) || blockedAsset) {
@@ -4786,8 +4787,8 @@ const APP_HTML = String.raw`<!doctype html>
     button:disabled{opacity:.5;cursor:not-allowed}
     .ghost{background:var(--ghost-bg);color:var(--ink);border:1px solid var(--line)}
     .ghost:hover{background:var(--ghost-hover)}
-    header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
-    .brand{display:flex;align-items:center;gap:10px;font-weight:800;cursor:pointer}
+    header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:14px clamp(16px,4vw,48px);background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:10px;margin-right:auto;font-weight:800;cursor:pointer}
     #brandName{color:#14532d}
     :root[data-theme="dark"] #brandName{color:#5fd39a}
     .langseg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;vertical-align:middle}
@@ -4796,8 +4797,24 @@ const APP_HTML = String.raw`<!doctype html>
     .langseg button.on{background:#14532d;color:#fff}
     :root[data-theme="dark"] .langseg button.on{background:#25ff86;color:#0a0e0a}
     .mark{width:30px;height:30px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
-    nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;min-width:0}
+    @media(max-width:720px){header{flex-wrap:wrap;row-gap:10px}header > nav{flex:1 0 100%;order:3}}
     nav .who{color:var(--muted);font-size:13px;margin-right:4px}
+    #navAvatarSlot{flex:0 0 auto}
+    button.nav-avatar{width:36px;height:36px;padding:0;border-radius:50%;border:1px solid var(--line);background:var(--ghost-bg);display:grid;place-items:center;overflow:hidden;flex:0 0 auto}
+    button.nav-avatar:hover{border-color:var(--brand);background:var(--ghost-bg)}
+    button.nav-avatar svg{display:block;width:36px;height:36px}
+    .acct-wrap{width:min(640px,100%);margin:0 auto}
+    .acct-panel{padding:28px 28px 22px}
+    .acct-hero{display:flex;justify-content:center;margin-bottom:8px}
+    .acct-hero svg{width:96px;height:96px;border-radius:50%;display:block}
+    .acct-panel > h1,.acct-email{text-align:center}
+    .acct-email{margin:0 0 16px}
+    .acct-bal{display:flex;align-items:baseline;justify-content:center;gap:12px;margin:0 0 8px;padding:16px;border-radius:12px;background:var(--info-bg);color:var(--info-ink)}
+    .acct-bal b{font-size:32px;line-height:1}
+    .acct-actions{justify-content:center;margin-top:16px}
+    .acct-login{text-align:left;max-width:420px;margin:8px auto 0}
+    .acct-org{margin-top:28px}
     main{width:min(1200px,100%);margin:0 auto;padding:24px clamp(14px,4vw,32px) 72px}
     h1{font-size:clamp(24px,4vw,36px);margin:0 0 8px}
     h2{font-size:20px;margin:0 0 12px}
@@ -5022,6 +5039,7 @@ const APP_HTML = String.raw`<!doctype html>
       </svg>
       <span id="brandName">Hack5</span></div>
     <nav id="nav"></nav>
+    <div id="navAvatarSlot"></div>
   </header>
   <main id="app"></main>
   <footer class="site-footer"><div id="sponsorBar"></div><div id="orgFooter"></div><nav id="siteLinks" class="foot-links"></nav>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.<span id="appVer"></span></footer>
@@ -5032,7 +5050,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.6.29'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.30'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -5100,7 +5118,9 @@ const APP_HTML = String.raw`<!doctype html>
     // === batch1: nav / guide / platform / home ===
     '中':'จีน', '深色 / 浅色':'มืด / สว่าง', '赞助商':'ผู้สนับสนุน', '主办方':'ผู้จัดงาน',
     '指南':'คู่มือ', '价格':'ราคา', '媒体':'สื่อ', '我组织的黑客松':'แฮกกาธอนที่ฉันจัด',
-    '我的设置':'การตั้งค่าของฉัน', '运营':'ผู้ดูแลระบบ', '发起黑客松':'เริ่มจัดแฮกกาธอน',
+    '我的设置':'การตั้งค่าของฉัน', '我的账户':'บัญชีของฉัน', '组织资料':'ข้อมูลองค์กร', '运营':'ผู้ดูแลระบบ', '发起黑客松':'เริ่มจัดแฮกกาธอน',
+    '名字':'ชื่อ', '套餐':'แพ็กเกจ', '付费':'แบบเสียเงิน', '未绑定':'ยังไม่เชื่อม',
+    '登录后可以在这里看到你的名字、邮箱和积分，并管理组织资料。':'เข้าสู่ระบบเพื่อดูชื่อ อีเมล เครดิต และจัดการข้อมูลองค์กร',
     '排行榜':'อันดับคะแนน', '评审入口':'เข้าสู่การตัดสิน', '页面不存在。':'ไม่พบหน้านี้',
     '这是一场受邀的私密黑客松,请输入主办方发给你的访问码。':'นี่คือแฮกกาธอนส่วนตัวแบบเชิญ กรุณากรอกรหัสเข้าถึงที่ผู้จัดส่งให้คุณ',
     '访问码':'รหัสเข้าถึง', '进入':'เข้าสู่', '请输入访问码':'กรุณากรอกรหัสเข้าถึง', '验证中…':'กำลังตรวจสอบ…',
@@ -5394,8 +5414,10 @@ const APP_HTML = String.raw`<!doctype html>
     document.getElementById('brandName').textContent = brand;
     document.title = CONFIG.tenant ? (brand + ' · ‹5› Hack5') : '‹5› Hack5: Launch Your Hackathon!';
     document.documentElement.lang = LANG_HTMLLANG[LANG] || 'en';
-    if(CONFIG.platform) ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
-    else ME = await api('/api/auth/me').catch(()=>({role:null}));
+    // The account avatar is on every page. The platform cookie is readable here too,
+    // including on an event host (Domain=.hack5.net).
+    ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
+    if(!CONFIG.platform) ME = await api('/api/auth/me').catch(()=>({role:null}));
     renderOrgFooter();
     renderSponsorFooter();
     const av = document.getElementById('appVer');
@@ -5420,21 +5442,84 @@ const APP_HTML = String.raw`<!doctype html>
     el.innerHTML = '<div class="org-foot">'+logo+'<span>'+t('主办方','Organized by')+': '+name+'</span></div>';
   }
 
+  // Stable per person. Logged-in accounts hash the email; a visitor gets one random
+  // seed kept in this browser until they sign in.
+  function hashSeed(seed){
+    let h = 2166136261;
+    const s = String(seed);
+    for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function guestSeed(){
+    let id = lsGet('hv_guest');
+    if(!id || !/^[a-f0-9]{16}$/.test(id)){
+      const bytes = new Uint8Array(8);
+      id = '';
+      crypto.getRandomValues(bytes);
+      for(let i=0;i<bytes.length;i++) id += bytes[i].toString(16).padStart(2,'0');
+      lsSet('hv_guest', id);
+    }
+    return id;
+  }
+  function accountSeed(){
+    if(ME_USER && ME_USER.email) return String(ME_USER.email).toLowerCase();
+    return 'guest:'+guestSeed();
+  }
+  function accountName(email){
+    const local = String(email||'').split('@')[0] || '';
+    return local.replace(/[._-]+/g,' ').replace(/\s+/g,' ').trim() || local;
+  }
+  function avatarSvg(seed, size){
+    let h = hashSeed(seed);
+    function next(){
+      h ^= h >>> 15; h = Math.imul(h, 2246822507) >>> 0;
+      h ^= h >>> 13; h = Math.imul(h, 3266489909) >>> 0;
+      h ^= h >>> 16;
+      return h >>> 0;
+    }
+    const hue = next() % 360;
+    const bg = 'hsl('+hue+',58%,42%)';
+    const fg = 'hsl('+((hue+32)%360)+',78%,93%)';
+    let cells = '';
+    for(let y=0;y<5;y++){
+      for(let x=0;x<3;x++){
+        if((next() & 1) === 0) continue;
+        cells += '<rect x="'+x+'" y="'+y+'" width="1" height="1"/>';
+        if(x !== 2) cells += '<rect x="'+(4-x)+'" y="'+y+'" width="1" height="1"/>';
+      }
+    }
+    if(!cells) cells = '<rect x="2" y="2" width="1" height="1"/>';
+    const n = size || 36;
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="'+n+'" height="'+n+'" viewBox="0 0 5 5" shape-rendering="crispEdges" aria-hidden="true"><rect width="5" height="5" fill="'+bg+'"/><g fill="'+fg+'">'+cells+'</g></svg>';
+  }
+  function openAccount(){
+    if(CONFIG && CONFIG.platform){ go('/account'); return; }
+    const host = location.hostname;
+    if(host==='localhost'||host==='127.0.0.1'){ location.href = '/account'; return; }
+    location.href = 'https://hack5.net/account';
+  }
+  function renderAvatarSlot(){
+    const slot = document.getElementById('navAvatarSlot');
+    if(!slot) return;
+    const label = (ME_USER && ME_USER.email) ? accountName(ME_USER.email) : t('我的账户','My account');
+    slot.innerHTML = '<button type="button" class="nav-avatar" id="navAvatar" title="'+esc(label)+'" aria-label="'+esc(t('我的账户','My account'))+'">'+avatarSvg(accountSeed(), 36)+'</button>';
+    const btn = document.getElementById('navAvatar');
+    if(btn) btn.addEventListener('click', openAccount);
+  }
   function renderNav(){
     const n = document.getElementById('nav');
     if(CONFIG.platform){
       let hp = '<button class="ghost" onclick="go(\'/rewards\')">'+t('🎁 赚积分','🎁 Rewards')+'</button>';
       if(ME_USER.email){
         hp += '<button onclick="go(\'/dashboard\')">'+t('我组织的黑客松','Hackathons I organize')+'</button>'
-            + '<button class="ghost" onclick="go(\'/settings\')">'+t('我的设置','Settings')+'</button>'
             + (ME_USER.isOperator?'<button class="ghost" onclick="go(\'/operator\')">'+t('运营','Operator')+'</button>':'')
-            + '<span class="who" title="'+esc(ME_USER.email)+'">'+esc(maskEmail(ME_USER.email))+'</span>'
             + '<button class="ghost" onclick="userLogout()">'+t('退出','Logout')+'</button>';
       } else {
         hp += '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>';
       }
       hp += themeBtn() + ''+langPicker()+'';
       n.innerHTML = hp;
+      renderAvatarSlot();
       renderSiteFooter();
       return;
     }
@@ -5454,6 +5539,7 @@ const APP_HTML = String.raw`<!doctype html>
     n.innerHTML = h;
     const navOther = document.getElementById('navOther');
     if(navOther) navOther.addEventListener('click', function(){ location.href = organizerListHref(); });
+    renderAvatarSlot();
     renderSiteFooter();
   }
   // Guide, pricing, about, and media sit in the footer of every page. Pricing and media
@@ -5493,9 +5579,15 @@ const APP_HTML = String.raw`<!doctype html>
       if(p === '/pricing') return renderPricing();
       if(p === '/rewards') return renderRewards();
       if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
-      if(p === '/settings') return ME_USER.email ? renderSettings() : renderPlatformLogin();
+      if(p === '/account' || p === '/settings') return renderAccount();
       if(p === '/operator') return ME_USER.isOperator ? renderOperator() : (ME_USER.email ? renderDashboard() : renderPlatformLogin());
       return renderPlatformLanding();
+    }
+    // Personal account lives on the platform host. An event URL leaves for it.
+    if(p === '/account' || p === '/settings'){
+      const host = location.hostname;
+      location.replace((host==='localhost'||host==='127.0.0.1') ? '/account' : 'https://hack5.net/account');
+      return;
     }
     // Secret tenant, not yet unlocked: show the access gate for everything except judge login.
     if(CONFIG.tenant && CONFIG.tenant.gated && p !== '/judge') return renderGate();
@@ -6127,21 +6219,87 @@ const APP_HTML = String.raw`<!doctype html>
       img.src=url;
     });
   }
-  async function renderSettings(){
-    app.innerHTML='<h1>'+t('我的设置 · 组织资料','Settings · Organization')+'</h1>'
-      +'<p class="muted">'+t('你的主办方身份,会显示在你创建的每个黑客松页面底部(主办方:…),跨所有活动复用。','Your host identity — shown in the footer of every hackathon you create, reused across all your events.')+'</p>'
-      +'<div class="panel" style="max-width:560px"><div id="orgForm" class="muted">'+t('加载中…','Loading…')+'</div></div>';
+  async function renderAccount(){
+    const fresh = await api('/api/platform/me').catch(function(){ return null; });
+    if(fresh) ME_USER = fresh;
+    renderNav();
+    if(!ME_USER || !ME_USER.email){
+      app.innerHTML = '<div class="acct-wrap"><div class="panel acct-panel">'
+        + '<div class="acct-hero">'+avatarSvg(accountSeed(), 96)+'</div>'
+        + '<h1>'+t('我的账户','My account')+'</h1>'
+        + '<p class="acct-email">'+t('登录后可以在这里看到你的名字、邮箱和积分，并管理组织资料。','Sign in to see your name, email, and credits, and to manage your organization.')+'</p>'
+        + '<div class="acct-login">'
+        + '<label>'+t('邮箱','Email')+'</label><input id="acctEmail" type="email" autocomplete="email" placeholder="you@example.com">'
+        + '<div id="acctCodeArea" class="hidden"><label>'+t('验证码','Code')+'</label><input id="acctCode" inputmode="numeric" maxlength="6" placeholder="'+t('6 位验证码','6-digit code')+'"></div>'
+        + (CONFIG.turnstileSiteKey ? '<div id="acctTs" style="margin-top:12px"></div>' : '')
+        + '<div class="row" style="margin-top:14px"><button id="acctSend">'+t('发送验证码','Send code')+'</button><button id="acctVerify" class="hidden">'+t('登录','Log in')+'</button></div>'
+        + '<div id="acctMsg"></div></div></div></div>';
+      let tsId = null;
+      if(CONFIG.turnstileSiteKey) ensureTurnstile().then(function(){ try{ tsId = window.turnstile.render('#acctTs', {sitekey: CONFIG.turnstileSiteKey}); }catch(e){} });
+      $('#acctSend').addEventListener('click', async function(){
+        const email = $('#acctEmail').value.trim();
+        let turnstileToken;
+        if(CONFIG.turnstileSiteKey){
+          turnstileToken = (window.turnstile && tsId!=null) ? window.turnstile.getResponse(tsId) : '';
+          if(!turnstileToken){ setMsg('acctMsg', t('请先完成人机验证','Please complete the check'), true); return; }
+        }
+        setMsg('acctMsg', t('发送中…','Sending…'));
+        try {
+          const r = await api('/api/platform/login/request',{method:'POST',body:{email:email, turnstileToken:turnstileToken}});
+          $('#acctCodeArea').classList.remove('hidden'); $('#acctVerify').classList.remove('hidden');
+          setMsg('acctMsg', t('验证码已发送,请查收邮箱。','Code sent — check your email.')+(r.debugCode?(' [dev: '+r.debugCode+']'):''));
+        } catch(e){ setMsg('acctMsg', e.message, true); if(window.turnstile && tsId!=null) try{ window.turnstile.reset(tsId); }catch(_){} }
+      });
+      $('#acctVerify').addEventListener('click', async function(){
+        try {
+          await api('/api/platform/login/verify',{method:'POST',body:{email:$('#acctEmail').value.trim(), code:$('#acctCode').value.trim()}});
+          ME_USER = await api('/api/platform/me');
+          renderAccount();
+        } catch(e){ setMsg('acctMsg', e.message, true); }
+      });
+      return;
+    }
+    const name = accountName(ME_USER.email);
+    const credits = ME_USER.credits || 0;
+    const plan = ME_USER.plan === 'paid' ? t('付费','Paid') : t('免费','Free');
+    const gh = ME_USER.githubLogin ? esc(ME_USER.githubLogin) : t('未绑定','Not linked');
+    const nEvents = (ME_USER.hackathons || []).length;
+    app.innerHTML = '<div class="acct-wrap"><div class="panel acct-panel">'
+      + '<div class="acct-hero">'+avatarSvg(accountSeed(), 96)+'</div>'
+      + '<h1>'+esc(name)+'</h1>'
+      + '<p class="acct-email">'+esc(ME_USER.email)+'</p>'
+      + '<div class="acct-bal"><span>'+t('积分余额','Credit balance')+'</span><b>'+credits+'</b></div>'
+      + '<div class="kv"><span>'+t('名字','Name')+'</span><b>'+esc(name)+'</b></div>'
+      + '<div class="kv"><span>'+t('邮箱','Email')+'</span><b>'+esc(ME_USER.email)+'</b></div>'
+      + '<div class="kv"><span>'+t('套餐','Plan')+'</span><b>'+plan+'</b></div>'
+      + '<div class="kv"><span>GitHub</span><b>'+gh+'</b></div>'
+      + '<div class="kv"><span>'+t('我组织的黑客松','Hackathons I organize')+'</span><b>'+nEvents+'</b></div>'
+      + '<div class="row acct-actions">'
+      + '<button type="button" id="acctDash">'+t('我组织的黑客松','Hackathons I organize')+'</button>'
+      + '<button type="button" class="ghost" id="acctRewards">'+t('赚积分','Rewards')+'</button>'
+      + '<button type="button" class="ghost" id="acctOut">'+t('退出','Logout')+'</button>'
+      + '</div></div>'
+      + '<div class="acct-org"><h2>'+t('组织资料','Organization')+'</h2>'
+      + '<p class="muted">'+t('你的主办方身份,会显示在你创建的每个黑客松页面底部(主办方:…),跨所有活动复用。','Your host identity — shown in the footer of every hackathon you create, reused across all your events.')+'</p>'
+      + '<div class="panel"><div id="orgForm" class="muted">'+t('加载中…','Loading…')+'</div></div></div></div>';
+    $('#acctDash').addEventListener('click', function(){ go('/dashboard'); });
+    $('#acctRewards').addEventListener('click', function(){ go('/rewards'); });
+    $('#acctOut').addEventListener('click', function(){ userLogout(); });
+    mountOrgForm();
+  }
+  async function mountOrgForm(){
     let cur; try{ cur=await api('/api/platform/org'); }catch(e){ cur={}; }
+    const box = $('#orgForm'); if(!box) return;
     window.__orgLogo = cur.orgLogo || '';
-    $('#orgForm').innerHTML=
+    box.innerHTML=
        '<label>'+t('组织名称','Organization name')+'</label><input id="orgName" maxlength="80" value="'+esc(cur.orgName||'')+'">'
       +'<label>'+t('组织简介','About')+'</label><textarea id="orgIntro" maxlength="500">'+esc(cur.orgIntro||'')+'</textarea>'
       +'<label>'+t('组织网址','Website')+'</label><input id="orgUrl" maxlength="200" placeholder="https://" value="'+esc(cur.orgUrl||'')+'">'
       +'<label>'+t('对外联系方式','Contact')+'</label><input id="orgContact" maxlength="120" placeholder="'+t('邮箱 / 微信 / Telegram','email / WeChat / Telegram')+'" value="'+esc(cur.orgContact||'')+'">'
       +'<label>Logo <span class="muted">('+t('PNG 透明,自动裁为 180×180','transparent PNG, resized to 180×180')+')</span></label>'
-      +'<div class="row" style="align-items:center;gap:12px"><div id="orgLogoPrev" class="orglogo-prev"></div><input id="orgLogoFile" type="file" accept="image/*"><button class="ghost" id="orgLogoClear">'+t('移除','Remove')+'</button></div>'
-      +'<div class="row" style="margin-top:16px"><button id="orgSave">'+t('保存','Save')+'</button></div><div id="orgMsg"></div>';
-    function drawLogo(){ $('#orgLogoPrev').innerHTML = window.__orgLogo ? '<img src="'+window.__orgLogo+'" alt="logo">' : '<span class="muted" style="font-size:12px">'+t('无','none')+'</span>'; }
+      +'<div class="row" style="align-items:center;gap:12px"><div id="orgLogoPrev" class="orglogo-prev"></div><input id="orgLogoFile" type="file" accept="image/*"><button type="button" class="ghost" id="orgLogoClear">'+t('移除','Remove')+'</button></div>'
+      +'<div class="row" style="margin-top:16px"><button type="button" id="orgSave">'+t('保存','Save')+'</button></div><div id="orgMsg"></div>';
+    function drawLogo(){ const prev=$('#orgLogoPrev'); if(prev) prev.innerHTML = window.__orgLogo ? '<img src="'+window.__orgLogo+'" alt="logo">' : '<span class="muted" style="font-size:12px">'+t('无','none')+'</span>'; }
     drawLogo();
     $('#orgLogoFile').addEventListener('change', async function(ev){
       const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
