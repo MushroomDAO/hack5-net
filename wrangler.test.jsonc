@@ -32,6 +32,7 @@
     // http client — the test then drives usage() through fetchMock to reproduce the prod /api/usage 404.
     "WORKBENCH_BASE_URL": "https://workbench.test",
     "WORKBENCH_CALLBACK_SECRET": "test-callback-secret",
-    "MINIAPP_AUTO_DEPLOY": "off"
+    "MINIAPP_AUTO_DEPLOY": "off",
+    "PLATFORM_ADMIN_EMAILS": "ops@hack5.test"
   }
 }

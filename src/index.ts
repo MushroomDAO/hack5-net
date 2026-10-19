@@ -1,3 +1,5 @@
+import { getAddress, verifyMessage, type Address, type Hex } from "viem";
+import { createSiweMessage, parseSiweMessage, validateSiweMessage } from "viem/siwe";
 import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
 import { createWorkbench, workbenchMockEnabled, mintScopedChatToken, type WorkbenchClient } from "./workbench";
@@ -154,6 +156,7 @@ export default {
       if (path === "/api/platform/hackathons" && method === "POST") return createHackathon(request, env);
       if (path === "/api/platform/admin/users" && method === "GET") return adminListUsers(request, env);
       if (path === "/api/platform/admin/set-plan" && method === "POST") return adminSetPlan(request, env);
+      if (path === "/api/platform/admin/wallet/unbind" && method === "POST") return adminUnbindWallet(request, env);
       if (path === "/api/platform/org" && method === "GET") return getOrgProfile(request, env);
       if (path === "/api/platform/org" && method === "POST") return saveOrgProfile(request, env);
       const orgLogo = path.match(/^\/org-logo\/([a-z0-9-]+)$/);
@@ -171,6 +174,9 @@ export default {
       if (path === "/api/tenant/participant/login/verify" && method === "POST") return participantLoginVerify(request, env, tenant, tid);
       if (path === "/api/tenant/participant/logout" && method === "POST") return participantLogout(request);
       if (path === "/api/tenant/me" && method === "GET") return participantMe(request, env, tenant, tid);
+      if (path === "/api/wallet" && method === "GET") return walletStatus(request, env, tid);
+      if (path === "/api/wallet/nonce" && method === "POST") return walletNonce(request, env, tid);
+      if (path === "/api/wallet/bind" && method === "POST") return walletBind(request, env, tid);
       if (path === "/api/tenant/mini/credits" && method === "GET") return miniCreditsBalance(request, env, tid);
 
       // ---- participant registration ----
@@ -1081,11 +1087,280 @@ async function participantMe(request: Request, env: Env, tenant: Tenant | null, 
     email: me.email,
     registered: Boolean(reg),
     verified: true,
+    wallet: await walletForEmail(env, me.email),
     registration: reg ? { name: reg.name, note: reg.note, at: reg.created_at } : null,
     submission: sub
       ? { id: sub.id, projectName: sub.project_name, repoUrl: sub.repo_url, linkUrl: sub.link_url, buildState: sub.build_state, viewUrl: `/s/${sub.id}`, at: sub.created_at }
       : null,
   });
+}
+
+// ---- Wallet binding (platform-level, OP Mainnet chainId 10) ---------------------------------------
+// SIWE (EIP-4361), not a homemade personal_sign. The message is built here and stored with the
+// nonce; the client only returns a signature. viem's verifySiweMessage action needs an RPC client
+// and accepts ERC-6492 contract wallets — phase 1 stays on ecrecover (validateSiweMessage +
+// verifyMessage) and does not ask the wallet to switch chains.
+
+const WALLET_CHAIN_ID = 10;
+const WALLET_NONCE_TTL_SEC = 5 * 60;
+const WALLET_NONCE_MIN_INTERVAL_SEC = 10;
+const WALLET_REBIND_COOLDOWN_SEC = 24 * 60 * 60;
+const WALLET_BIND_CONFLICT = "该地址已绑定其他邮箱 / This address is bound to another email";
+const WALLET_BIND_COOLDOWN = "该地址刚被解绑,24 小时内不能绑到其他邮箱 / This address was just unbound and cannot move to another email for 24 hours";
+const WALLET_BIND_RETRY = "绑定冲突,请重试 / Binding conflict, retry";
+const WALLET_AUTH_REQUIRED = "请先验证邮箱 / Verify your email first";
+const WALLET_BAD_SIGNATURE = "签名无效或已过期 / Invalid or expired signature";
+
+function walletStatement(email: string): string {
+  return `Bind this wallet to ${email} on hack5. This signature does not send a transaction.`;
+}
+
+function walletAuthority(request: Request, env: Env): { domain: string; origin: string; scheme: "http" | "https" } | null {
+  const url = new URL(request.url);
+  const hostname = url.hostname.toLowerCase();
+  const root = (env.ROOT_DOMAIN || "hack5.net").toLowerCase();
+  const local = hostname === "localhost" || hostname === "127.0.0.1";
+  const apex = hostname === root;
+  const label = hostname.endsWith(`.${root}`) ? hostname.slice(0, -(root.length + 1)) : "";
+  const sub = label.length > 0 && /^[a-z0-9-]+$/.test(label);
+  if (!local && !apex && !sub) return null;
+  if (url.protocol !== "https:" && !(local && url.protocol === "http:")) return null;
+  return { domain: url.host.toLowerCase(), origin: url.origin, scheme: url.protocol === "https:" ? "https" : "http" };
+}
+
+// A verified participant cookie wins. An unverified participant cookie is a hard no — do not
+// fall through to a platform session that happens to be on the same host.
+async function walletActor(request: Request, env: Env, tid: string | null): Promise<{ email: string } | "unverified" | null> {
+  const participant = await getParticipant(request, env, tid);
+  if (participant) {
+    if (participant.verified !== true) return "unverified";
+    const email = normalizeEmail(participant.email);
+    return email ? { email } : null;
+  }
+  const user = await getUser(request, env);
+  const email = normalizeEmail(user?.email);
+  return email ? { email } : null;
+}
+
+async function readSmallJson<T>(request: Request): Promise<T | null> {
+  const claimed = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(claimed) && claimed > 4096) return null;
+  const text = await request.text();
+  if (text.length > 4096) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+function randomHex(bytes: number): string {
+  const data = new Uint8Array(bytes);
+  crypto.getRandomValues(data);
+  return hex(data.buffer);
+}
+
+function isWalletSignature(value: unknown): value is Hex {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{130}$/.test(value);
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return String(err instanceof Error ? err.message : err).includes("UNIQUE");
+}
+
+async function walletForEmail(env: Env, email: string): Promise<{ address: Address; chainId: number } | null> {
+  const row = await env.DB.prepare("SELECT address, chain_id FROM wallet_bindings WHERE email = ?")
+    .bind(email)
+    .first<{ address: string; chain_id: number }>();
+  if (!row) return null;
+  return { address: getAddress(row.address), chainId: row.chain_id };
+}
+
+async function walletStatus(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const actor = await walletActor(request, env, tid);
+  if (actor === "unverified" || !actor) return json({ error: WALLET_AUTH_REQUIRED }, 401);
+  return json({ wallet: await walletForEmail(env, actor.email) });
+}
+
+async function walletNonce(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const actor = await walletActor(request, env, tid);
+  if (actor === "unverified" || !actor) return json({ error: WALLET_AUTH_REQUIRED }, 401);
+  const authority = walletAuthority(request, env);
+  if (!authority) return json({ error: "这个域名不能绑定钱包 / This host cannot bind a wallet" }, 400);
+  const body = await readSmallJson<{ address?: string }>(request);
+  let checksum: Address;
+  try {
+    checksum = getAddress(String(body?.address ?? ""));
+  } catch {
+    return json({ error: "地址无效 / Invalid address" }, 400);
+  }
+  const now = unixNow();
+  const issuedAt = new Date(now * 1000);
+  const expirationTime = new Date((now + WALLET_NONCE_TTL_SEC) * 1000);
+  const nonce = randomHex(32);
+  const page = tid ? "/mine" : "/settings";
+  let message: string;
+  try {
+    message = createSiweMessage({
+      address: checksum,
+      chainId: WALLET_CHAIN_ID,
+      domain: authority.domain,
+      nonce,
+      uri: `${authority.origin}${page}`,
+      version: "1",
+      statement: walletStatement(actor.email),
+      scheme: authority.scheme,
+      issuedAt,
+      expirationTime,
+    });
+  } catch {
+    return json({ error: "地址无效 / Invalid address" }, 400);
+  }
+  const written = await env.DB.prepare(
+    `INSERT INTO wallet_nonces (email, nonce, message, domain, issued_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(email) DO UPDATE SET
+       nonce = excluded.nonce,
+       message = excluded.message,
+       domain = excluded.domain,
+       issued_at = excluded.issued_at,
+       expires_at = excluded.expires_at
+     WHERE wallet_nonces.issued_at <= excluded.issued_at - ?`,
+  )
+    .bind(actor.email, nonce, message, authority.domain, now, now + WALLET_NONCE_TTL_SEC, WALLET_NONCE_MIN_INTERVAL_SEC)
+    .run();
+  if ((written.meta.changes ?? 0) !== 1) {
+    return json({ error: "请 10 秒后再获取签名内容。若刚签过一次,请重新获取后再签 / Wait 10 seconds, then request a fresh message and sign that" }, 429);
+  }
+  return json({ message, expiresAt: now + WALLET_NONCE_TTL_SEC, domain: authority.domain, chainId: WALLET_CHAIN_ID });
+}
+
+async function siweSignatureOk(message: string, signature: Hex, email: string, domain: string, scheme: "http" | "https", nonce: string): Promise<boolean> {
+  const parsed = parseSiweMessage(message);
+  if (parsed.chainId !== WALLET_CHAIN_ID || parsed.version !== "1" || parsed.statement !== walletStatement(email) || !parsed.address) return false;
+  if (!validateSiweMessage({ address: parsed.address, domain, message: parsed, nonce, scheme, time: new Date() })) return false;
+  try {
+    return await verifyMessage({ address: parsed.address, message, signature });
+  } catch {
+    return false;
+  }
+}
+
+async function classifyBindMiss(env: Env, address: string, email: string, since: number): Promise<"clash" | "cooldown" | "retry"> {
+  const owner = await env.DB.prepare("SELECT email FROM wallet_bindings WHERE address = ?").bind(address).first<{ email: string }>();
+  if (owner && owner.email !== email) return "clash";
+  const cool = await env.DB.prepare(
+    `SELECT 1 AS ok FROM wallet_binding_history
+      WHERE address = ? AND email <> ? AND unbind_reason = 'rebind' AND unbound_at > ? LIMIT 1`,
+  )
+    .bind(address, email, since)
+    .first();
+  return cool ? "cooldown" : "retry";
+}
+
+function bindMissResponse(kind: "clash" | "cooldown" | "retry"): Response {
+  if (kind === "cooldown") return json({ error: WALLET_BIND_COOLDOWN }, 409);
+  if (kind === "retry") return json({ error: WALLET_BIND_RETRY }, 409);
+  return json({ error: WALLET_BIND_CONFLICT }, 409);
+}
+
+async function writeWalletBinding(env: Env, email: string, address: string, now: number, previous: string | null): Promise<"ok" | "clash" | "cooldown" | "retry"> {
+  const since = now - WALLET_REBIND_COOLDOWN_SEC;
+  const historyId = crypto.randomUUID();
+  const stmts: D1PreparedStatement[] = previous
+    ? [
+        env.DB.prepare(
+          `UPDATE wallet_bindings SET address = ?, chain_id = ?, bound_at = ?
+            WHERE email = ?
+              AND NOT EXISTS (SELECT 1 FROM wallet_bindings WHERE address = ? AND email <> ?)
+              AND NOT EXISTS (
+                SELECT 1 FROM wallet_binding_history
+                 WHERE address = ? AND email <> ? AND unbind_reason = 'rebind' AND unbound_at > ?
+              )`,
+        ).bind(address, WALLET_CHAIN_ID, now, email, address, email, address, email, since),
+        env.DB.prepare(
+          `UPDATE wallet_binding_history SET unbound_at = ?, unbind_reason = 'rebind'
+            WHERE email = ? AND address = ? AND unbound_at IS NULL
+              AND EXISTS (SELECT 1 FROM wallet_bindings WHERE email = ? AND address = ? AND bound_at = ?)`,
+        ).bind(now, email, previous, email, address, now),
+      ]
+    : [
+        env.DB.prepare(
+          `INSERT INTO wallet_bindings (email, address, chain_id, bound_at)
+           SELECT ?, ?, ?, ?
+            WHERE NOT EXISTS (
+              SELECT 1 FROM wallet_binding_history
+               WHERE address = ? AND email <> ? AND unbind_reason = 'rebind' AND unbound_at > ?
+            )`,
+        ).bind(email, address, WALLET_CHAIN_ID, now, address, email, since),
+      ];
+  stmts.push(
+    env.DB.prepare(
+      `INSERT INTO wallet_binding_history (id, email, address, chain_id, bound_at)
+       SELECT ?, ?, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM wallet_bindings WHERE email = ? AND address = ? AND bound_at = ?)`,
+    ).bind(historyId, email, address, WALLET_CHAIN_ID, now, email, address, now),
+  );
+  let results: D1Result[];
+  try {
+    results = await env.DB.batch(stmts);
+  } catch (err) {
+    if (isUniqueViolation(err)) return "clash";
+    throw err;
+  }
+  if ((results[0]?.meta.changes ?? 0) !== 1) return classifyBindMiss(env, address, email, since);
+  return "ok";
+}
+
+async function walletBind(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const actor = await walletActor(request, env, tid);
+  if (actor === "unverified" || !actor) return json({ error: WALLET_AUTH_REQUIRED }, 401);
+  const authority = walletAuthority(request, env);
+  if (!authority) return json({ error: "这个域名不能绑定钱包 / This host cannot bind a wallet" }, 400);
+  const body = await readSmallJson<{ signature?: string }>(request);
+  if (!isWalletSignature(body?.signature)) return json({ error: WALLET_BAD_SIGNATURE }, 401);
+  const now = unixNow();
+  const row = await env.DB.prepare("SELECT nonce, message, domain, expires_at FROM wallet_nonces WHERE email = ?")
+    .bind(actor.email)
+    .first<{ nonce: string; message: string; domain: string; expires_at: number }>();
+  if (!row || row.expires_at < now || row.domain !== authority.domain) return json({ error: WALLET_BAD_SIGNATURE }, 401);
+  // Consume first. A failed verify must not leave a reusable nonce, and two concurrent binds
+  // cannot both pass this DELETE.
+  const consumed = await env.DB.prepare("DELETE FROM wallet_nonces WHERE email = ? AND nonce = ? AND expires_at >= ?")
+    .bind(actor.email, row.nonce, now)
+    .run();
+  if ((consumed.meta.changes ?? 0) !== 1) return json({ error: WALLET_BAD_SIGNATURE }, 401);
+  const signed = await siweSignatureOk(row.message, body.signature, actor.email, authority.domain, authority.scheme, row.nonce);
+  if (!signed) return json({ error: WALLET_BAD_SIGNATURE }, 401);
+  const parsed = parseSiweMessage(row.message);
+  if (!parsed.address) return json({ error: WALLET_BAD_SIGNATURE }, 401);
+  const address = getAddress(parsed.address).toLowerCase();
+  const current = await env.DB.prepare("SELECT address FROM wallet_bindings WHERE email = ?").bind(actor.email).first<{ address: string }>();
+  if (current?.address !== address) {
+    const wrote = await writeWalletBinding(env, actor.email, address, now, current?.address ?? null);
+    if (wrote !== "ok") return bindMissResponse(wrote);
+  }
+  const wallet = await walletForEmail(env, actor.email);
+  return json({ ok: true, wallet });
+}
+
+async function adminUnbindWallet(request: Request, env: Env): Promise<Response> {
+  const user = await getUser(request, env);
+  if (!isOperatorEmail(env, user?.email)) return json({ error: "运营方专用 / Operator only" }, 403);
+  const body = await readSmallJson<{ email?: string }>(request);
+  const email = normalizeEmail(body?.email);
+  if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
+  const now = unixNow();
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE wallet_binding_history SET unbound_at = ?, unbind_reason = 'admin'
+        WHERE email = ? AND unbound_at IS NULL
+          AND EXISTS (SELECT 1 FROM wallet_bindings WHERE email = ?)`,
+    ).bind(now, email, email),
+    env.DB.prepare("DELETE FROM wallet_bindings WHERE email = ?").bind(email),
+  ]);
+  if ((results[1]?.meta.changes ?? 0) !== 1) return json({ error: "没有绑定 / No wallet bound" }, 404);
+  return json({ ok: true });
 }
 
 // The logged-in participant's credit balance, queried by email from the external credits system.
@@ -5161,8 +5436,10 @@ const APP_HTML = String.raw`<!doctype html>
       el.innerHTML = '<div class="panel"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
         + '<span>✅ '+t('已验证邮箱','Email verified')+' · <b title="'+esc(me.email||'')+'">'+esc(maskEmail(me.email||''))+'</b></span>'
         + '<button class="ghost" id="mineLogout">'+t('退出登录','Log out')+'</button></div>'
-        + '<div id="mineCredits" class="muted" style="margin-top:8px;font-size:13px">'+t('加载积分…','Loading credits…')+'</div></div>';
+        + '<div id="mineCredits" class="muted" style="margin-top:8px;font-size:13px">'+t('加载积分…','Loading credits…')+'</div></div>'
+        + '<div id="mineWallet"></div>';
       $('#mineLogout').onclick = async ()=>{ await api('/api/tenant/participant/logout',{method:'POST',body:{}}).catch(()=>{}); renderMine(); };
+      mountWalletCard('mineWallet');
       try{ const c = await api('/api/tenant/mini/credits'); const cel=$('#mineCredits');
         if(cel){ cel.innerHTML = (c && c.credits!=null) ? ('💳 '+t('积分余额','Credits')+': <b>'+c.credits+'</b>') : t('积分账户未开通','Credits not enabled'); }
       }catch(e){}
@@ -5678,7 +5955,9 @@ const APP_HTML = String.raw`<!doctype html>
   async function renderSettings(){
     app.innerHTML='<h1>'+t('我的设置 · 组织资料','Settings · Organization')+'</h1>'
       +'<p class="muted">'+t('你的主办方身份,会显示在你创建的每个黑客松页面底部(主办方:…),跨所有活动复用。','Your host identity — shown in the footer of every hackathon you create, reused across all your events.')+'</p>'
-      +'<div class="panel" style="max-width:560px"><div id="orgForm" class="muted">'+t('加载中…','Loading…')+'</div></div>';
+      +'<div class="panel" style="max-width:560px"><div id="orgForm" class="muted">'+t('加载中…','Loading…')+'</div></div>'
+      +'<div id="settingsWallet" style="max-width:560px"></div>';
+    mountWalletCard('settingsWallet');
     let cur; try{ cur=await api('/api/platform/org'); }catch(e){ cur={}; }
     window.__orgLogo = cur.orgLogo || '';
     $('#orgForm').innerHTML=
@@ -7417,8 +7696,69 @@ const APP_HTML = String.raw`<!doctype html>
   // in the UI — not for editable inputs or admin contact lists that need the real value.
   function maskEmail(e){ e=String(e==null?'':e); const at=e.indexOf('@'); if(at<1) return e; const l=e.slice(0,at), d=e.slice(at); return (l.length<=2 ? l[0]+'*' : l[0]+'***'+l[l.length-1])+d; }
   function setMsg(id,msg,err,ok){ const t=document.getElementById(id); if(!t)return; t.className='notice'+(err?' err':ok?' ok':''); t.innerHTML=msg; }
+  function utf8ToHex(s){
+    const bytes = new TextEncoder().encode(s);
+    let out = '0x';
+    for(let i=0;i<bytes.length;i++) out += bytes[i].toString(16).padStart(2,'0');
+    return out;
+  }
+  // Binding is a SIWE signature. Do not switch networks here — chainId 10 is inside the message.
+  async function mountWalletCard(hostId){
+    const host = document.getElementById(hostId); if(!host) return;
+    host.innerHTML = '<div class="panel" id="walletCard" style="margin-top:12px"><b>💳 '+t('收款钱包','Payout wallet')+'</b>'
+      + '<p class="muted" style="margin:6px 0 8px;font-size:13px">'+t('绑定后,押金只会退回这个地址。这一步只签名,不发起交易,也不切换网络。普通账户可以绑定;纯合约钱包暂不支持。','Deposits return only to this address. This step is a signature, not a transaction, and does not switch networks. Regular accounts can bind; contract wallets cannot yet.')+'</p>'
+      + '<div id="walletBody" class="muted">'+t('加载中…','Loading…')+'</div>'
+      + '<div id="walletMsg" style="margin-top:6px;font-size:13px"></div></div>';
+    let current = null;
+    try {
+      const me = await api('/api/wallet');
+      current = me && me.wallet ? me.wallet : null;
+    } catch(e) { setMsg('walletMsg', e.message, true); }
+    paint();
+    function paint(){
+      const body = document.getElementById('walletBody'); if(!body) return;
+      if(current && current.address){
+        body.innerHTML = '<div style="font-family:ui-monospace,monospace;font-size:13px;word-break:break-all">'+esc(current.address)+'</div>'
+          + '<div class="muted" style="font-size:12px;margin-top:4px">OP Mainnet · chainId '+esc(String(current.chainId||10))+'</div>'
+          + '<p class="muted" style="font-size:12px;margin:6px 0 0">'+t('更换后,旧地址 24 小时内不能绑到别的邮箱。','After a change, the old address cannot move to another email for 24 hours.')+'</p>'
+          + '<div class="row" style="margin-top:10px"><button class="ghost" id="walletBind">'+t('更换地址','Change address')+'</button></div>';
+      } else {
+        body.innerHTML = '<div class="muted">'+t('还没有绑定。','Not bound yet.')+'</div>'
+          + '<div class="row" style="margin-top:10px"><button id="walletBind">'+t('绑定钱包','Bind wallet')+'</button></div>';
+      }
+      const btn = document.getElementById('walletBind');
+      if(btn) btn.addEventListener('click', bindWalletClick);
+    }
+    async function bindWalletClick(){
+      const btn = document.getElementById('walletBind');
+      if(!window.ethereum){ setMsg('walletMsg', t('没有检测到浏览器钱包。请用装有钱包的浏览器打开此页。','No browser wallet detected. Open this page in a browser with a wallet.'), true); return; }
+      if(btn) btn.disabled = true;
+      setMsg('walletMsg', t('请在钱包里确认签名…','Confirm the signature in your wallet…'));
+      try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        const address = accounts && accounts[0];
+        if(!address) throw new Error(t('钱包没有返回地址','The wallet returned no address'));
+        const nonce = await api('/api/wallet/nonce', { method:'POST', body:{ address: address } });
+        const signature = await window.ethereum.request({ method: 'personal_sign', params: [utf8ToHex(nonce.message), address] });
+        const done = await api('/api/wallet/bind', { method:'POST', body:{ signature: signature } });
+        current = done.wallet || null;
+        paint();
+        setMsg('walletMsg', t('已绑定','Bound'), false, true);
+      } catch(e) {
+        setMsg('walletMsg', (e && e.message) ? e.message : String(e), true);
+        if(btn) btn.disabled = false;
+      }
+    }
+  }
   async function api(path,opts={}){
-    const res = await fetch(path,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
+    // Local dev reaches a tenant via ?tenant= on the document URL (see resolveTenant).
+    // Keep that on API calls, which are same-origin paths and would otherwise hit the apex.
+    let url = path;
+    if(location.hostname==='localhost' || location.hostname==='127.0.0.1'){
+      const tenant = new URLSearchParams(location.search).get('tenant');
+      if(tenant && url.indexOf('tenant=')<0) url += (url.indexOf('?')>=0?'&':'?')+'tenant='+encodeURIComponent(tenant);
+    }
+    const res = await fetch(url,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
     const data = await res.json().catch(()=>({}));
     if(!res.ok){ const err = new Error(data.error||(t('请求失败 ','Request failed ')+res.status)); err.status = res.status; err.data = data; throw err; }
     return data;

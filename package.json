@@ -20,6 +20,7 @@
     "wrangler": "4.112.0"
   },
   "dependencies": {
-    "qrcode-generator": "^2.0.4"
+    "qrcode-generator": "^2.0.4",
+    "viem": "^2.57.7"
   }
 }
