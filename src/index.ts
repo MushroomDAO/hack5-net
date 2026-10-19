@@ -4953,6 +4953,9 @@ const APP_HTML = String.raw`<!doctype html>
     .plaza-card .pc-body p{margin:0;font-size:13px;color:var(--ink2);line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
     .plaza-sec{margin:26px 0 12px;font-size:16px;font-weight:800}
     .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
+    .foot-links{display:flex;justify-content:center;flex-wrap:wrap;gap:8px 22px;margin:0 0 14px}
+    .foot-links a{color:var(--ink2);font-weight:650;font-size:14px}
+    .foot-links a:hover{color:var(--brand)}
     .sponsor-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:14px;margin-bottom:12px;font-size:13px}
     .sponsor-bar .muted{text-transform:uppercase;letter-spacing:.1em;font-size:11px;font-weight:700}
     .sponsor-item{display:inline-flex;align-items:center;color:var(--ink);font-weight:650}
@@ -5021,7 +5024,7 @@ const APP_HTML = String.raw`<!doctype html>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>
-  <footer class="site-footer"><div id="sponsorBar"></div><div id="orgFooter"></div>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.<span id="appVer"></span></footer>
+  <footer class="site-footer"><div id="sponsorBar"></div><div id="orgFooter"></div><nav id="siteLinks" class="foot-links"></nav>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.<span id="appVer"></span></footer>
   <div id="lightbox" class="lightbox hidden" onclick="this.classList.add('hidden')"></div>
 
   <script>
@@ -5029,7 +5032,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.6.28'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.29'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -5420,11 +5423,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderNav(){
     const n = document.getElementById('nav');
     if(CONFIG.platform){
-      let hp = '<button class="ghost" onclick="go(\'/guide\')">'+t('指南','Guide')+'</button>'
-             + '<button class="ghost" onclick="go(\'/pricing\')">'+t('价格','Pricing')+'</button>'
-             + '<button class="ghost" onclick="go(\'/rewards\')">'+t('🎁 赚积分','🎁 Rewards')+'</button>'
-             + '<button class="ghost" onclick="go(\'/media\')">'+t('媒体','Media')+'</button>'
-             + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
+      let hp = '<button class="ghost" onclick="go(\'/rewards\')">'+t('🎁 赚积分','🎁 Rewards')+'</button>';
       if(ME_USER.email){
         hp += '<button onclick="go(\'/dashboard\')">'+t('我组织的黑客松','Hackathons I organize')+'</button>'
             + '<button class="ghost" onclick="go(\'/settings\')">'+t('我的设置','Settings')+'</button>'
@@ -5435,12 +5434,13 @@ const APP_HTML = String.raw`<!doctype html>
         hp += '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>';
       }
       hp += themeBtn() + ''+langPicker()+'';
-      n.innerHTML = hp; return;
+      n.innerHTML = hp;
+      renderSiteFooter();
+      return;
     }
-    // 报名 stays in the top bar: it used to live only inside「我的黑客松」, and people on the
-    // gallery could not find it. Organizers get one solid「管理后台」, plus a way back to their other events.
-    let h = '<button onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
-          + '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
+    // 报名 lives on the gallery and the register page, not in the top bar.
+    // Organizers get one solid「管理后台」, plus a way back to their other events.
+    let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
           + '<button class="ghost" onclick="go(\'/mine\')">'+t('我的黑客松','My hackathon')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
@@ -5454,6 +5454,28 @@ const APP_HTML = String.raw`<!doctype html>
     n.innerHTML = h;
     const navOther = document.getElementById('navOther');
     if(navOther) navOther.addEventListener('click', function(){ location.href = organizerListHref(); });
+    renderSiteFooter();
+  }
+  // Guide, pricing, about, and media sit in the footer of every page. Pricing and media
+  // are platform pages, so a tenant host leaves for hack5.net. Guide and about also render here.
+  function sitePageHref(path){
+    if(CONFIG && CONFIG.platform) return path;
+    if((path==='/guide'||path==='/about') && CONFIG && CONFIG.tenant) return path;
+    const host = location.hostname;
+    if(host==='localhost'||host==='127.0.0.1') return path;
+    return 'https://hack5.net'+path;
+  }
+  function renderSiteFooter(){
+    const el = document.getElementById('siteLinks'); if(!el) return;
+    const items = [['/guide', t('指南','Guide')],['/pricing', t('价格','Pricing')],['/about', t('关于','About')],['/media', t('媒体','Media')]];
+    el.innerHTML = items.map(function(it){ return '<a href="'+sitePageHref(it[0])+'" data-site="'+it[0]+'">'+it[1]+'</a>'; }).join('');
+    el.querySelectorAll('a[data-site]').forEach(function(a){
+      a.addEventListener('click', function(ev){
+        const path = a.getAttribute('data-site') || '/';
+        if(CONFIG && CONFIG.platform){ ev.preventDefault(); go(path); return; }
+        if((path==='/guide'||path==='/about') && CONFIG && CONFIG.tenant){ ev.preventDefault(); go(path); }
+      });
+    });
   }
 
   async function logout(){ await api('/api/auth/logout',{method:'POST',body:{}}).catch(()=>{}); ME={role:null}; renderNav(); go('/'); }
