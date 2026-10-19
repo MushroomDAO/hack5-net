@@ -5051,7 +5051,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.6.31'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.32'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -5911,7 +5911,12 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="pc-price"><b>¥12 · $1.6</b> <span class="muted">/ '+t('场','event')+'</span></div>'
       + '<button class="pc-btn" onclick="go(\'/pricing\')">'+t('看价格','See pricing')+'</button></div>'
       // 3) write your story
-      + '<div class="price-card"><div class="pc-ico">📝</div><h2>'+t('发帖介绍 Hack5','Post about Hack5')+'</h2>'
+      + '<div class="price-card"><div class="pc-ico">📝</div><h2>'+t('分享你的体会','Share your story')+'</h2>'
+      + '<div class="pc-tag">'+t('投稿','Write')+'</div>'
+      + '<p>'+t('写下你参与或举办黑客松的体会,介绍你如何用 Hack5 发起一场活动。优秀投稿会在 Mycelium Blog 发布。','Write about joining or hosting a hackathon and how you used Hack5 — the best posts get published on Mycelium Blog.')+'</p>'
+      + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('投稿到 Mycelium Blog →','Submit to Mycelium Blog →')+'</button></a></div>'
+      // 4) post about Hack5, verified by the operator
+      + '<div class="price-card"><div class="pc-ico">📣</div><h2>'+t('发帖介绍 Hack5','Post about Hack5')+'</h2>'
       + '<div class="pc-tag">'+t('核对后发放积分','Credits after verification')+'</div>'
       + '<p>'+t('发一条帖子介绍 Hack5,并写上约 100 字你的感受。在 X 上 @aastarCommunity,或把帖子发给 Telegram @jasonjiao。我们核对后发放积分。','Post an introduction to Hack5 plus about 100 characters on what you thought of it. Mention @aastarCommunity on X, or send the post to Telegram @jasonjiao. Credits are added after we verify it.')+'</p>'
       + '<a href="https://x.com/intent/tweet?text=%40aastarCommunity%20" target="_blank" rel="noopener"><button type="button" class="pc-btn">'+t('去 X 发帖 →','Post on X →')+'</button></a>'
