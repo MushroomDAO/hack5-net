@@ -39,8 +39,7 @@ interface Env {
   R2_BUCKET_NAME?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
-  AI?: Ai; // Cloudflare Workers AI binding — primary AI poster backend (flux-1-schnell), native, no key
-  OPENAI_API_KEY?: string; // fallback AI poster backend (gpt-image-1) when the AI binding isn't configured
+  AI?: Ai; // Cloudflare Workers AI binding — posters (flux-1-schnell) and mini text (llama). No external key.
   SIGNED_UPLOAD_EXPIRES_SECONDS?: string;
   // ---- WorkBench (Mini × fde-copilot/loop-engineer) — contract §5 v2, CC-51 ----
   WORKBENCH_BASE_URL?: string; // fde-copilot base URL (clients/projects/chat/commit/usage); unset → mock
@@ -91,6 +90,19 @@ type Dim = (typeof DIMS)[number];
 const DEFAULT_MIN_SHOTS = 2;
 const DEFAULT_MAX_SHOTS = 4;
 const DEFAULT_MAX_SHOT_BYTES = 1_048_576;
+// Short Chinese copy (one-line blurb, 3 names). 8B stays inside the daily Workers AI neuron allotment;
+// the coding loop stays on WorkBench and is not routed here.
+const WORKERS_AI_TEXT = "@cf/meta/llama-3.1-8b-instruct-fp8" as const;
+
+async function workersAiText(env: Env, prompt: string, maxTokens: number, temperature: number): Promise<string> {
+  if (!env.AI) throw new Error("ai-off");
+  const out = (await env.AI.run(WORKERS_AI_TEXT, {
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: maxTokens,
+    temperature,
+  })) as { response?: string };
+  return String(out.response ?? "").trim();
+}
 
 export default {
   // Cron: sweep builds that WorkBench's loop left hung (no terminal W5 callback) so a submission never
@@ -144,6 +156,7 @@ export default {
 
       // ---- platform user (email login) + hackathon creation (not tenant-scoped) ----
       if (path === "/api/platform/me" && method === "GET") return platformMe(request, env);
+  if (path === "/api/platform/session-bridge" && method === "GET") return platformSessionBridge(request, env);
       if (path === "/api/platform/stats" && method === "GET") return platformStats(env);
       if (path === "/api/platform/explore" && method === "GET") return platformExplore(env);
       if (path === "/api/platform/login/request" && method === "POST") return platformLoginRequest(request, env);
@@ -176,7 +189,9 @@ export default {
       // ---- participant registration ----
       if (path === "/api/tenant/register" && method === "POST") return registerParticipant(request, env, tenant);
       if (path === "/api/tenant/registrations" && method === "GET") return listRegistrations(request, env, tid);
+      if (path === "/api/tenant/registrations/review" && method === "POST") return reviewRegistration(request, env, tid);
       if (path === "/api/tenant/registrations/export" && method === "GET") return exportRegistrations(request, env, tid);
+      if (path === "/api/tenant/registration-form" && method === "POST") return saveRegistrationForm(request, env, tenant);
 
       // ---- premium: AI text-to-image poster background (admin, metered) ----
       if (path === "/api/tenant/poster/ai" && method === "POST") return generateAiPoster(request, env, tenant, tid);
@@ -306,6 +321,7 @@ type Tenant = {
   org_name?: string;
   org_url?: string;
   org_has_logo?: number;
+  reg_config?: string | null;
 };
 
 // Resolve which hackathon (tenant) a request is for, from the Host.
@@ -328,7 +344,7 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
-    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.start_at, t.end_at, t.location, t.duration, t.address, t.map_query, t.agenda, t.banner, t.mode, t.access_days,
+    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.start_at, t.end_at, t.location, t.duration, t.address, t.map_query, t.agenda, t.banner, t.mode, t.access_days, t.reg_config,
        u.org_name AS org_name, u.org_url AS org_url,
        CASE WHEN u.org_logo IS NOT NULL AND u.org_logo <> '' THEN 1 ELSE 0 END AS org_has_logo
      FROM tenants t LEFT JOIN users u ON u.email = t.owner_email
@@ -369,6 +385,7 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
           address: tctx.tenant.address ?? "",
           mapQuery: tctx.tenant.map_query ?? "",
           agenda: parseAgenda(tctx.tenant.agenda),
+          registration: parseRegConfig(tctx.tenant.reg_config),
           hasBanner: Boolean(tctx.tenant.banner),
           organizer: tctx.tenant.org_name
             ? { name: tctx.tenant.org_name, url: tctx.tenant.org_url ?? "", hasLogo: Boolean(tctx.tenant.org_has_logo) }
@@ -448,6 +465,14 @@ async function signAccessToken(env: Env, payload: { tenant: string; exp: number 
 }
 
 async function getAuth(request: Request, env: Env, tid: string | null): Promise<Auth | null> {
+  const session = await readSessionAuth(request, env, tid);
+  if (session) return session;
+  // The platform login (hv_user) is the organizer's account. On their own event it IS the admin
+  // session — they should not have to type the per-event admin password again at /judge.
+  return ownerAsAdmin(request, env, tid);
+}
+
+async function readSessionAuth(request: Request, env: Env, tid: string | null): Promise<Auth | null> {
   const raw = parseCookies(request.headers.get("cookie"))[AUTH_COOKIE];
   if (!raw) return null;
   const dot = raw.lastIndexOf(".");
@@ -468,6 +493,20 @@ async function getAuth(request: Request, env: Env, tid: string | null): Promise<
   } catch {
     return null;
   }
+}
+
+// Platform session email matches this event's owner → admin, for this tenant only.
+// A login for a different hackathon does not grant admin here. Judges still use their own code.
+async function ownerAsAdmin(request: Request, env: Env, tid: string | null): Promise<Auth | null> {
+  if (!tid) return null;
+  const user = await getUser(request, env);
+  if (!user) return null;
+  const row = await env.DB.prepare("SELECT owner_email FROM tenants WHERE id = ? AND status = 'active'")
+    .bind(tid)
+    .first<{ owner_email: string | null }>();
+  if (!row?.owner_email || row.owner_email.toLowerCase() !== user.email.toLowerCase()) return null;
+  const name = (user.email.split("@")[0] || "组织者").slice(0, 40);
+  return { role: "admin", name, jid: "owner", tenant: tid, exp: user.exp };
 }
 
 async function requireRole(request: Request, env: Env, tid: string | null, need: "judge" | "admin"): Promise<Auth | null> {
@@ -603,7 +642,7 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
   )
     .bind(user.email)
     .all<{ subdomain: string; name: string; created_at: number }>();
-  return json({
+  const body = {
     email: user.email,
     quota,
     plan: row?.plan ?? "free",
@@ -618,7 +657,54 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
     isOperator: isOperatorEmail(env, user.email),
     used: list.results.length,
     hackathons: list.results.map((h) => ({ subdomain: h.subdomain, name: h.name, url: `https://${h.subdomain}.hack5.net` })),
-  });
+  };
+  // Re-issue the session on the parent domain so *.hack5.net (the event site) receives it.
+  // Existing logins were host-only on hack5.net and never reached casualhack.hack5.net.
+  const token = await signUser(env, { email: user.email, exp: user.exp });
+  return jsonWithCookies(body, userSetCookies(request, token, Math.max(60, user.exp - unixNow())));
+}
+
+// A host-only hv_user on hack5.net is not sent to casualhack.hack5.net. The event page sends the
+// browser here (top-level GET, so the apex cookie is included). We re-issue Domain=.hack5.net and
+// send them back. return must be this site; anything else goes to the dashboard.
+function bridgeReturnUrl(raw: string | null, env: Env): URL | null {
+  if (!raw || raw.length > 2000) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password) return null;
+  const host = url.hostname.toLowerCase();
+  // Local dev is http on localhost. Every other host must be https on ROOT_DOMAIN.
+  if (host === "localhost" || host === "127.0.0.1") {
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.searchParams.delete("hvbridge");
+    return url;
+  }
+  if (url.protocol !== "https:") return null;
+  const root = (env.ROOT_DOMAIN || "hack5.net").toLowerCase();
+  const label = host === root ? "" : host.endsWith(`.${root}`) ? host.slice(0, -(root.length + 1)) : null;
+  if (label === null || (label !== "" && !/^[a-z0-9-]+$/.test(label))) return null;
+  url.searchParams.delete("hvbridge");
+  return url;
+}
+
+async function platformSessionBridge(request: Request, env: Env): Promise<Response> {
+  const root = (env.ROOT_DOMAIN || "hack5.net").toLowerCase();
+  const requested = bridgeReturnUrl(new URL(request.url).searchParams.get("return"), env);
+  const dest = requested ?? new URL(`https://${root}/dashboard`);
+  const user = await getUser(request, env);
+  if (!user) {
+    if (requested) dest.searchParams.set("hvbridge", "0");
+    return new Response(null, { status: 302, headers: { Location: dest.toString(), "Cache-Control": "no-store" } });
+  }
+  if (requested) dest.searchParams.set("hvbridge", "1");
+  const token = await signUser(env, { email: user.email, exp: user.exp });
+  const headers = new Headers({ Location: dest.toString(), "Cache-Control": "no-store" });
+  for (const cookie of userSetCookies(request, token, Math.max(60, user.exp - unixNow()))) headers.append("Set-Cookie", cookie);
+  return new Response(null, { status: 302, headers });
 }
 
 // hack5 platform operator (运营方) — emails listed in PLATFORM_ADMIN_EMAILS. NOT a per-hackathon
@@ -823,16 +909,40 @@ async function platformLoginVerify(request: Request, env: Env): Promise<Response
   // hackathon (open 80 / mini 50). Same pool as mini participants; granted once per email.
   await grantSignupCredits(env, email, now);
   const token = await signUser(env, { email, exp: now + 30 * 24 * 60 * 60 });
-  return json({ ok: true, email }, 200, { "Set-Cookie": userCookie(request, token, 30 * 24 * 60 * 60) });
+  return jsonWithCookies({ ok: true, email }, userSetCookies(request, token, 30 * 24 * 60 * 60));
 }
 
 function platformLogout(request: Request): Response {
-  return json({ ok: true }, 200, { "Set-Cookie": userCookie(request, "", 0) });
+  return jsonWithCookies({ ok: true }, userSetCookies(request, "", 0));
+}
+
+// On hack5.net the session must be visible to every event subdomain. One Worker serves both,
+// the cookie is HttpOnly, and ownerAsAdmin only promotes the matching owner_email.
+function hack5CookieDomain(request: Request): string {
+  const host = new URL(request.url).hostname.toLowerCase();
+  if (host === "hack5.net" || host.endsWith(".hack5.net")) return "hack5.net";
+  return "";
+}
+
+function userSetCookies(request: Request, token: string, maxAge: number): string[] {
+  const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
+  const base = `${USER_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+  const domain = hack5CookieDomain(request);
+  if (!domain) return [base];
+  // Clear a previous host-only cookie so it cannot shadow the parent-domain one.
+  const clearHost = `${USER_COOKIE}=; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=0`;
+  const parent = `${USER_COOKIE}=${token}; HttpOnly;${secure} Domain=.${domain}; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+  return [clearHost, parent];
+}
+
+function jsonWithCookies(data: unknown, cookies: string[], status = 200): Response {
+  const headers = new Headers({ "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  for (const cookie of cookies) headers.append("Set-Cookie", cookie);
+  return new Response(JSON.stringify(data), { status, headers });
 }
 
 function userCookie(request: Request, token: string, maxAge: number): string {
-  const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
-  return `${USER_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+  return userSetCookies(request, token, maxAge)[0];
 }
 
 // ---- GitHub OAuth: a >2yr GitHub account bypasses the 7-day new-account hosting cooldown ----------
@@ -1543,16 +1653,217 @@ function parseAgenda(raw: string | null | undefined): { time: string; title: str
     .slice(0, 40);
 }
 
+const ROLE_KEYS = new Set(["design", "frontend", "backend", "contract", "research"]);
+const TEAM_KEYS = new Set(["have", "looking", "recruiting"]);
+const GENDER_KEYS = new Set(["female", "male", "unspecified"]);
+const STUDENT_KEYS = new Set(["yes", "no"]);
+
+type ExtraSlot = { label: string; options: string[] };
+type RegConfig = { tracks: string[]; extras: { r1: ExtraSlot; r2: ExtraSlot; i1: string; i2: string; t1: string } };
+type RegProfile = {
+  roles: string[];
+  roleOther: string;
+  github: string;
+  twitter: string;
+  linkedin: string;
+  website: string;
+  telegram: string;
+  contactOther: string;
+  student: string;
+  gender: string;
+  idea: string;
+  team: string;
+  track: string;
+  extras: Record<string, string>;
+};
+type RegisterBody = {
+  name?: string;
+  email?: string;
+  note?: string;
+  nickname?: string;
+  roles?: unknown;
+  roleOther?: string;
+  github?: string;
+  twitter?: string;
+  linkedin?: string;
+  website?: string;
+  telegram?: string;
+  contactOther?: string;
+  student?: string;
+  gender?: string;
+  idea?: string;
+  team?: string;
+  track?: string;
+  extras?: unknown;
+  turnstileToken?: string;
+};
+
+function clipStr(v: unknown, n: number): string {
+  return String(v ?? "").trim().slice(0, n);
+}
+
+function emptyRegConfig(): RegConfig {
+  return { tracks: [], extras: { r1: { label: "", options: [] }, r2: { label: "", options: [] }, i1: "", i2: "", t1: "" } };
+}
+
+function parseRegConfig(raw: string | null | undefined): RegConfig {
+  if (!raw) return emptyRegConfig();
+  try {
+    const cfg = normalizeRegConfig(JSON.parse(raw));
+    if ("error" in cfg) return emptyRegConfig();
+    return cfg;
+  } catch {
+    return emptyRegConfig();
+  }
+}
+
+function normalizeRegConfig(input: unknown): RegConfig | { error: string } {
+  const src = (input && typeof input === "object" ? input : {}) as { tracks?: unknown; extras?: unknown };
+  const tracks: string[] = [];
+  if (Array.isArray(src.tracks)) {
+    for (const item of src.tracks) {
+      const s = clipStr(item, 40);
+      if (s && !tracks.includes(s)) tracks.push(s);
+      if (tracks.length >= 12) break;
+    }
+  }
+  const ex = (src.extras && typeof src.extras === "object" ? src.extras : {}) as Record<string, unknown>;
+  const radio = (key: string): ExtraSlot | { error: string } => {
+    const slot = (ex[key] && typeof ex[key] === "object" ? ex[key] : {}) as { label?: unknown; options?: unknown };
+    const label = clipStr(slot.label, 40);
+    const options: string[] = [];
+    if (Array.isArray(slot.options)) {
+      for (const item of slot.options) {
+        const s = clipStr(item, 40);
+        if (s && !options.includes(s)) options.push(s);
+        if (options.length >= 8) break;
+      }
+    }
+    if (!label) return { label: "", options: [] };
+    if (options.length < 2) return { error: "单选至少两个选项 / A choice needs at least 2 options" };
+    return { label, options };
+  };
+  const r1 = radio("r1");
+  if ("error" in r1) return r1;
+  const r2 = radio("r2");
+  if ("error" in r2) return r2;
+  return { tracks, extras: { r1, r2, i1: clipStr(ex.i1, 40), i2: clipStr(ex.i2, 40), t1: clipStr(ex.t1, 40) } };
+}
+
+function cleanLink(v: unknown): string | { error: string } {
+  const s = clipStr(v, 200);
+  if (!s) return "";
+  if (/\s/.test(s) || /^(javascript|data):/i.test(s)) return { error: "链接格式不对 / Bad link" };
+  return s;
+}
+
+function cleanExtras(cfg: RegConfig, raw: unknown): { extras: Record<string, string> } | { error: string } {
+  const src = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const out: Record<string, string> = {};
+  for (const key of ["r1", "r2"] as const) {
+    const slot = cfg.extras[key];
+    if (!slot.label || slot.options.length < 2) continue;
+    const v = clipStr(src[key], 40);
+    if (!v) continue;
+    if (!slot.options.includes(v)) return { error: "补充选项无效 / Invalid choice" };
+    out[key] = v;
+  }
+  for (const key of ["i1", "i2"] as const) {
+    if (!cfg.extras[key]) continue;
+    const v = clipStr(src[key], 120);
+    if (v) out[key] = v;
+  }
+  if (cfg.extras.t1) {
+    const v = clipStr(src.t1, 500);
+    if (v) out.t1 = v;
+  }
+  return { extras: out };
+}
+
+function buildProfile(body: RegisterBody, cfg: RegConfig): { error: string } | { nickname: string | null; idea: string; profile: RegProfile } {
+  const idea = clipStr(body.idea, 500);
+  if (!idea) return { error: "请填写这次想做什么 / Say what you want to build" };
+  const nickname = clipStr(body.nickname, 40) || null;
+  const roles = Array.isArray(body.roles)
+    ? [...new Set(body.roles.map((r) => clipStr(r, 20)).filter((r) => ROLE_KEYS.has(r)))]
+    : [];
+  const roleOther = clipStr(body.roleOther, 40);
+  const github = cleanLink(body.github);
+  if (typeof github !== "string") return github;
+  const twitter = cleanLink(body.twitter);
+  if (typeof twitter !== "string") return twitter;
+  const linkedin = cleanLink(body.linkedin);
+  if (typeof linkedin !== "string") return linkedin;
+  const website = cleanLink(body.website);
+  if (typeof website !== "string") return website;
+  const student = clipStr(body.student, 8);
+  if (student && !STUDENT_KEYS.has(student)) return { error: "学生选项无效 / Invalid student answer" };
+  const gender = clipStr(body.gender, 16);
+  if (gender && !GENDER_KEYS.has(gender)) return { error: "性别选项无效 / Invalid gender" };
+  const team = clipStr(body.team, 16);
+  if (team && !TEAM_KEYS.has(team)) return { error: "队伍选项无效 / Invalid team status" };
+  let track = clipStr(body.track, 40);
+  if (cfg.tracks.length) {
+    if (!cfg.tracks.includes(track)) return { error: "请选择赛道 / Pick a track" };
+  } else {
+    track = "";
+  }
+  const extrasResult = cleanExtras(cfg, body.extras);
+  if ("error" in extrasResult) return extrasResult;
+  return {
+    nickname,
+    idea,
+    profile: {
+      roles,
+      roleOther,
+      github,
+      twitter,
+      linkedin,
+      website,
+      telegram: clipStr(body.telegram, 64),
+      contactOther: clipStr(body.contactOther, 80),
+      student,
+      gender,
+      idea,
+      team,
+      track,
+      extras: extrasResult.extras,
+    },
+  };
+}
+
+function parseProfile(raw: string | null): RegProfile | null {
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw) as RegProfile;
+    return p && typeof p === "object" ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 async function registerParticipant(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
   if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
-  const body = await request.json<{ name?: string; email?: string; note?: string; turnstileToken?: string }>().catch(() => null);
+  const body = await request.json<RegisterBody>().catch(() => null);
   const email = normalizeEmail(body?.email);
   if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
-  const note = String(body?.note ?? "").trim().slice(0, 300) || null;
-  // Mini keeps registration frictionless (it targets non-developers): email only, with the display
-  // name derived from the email local part. Other modes still require an explicit name.
-  let name = String(body?.name ?? "").trim().slice(0, 60);
-  if (!name && tenant.mode === "mini") name = (email.split("@")[0] || "").slice(0, 60);
+  const isMini = tenant.mode === "mini";
+  let name = clipStr(body?.name, 60);
+  let nickname: string | null = null;
+  let note: string | null = null;
+  let profileJson: string | null = null;
+  if (isMini) {
+    // Mini stays email-only. The display name comes from the mailbox; the optional note is unchanged.
+    note = clipStr(body?.note, 300) || null;
+    if (!name) name = (email.split("@")[0] || "").slice(0, 60);
+  } else {
+    if (!name) return json({ error: "请填写姓名 / Name required" }, 400);
+    const built = buildProfile(body ?? {}, parseRegConfig(tenant.reg_config));
+    if ("error" in built) return json({ error: built.error }, 400);
+    nickname = built.nickname;
+    note = built.idea;
+    profileJson = JSON.stringify(built.profile);
+  }
   if (!name) return json({ error: "请填写姓名 / Name required" }, 400);
 
   const now = unixNow();
@@ -1577,10 +1888,12 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
     .first<{ c: number }>();
   if ((recent?.c ?? 0) >= 20) return json({ error: "报名过于频繁,请稍后再试 / Too many requests" }, 429);
 
+  // Open and secret land in the organizer's pending queue. Mini is instant, so it is already approved.
+  const reviewStatus = isMini ? "approved" : "pending";
   const res = await env.DB.prepare(
-    "INSERT OR IGNORE INTO registrations (id, tenant_id, name, email, note, created_at, request_ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT OR IGNORE INTO registrations (id, tenant_id, name, email, note, nickname, profile, review_status, created_at, request_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(crypto.randomUUID(), tenant.id, name, email, note, now, ip)
+    .bind(crypto.randomUUID(), tenant.id, name, email, note, nickname, profileJson, reviewStatus, now, ip)
     .run();
   // Seed the participant's local credits account on first sight of this email (global across events).
   // INSERT OR IGNORE → granted exactly once per email; a repeat / cross-event registration never re-grants.
@@ -1624,32 +1937,87 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
   return json({ ok: true, codeIssued }, 200, cookie);
 }
 
+type RegListRow = {
+  name: string;
+  nickname: string | null;
+  email: string;
+  note: string | null;
+  profile: string | null;
+  review_status: string | null;
+  created_at: number;
+};
+
+function regPublic(row: RegListRow) {
+  return {
+    name: row.name,
+    nickname: row.nickname ?? "",
+    email: row.email,
+    note: row.note ?? "",
+    created_at: row.created_at,
+    review: row.review_status === "pending" ? "pending" : "approved",
+    profile: parseProfile(row.profile),
+  };
+}
+
+async function registrationConfig(env: Env, tid: string): Promise<RegConfig> {
+  const row = await env.DB.prepare("SELECT reg_config FROM tenants WHERE id = ?").bind(tid).first<{ reg_config: string | null }>();
+  return parseRegConfig(row?.reg_config);
+}
+
 async function listRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
-  if (!auth) return json({ error: "Admin only" }, 403);
+  if (!auth || !tid) return json({ error: "Admin only" }, 403);
   const rows = await env.DB.prepare(
-    "SELECT name, email, note, created_at FROM registrations WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 2000",
+    "SELECT name, nickname, email, note, profile, review_status, created_at FROM registrations WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 2000",
   )
     .bind(tid)
-    .all<{ name: string; email: string; note: string | null; created_at: number }>();
+    .all<RegListRow>();
   // Total count is separate from the (capped) list so a >2000-row event still reports the true number.
   const total = await env.DB.prepare("SELECT COUNT(*) AS c FROM registrations WHERE tenant_id = ?")
     .bind(tid)
     .first<{ c: number }>();
-  return json({ count: total?.c ?? rows.results.length, registrations: rows.results });
+  return json({ count: total?.c ?? rows.results.length, registration: await registrationConfig(env, tid), registrations: rows.results.map(regPublic) });
 }
 
 async function exportRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
-  if (!auth) return json({ error: "Admin only" }, 403);
+  if (!auth || !tid) return json({ error: "Admin only" }, 403);
   const rows = await env.DB.prepare(
-    "SELECT name, email, note, created_at FROM registrations WHERE tenant_id = ? ORDER BY created_at ASC",
+    "SELECT name, nickname, email, note, profile, review_status, created_at FROM registrations WHERE tenant_id = ? ORDER BY created_at ASC",
   )
     .bind(tid)
-    .all<{ name: string; email: string; note: string | null; created_at: number }>();
-  const lines = ["name,email,note,registered_at"];
+    .all<RegListRow>();
+  const lines = ["name,nickname,email,roles,role_other,telegram,contact_other,github,twitter,linkedin,website,track,idea,team,student,gender,extra_r1,extra_r2,extra_i1,extra_i2,extra_t1,registered_at,review_status"];
   for (const r of rows.results) {
-    lines.push([r.name, r.email, r.note ?? "", new Date(r.created_at * 1000).toISOString()].map(csvCell).join(","));
+    const p = parseProfile(r.profile);
+    const ex = p?.extras ?? {};
+    lines.push(
+      [
+        r.name,
+        r.nickname ?? "",
+        r.email,
+        (p?.roles ?? []).join("|"),
+        p?.roleOther ?? "",
+        p?.telegram ?? "",
+        p?.contactOther ?? "",
+        p?.github ?? "",
+        p?.twitter ?? "",
+        p?.linkedin ?? "",
+        p?.website ?? "",
+        p?.track ?? "",
+        p?.idea ?? r.note ?? "",
+        p?.team ?? "",
+        p?.student ?? "",
+        p?.gender ?? "",
+        ex.r1 ?? "",
+        ex.r2 ?? "",
+        ex.i1 ?? "",
+        ex.i2 ?? "",
+        ex.t1 ?? "",
+        new Date(r.created_at * 1000).toISOString(),
+        r.review_status === "pending" ? "pending" : "approved",
+      ].map(csvCell).join(","),
+    );
   }
   return new Response(lines.join("\n"), {
     headers: {
@@ -1658,6 +2026,33 @@ async function exportRegistrations(request: Request, env: Env, tid: string | nul
       "Cache-Control": "no-store",
     },
   });
+}
+
+async function reviewRegistration(request: Request, env: Env, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth || !tid) return json({ error: "Admin only" }, 403);
+  const body = await request.json<{ email?: string; status?: string }>().catch(() => null);
+  const email = normalizeEmail(body?.email);
+  const status = body?.status === "pending" || body?.status === "approved" ? body.status : "";
+  if (!email || !status) return json({ error: "请指定报名和审核状态 / Email and status required" }, 400);
+  const updated = await env.DB.prepare("UPDATE registrations SET review_status = ? WHERE tenant_id = ? AND email = ?")
+    .bind(status, tid, email)
+    .run();
+  if (updated.meta.changes !== 1) return json({ error: "找不到这条报名 / Registration not found" }, 404);
+  return json({ ok: true, email, status });
+}
+
+async function saveRegistrationForm(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  const auth = await requireRole(request, env, tenant.id, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const body = await request.json().catch(() => null);
+  const cfg = normalizeRegConfig(body);
+  if ("error" in cfg) return json({ error: cfg.error }, 400);
+  await env.DB.prepare("UPDATE tenants SET reg_config = ?, updated_at = ? WHERE id = ?")
+    .bind(JSON.stringify(cfg), unixNow(), tenant.id)
+    .run();
+  return json({ ok: true, registration: cfg });
 }
 
 // ---- secret-mode access gate ----
@@ -1758,7 +2153,7 @@ async function deleteTeamPost(request: Request, env: Env, tenant: Tenant | null,
   return json({ ok: true });
 }
 
-// Premium: generate an AI poster BACKGROUND from a text prompt (gpt-image-1), overlaid with crisp
+// Premium: generate an AI poster BACKGROUND from a text prompt (Workers AI flux-1-schnell), overlaid with crisp
 // event text on the client. Admin-only (it costs money) and metered per tenant per day.
 // Free = fixed curated style (we absorb the cost, a few rolls per event, count-capped); custom = the
 // organizer's own prompt — the PAID tier, deducts credits per image. Both are recorded in credit_ledger
@@ -1775,7 +2170,7 @@ async function getPosterQuota(request: Request, env: Env, tid: string | null): P
   const balRow = ownerRow?.creator_email ? await env.DB.prepare("SELECT credits FROM participant_credits WHERE email = ?").bind(ownerRow.creator_email).first<{ credits: number }>() : null;
   const balance = balRow?.credits ?? 0;
   return json({
-    aiEnabled: Boolean(env.AI || env.OPENAI_API_KEY),
+    aiEnabled: Boolean(env.AI),
     free: Math.max(0, AI_POSTER_FREE_CAP - usedFree),
     freeCap: AI_POSTER_FREE_CAP,
     customCredits: AI_POSTER_CUSTOM_CREDITS, // paid: credits deducted per custom poster
@@ -1787,7 +2182,8 @@ async function getPosterQuota(request: Request, env: Env, tid: string | null): P
 async function generateAiPoster(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth || !tenant) return json({ error: "Admin only" }, 403);
-  if (!env.AI && !env.OPENAI_API_KEY) return json({ error: "AI 海报未开通 / AI poster not enabled" }, 503);
+  const ai = env.AI;
+  if (!ai) return json({ error: "AI 海报未开通 / AI poster not enabled" }, 503);
 
   const body = await request.json<{ prompt?: string; mode?: string }>().catch(() => null);
   const mode = body?.mode === "free" ? "free" : "custom";
@@ -1849,30 +2245,12 @@ async function generateAiPoster(request: Request, env: Env, tenant: Tenant | nul
       ? `Abstract vertical wallpaper, deep indigo to near-black smooth gradient, luminous violet and emerald-green glows, soft glowing network filaments, fine particles and gentle bokeh, cinematic, minimal, ultra high detail, calmer and darker toward the bottom. Pure abstract texture, no text.`
       : `Abstract vertical wallpaper texture. Art direction: ${style}. Cinematic, vivid, ultra high detail, smooth, calmer and darker toward the bottom. Pure abstract, no text.`;
 
-  // Generate the BACKGROUND. Prefer Cloudflare Workers AI (flux-1-schnell — native to this Worker, cheap,
-  // no external key, no cold-start vendor); fall back to OpenAI gpt-image-1 only if the AI binding is absent.
+  // BACKGROUND via the Workers AI binding (flux-1-schnell). No external image API key.
   let rawB64 = "";
-  let contentType = "image/jpeg";
+  const contentType = "image/jpeg";
   try {
-    if (env.AI) {
-      const out = (await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt, steps: 8 })) as { image?: string };
-      rawB64 = String(out?.image ?? "");
-      contentType = "image/jpeg";
-    } else {
-      const resp = await fetch("https://api.openai.com/v1/images/generations", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "gpt-image-1", prompt, size: "1024x1536", quality: "medium", n: 1 }),
-      });
-      if (!resp.ok) {
-        console.log("gpt-image-1 error", resp.status, (await resp.text().catch(() => "")).slice(0, 300));
-        await refund();
-        return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
-      }
-      const data = await resp.json<{ data?: { b64_json?: string }[] }>().catch(() => null);
-      rawB64 = String(data?.data?.[0]?.b64_json ?? "");
-      contentType = "image/png";
-    }
+    const out = (await ai.run("@cf/black-forest-labs/flux-1-schnell", { prompt, steps: 8 })) as { image?: string };
+    rawB64 = String(out?.image ?? "");
   } catch (e) {
     console.log("ai poster error", String(e));
     await refund();
@@ -2121,10 +2499,10 @@ async function likeSubmission(request: Request, env: Env, tenant: Tenant | null,
   return json({ ok: true, likes: row?.likes ?? 0, liked: ins.meta.changes === 1 });
 }
 
-// Mini AI assist: write a one-line project description from the name/link (cheap gpt-4o-mini).
+// Mini AI assist: write a one-line project description from the name/link (Workers AI).
 async function miniAssist(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
-  if (!env.OPENAI_API_KEY) return json({ error: "AI 未开通 / AI not enabled" }, 503);
+  if (!env.AI) return json({ error: "AI 未开通 / AI not enabled" }, 503);
   const body = await request.json<{ name?: string; link?: string }>().catch(() => null);
   const name = String(body?.name ?? "").trim().slice(0, 120);
   const link = String(body?.link ?? "").trim().slice(0, 300);
@@ -2138,22 +2516,13 @@ async function miniAssist(request: Request, env: Env, tenant: Tenant | null, tid
     `为一个黑客松作品写一句话中文简介(不超过 80 字,亲切、具体、不浮夸)。作品名:${name || "(未命名)"}。` +
     (link ? `作品链接:${link}。` : "") +
     ` 只输出简介本身,不要引号、不要前缀。`;
-  let resp: Response;
+  let text = "";
   try {
-    resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], max_tokens: 160, temperature: 0.7 }),
-    });
-  } catch {
-    return json({ error: "AI 暂不可用 / AI unavailable" }, 502);
-  }
-  if (!resp.ok) {
-    console.log("mini assist error", resp.status, (await resp.text().catch(() => "")).slice(0, 200));
+    text = (await workersAiText(env, prompt, 160, 0.7)).slice(0, 300);
+  } catch (e) {
+    console.log("mini assist error", String(e));
     return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
   }
-  const data = await resp.json<{ choices?: { message?: { content?: string } }[] }>().catch(() => null);
-  const text = String(data?.choices?.[0]?.message?.content ?? "").trim().slice(0, 300);
   if (!text) return json({ error: "生成失败 / Failed" }, 502);
   return json({ ok: true, text });
 }
@@ -3260,9 +3629,9 @@ async function miniAppDeploy(request: Request, env: Env, tenant: Tenant | null, 
   }
 }
 
-// A6 — AI 起名: suggest 2–3 Chinese project names from the participant's idea (cheap gpt-4o-mini).
+// A6 — AI 起名: suggest 2–3 Chinese project names from the participant's idea (Workers AI).
 // Reuses the miniAssist rate-limit + daily quota pattern. Mock (WORKBENCH_MOCK=1) returns
-// deterministic offline names so the flow is testable via wrangler dev with no OpenAI billing.
+// deterministic offline names so the flow is testable via wrangler dev with no Workers AI billing.
 async function generateMiniNames(env: Env, idea: string, link: string): Promise<string[]> {
   if (env.WORKBENCH_MOCK === "1") {
     const base = idea.replace(/[\s，。,.]+/g, "").slice(0, 4) || "作品";
@@ -3273,17 +3642,7 @@ async function generateMiniNames(env: Env, idea: string, link: string): Promise<
     `想法:${idea || "(未描述)"}。` +
     (link ? `参考链接:${link}。` : "") +
     ` 只输出一个 JSON 字符串数组,例如 ["邻里团","楼下拼","一键凑单"],不要解释、不要多余文字。`;
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }], max_tokens: 120, temperature: 0.9 }),
-  });
-  if (!resp.ok) {
-    console.log("mini name error", resp.status, (await resp.text().catch(() => "")).slice(0, 200));
-    throw new Error("openai");
-  }
-  const data = await resp.json<{ choices?: { message?: { content?: string } }[] }>().catch(() => null);
-  return parseNameList(String(data?.choices?.[0]?.message?.content ?? ""));
+  return parseNameList(await workersAiText(env, prompt, 120, 0.9));
 }
 
 // Robustly extract up to 3 names from a model reply (prefers a JSON array; falls back to lines).
@@ -3317,7 +3676,7 @@ function parseNameList(raw: string): string[] {
 async function miniName(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
   const mock = env.WORKBENCH_MOCK === "1";
-  if (!env.OPENAI_API_KEY && !mock) return json({ error: "AI 未开通 / AI not enabled" }, 503);
+  if (!env.AI && !mock) return json({ error: "AI 未开通 / AI not enabled" }, 503);
   const body = await request.json<{ idea?: string; name?: string; link?: string }>().catch(() => null);
   const idea = String(body?.idea ?? body?.name ?? "").trim().slice(0, 300);
   const link = String(body?.link ?? "").trim().slice(0, 300);
@@ -4388,7 +4747,7 @@ function noContent(): Response {
 }
 
 const APP_HTML = String.raw`<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4647,7 +5006,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.5.6'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.26'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -4658,7 +5017,9 @@ const APP_HTML = String.raw`<!doctype html>
   ];
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
-  let LANG = (lsGet('hv_lang') === 'en' || lsGet('hv_lang') === 'th') ? lsGet('hv_lang') : 'zh';
+  // First visit is English. A click on 中文 / EN / ไทย is stored and wins over that default.
+  let savedLang = lsGet('hv_lang');
+  let LANG = (savedLang === 'zh' || savedLang === 'en' || savedLang === 'th') ? savedLang : 'en';
   // Three languages: zh (source) / en (2nd arg of t) / th (TH dict, keyed by the zh string). Thai falls
   // back to English then Chinese when a string isn't in TH yet, so coverage can grow without ever
   // breaking a screen. All 597 t('中','英') call sites stay untouched — only lookup changes.
@@ -4935,7 +5296,48 @@ const APP_HTML = String.raw`<!doctype html>
   window.toggleTheme = () => { const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light'; lsSet('hv_theme', dark ? 'dark' : 'light'); renderNav(); };
   function themeBtn(){ return '<button class="ghost" onclick="toggleTheme()" title="'+t('深色 / 浅色','Dark / Light')+'">'+(document.documentElement.dataset.theme==='dark'?'☀️':'🌙')+'</button>'; }
 
-  function go(path){ history.pushState(null, '', path); route(); }
+  function go(path){
+    let next = path;
+    const host = location.hostname;
+    if((host==='localhost'||host==='127.0.0.1') && location.search.indexOf('tenant=')>=0 && String(path).indexOf('tenant=')<0){
+      next = path + (String(path).indexOf('?')<0 ? location.search : '');
+    }
+    history.pushState(null, '', next); route();
+  }
+  // Organizer list lives on the platform host. A tenant page must leave the event host,
+  // because go() would keep ?tenant= and stay inside this hackathon.
+  // The organizer's hack5.net login is host-only until the apex re-issues it. Ask the apex once
+  // before showing the per-event password, so an owner who is already logged in is not asked again.
+  function bridgeOwnerSession(){
+    const host = location.hostname;
+    if(host==='hack5.net'||host==='www.hack5.net') return false;
+    if(new URLSearchParams(location.search).has('hvbridge')) return false;
+    const ret = new URL(location.href);
+    ret.searchParams.delete('hvbridge');
+    const origin = (host==='localhost'||host==='127.0.0.1') ? location.origin : 'https://hack5.net';
+    location.replace(origin+'/api/platform/session-bridge?return='+encodeURIComponent(ret.toString()));
+    return true;
+  }
+  function goJudge(){
+    const q = new URLSearchParams(location.search);
+    let dest = q.has('hvbridge') ? '/judge?hvbridge=1' : '/judge';
+    const tenant = q.get('tenant');
+    if((location.hostname==='localhost'||location.hostname==='127.0.0.1') && tenant) dest += (dest.indexOf('?')>=0?'&':'?')+'tenant='+encodeURIComponent(tenant);
+    go(dest);
+  }
+  function organizerListHref(){
+    const host = location.hostname;
+    if(host==='localhost'||host==='127.0.0.1') return '/dashboard';
+    return 'https://hack5.net/dashboard';
+  }
+  function eventAdminHref(h){
+    if(location.hostname==='localhost'||location.hostname==='127.0.0.1') return '/admin?tenant='+encodeURIComponent(h.subdomain||'');
+    return String(h.url||'').replace(/\/$/,'')+'/admin';
+  }
+  function eventPublicHref(h){
+    if(location.hostname==='localhost'||location.hostname==='127.0.0.1') return '/?tenant='+encodeURIComponent(h.subdomain||'');
+    return h.url || '/';
+  }
   // Edit token from the emailed edit link (/submit?edit=<token>) — resubmitting the same repo with it
   // updates the entry instead of 409ing. '' when not editing.
   function currentEditToken(){ try{ return new URLSearchParams(location.search).get('edit')||''; }catch(e){ return ''; } }
@@ -4965,7 +5367,7 @@ const APP_HTML = String.raw`<!doctype html>
     const brand = CONFIG.tenant ? CONFIG.tenant.name : CONFIG.appName;
     document.getElementById('brandName').textContent = brand;
     document.title = CONFIG.tenant ? (brand + ' · ‹5› Hack5') : '‹5› Hack5: Launch Your Hackathon!';
-    document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
+    document.documentElement.lang = LANG_HTMLLANG[LANG] || 'en';
     if(CONFIG.platform) ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
     else ME = await api('/api/auth/me').catch(()=>({role:null}));
     renderOrgFooter();
@@ -5012,22 +5414,23 @@ const APP_HTML = String.raw`<!doctype html>
       hp += themeBtn() + ''+langPicker()+'';
       n.innerHTML = hp; return;
     }
-    // Participant-facing nav is intentionally minimal: the public gallery plus a single
-    // "我的黑客松" hub. The personal actions (报名/组队/提交作品/开始开发) and the
-    // secondary pages (照片墙/分享/关于) all live inside /mine, contextual to this hackathon.
-    let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
+    // 报名 stays in the top bar: it used to live only inside「我的黑客松」, and people on the
+    // gallery could not find it. Organizers get one solid「管理后台」, plus a way back to their other events.
+    let h = '<button onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
+          + '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
           + '<button class="ghost" onclick="go(\'/mine\')">'+t('我的黑客松','My hackathon')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
-         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/manage\')">'+t('首页','Homepage')+'</button><button class="ghost" onclick="go(\'/poster\')">'+t('海报','Poster')+'</button><button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
-         + (ME.role==='admin' && CONFIG.tenant && CONFIG.tenant.mode==='mini'?'<button class="ghost" onclick="go(\'/usage\')">'+t('用量','Usage')+'</button>':'')
+         + (ME.role==='admin'?'<button onclick="go(\'/admin\')">'+t('管理后台','Admin')+'</button><button class="ghost" id="navOther">'+t('管理其他比赛','My other events')+'</button>':'')
          + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?t('管理','Admin'):t('评委','Judge'))+'</span>'
          + '<button onclick="logout()">'+t('退出','Logout')+'</button>';
     } else {
-      h += '<button onclick="go(\'/judge\')">'+t('评审 / 管理','Judge / Admin')+'</button>';
+      h += '<button class="ghost" onclick="go(\'/judge\')">'+t('评审 / 管理','Judge / Admin')+'</button>';
     }
     h += themeBtn() + ''+langPicker()+'';
     n.innerHTML = h;
+    const navOther = document.getElementById('navOther');
+    if(navOther) navOther.addEventListener('click', function(){ location.href = organizerListHref(); });
   }
 
   async function logout(){ await api('/api/auth/logout',{method:'POST',body:{}}).catch(()=>{}); ME={role:null}; renderNav(); go('/'); }
@@ -5064,6 +5467,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/invites') return renderInvites();
     if(p === '/judges') return renderJudges();
     if(p === '/manage') return renderTenantEdit();
+    if(p === '/admin' || p === '/roster') return renderAdmin();
     if(p === '/photos') return renderPhotos();
     if(p === '/poster') return renderPoster();
     if(p === '/register') return renderRegister();
@@ -5200,14 +5604,17 @@ const APP_HTML = String.raw`<!doctype html>
 
   async function renderWall(){
     app.innerHTML = tenantHero()
-      + '<h1>'+esc((CONFIG.tenant&&CONFIG.tenant.name)||CONFIG.eventName)+' · '+t('作品墙','Gallery')+'</h1>'
+      + '<div class="row" style="justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">'
+      +   '<h1 style="margin:0">'+esc((CONFIG.tenant&&CONFIG.tenant.name)||CONFIG.eventName)+' · '+t('作品墙','Gallery')+'</h1>'
+      +   '<button onclick="go(\'/register\')">'+t('报名参加','Register')+'</button>'
+      + '</div>'
       + '<div class="guide-banner" onclick="go(\'/guide\')"><span>🚀 '+t('第一次参加黑客松?读《如何在 AI 时代成为创新者》','First hackathon? Read “How to become a builder in the AI era”')+'</span><b>→</b></div>'
       + '<div id="wall" class="gallery"></div>';
     const wall = $('#wall');
     wall.innerHTML = '<p>'+t('加载中…','Loading…')+'</p>';
     try {
       const { submissions } = await api('/api/submissions');
-      if(!submissions.length){ wall.innerHTML = '<p>'+t('还没有作品,','No projects yet — ')+'<a href="/submit" onclick="go(\'/submit\');return false">'+t('来交第一个','submit the first')+'</a >'+t('。','.')+'</p>'; return; }
+      if(!submissions.length){ wall.innerHTML = '<p>'+t('还没有作品。','No projects yet.')+' <a href="/register" onclick="go(\'/register\');return false">'+t('先报名','Register')+'</a> · <a href="/submit" onclick="go(\'/submit\');return false">'+t('提交作品','Submit a project')+'</a></p>'; return; }
       wall.innerHTML = '';
       submissions.forEach(s => wall.appendChild(card(s)));
     } catch(e){ wall.innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
@@ -5298,7 +5705,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderPricing(){
     const TOPUPS = [[10,500],[50,2500],[100,5000]]; // [USD, credits] — 1 积分 = $0.02
     app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('积分与价格','Credits & pricing')+'</h1>'
-      + '<p class="guide-sub">'+t('按积分举办黑客松 · 新用户注册即送 100 积分','Host hackathons with credits · new accounts get 100 free credits')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('更多赚积分方式 →','More ways to earn →')+'</a></p></div>'
+      + '<p class="guide-sub">'+t('按积分举办黑客松 · 前 100 名注册送 100 积分','Host hackathons with credits · first 100 sign-ups get 100 free credits')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('更多赚积分方式 →','More ways to earn →')+'</a></p></div>'
       + '<div class="price-grid">'
       // Regular
       + '<div class="price-card"><div class="pc-ico">⚡</div><h2>'+t('常规黑客松','Regular')+'</h2>'
@@ -5322,7 +5729,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="pc-price"><b>300 '+t('积分','credits')+'</b> <span class="muted">/ '+t('场','event')+'</span></div>'
       + '<button class="pc-btn" data-plan="secret">'+t('去举办','Host one')+'</button></div>'
       + '</div>'
-      + '<p class="muted" style="text-align:center;margin-top:18px;font-size:13px">'+t('常规黑客松首场免费;之后与 mini/企业一样按积分扣。1 积分 = $0.02,注册即送 100 积分。','Your first regular hackathon is free; after that everything runs on credits. 1 credit = $0.02, and new accounts get 100 free.')+'</p>'
+      + '<p class="muted" style="text-align:center;margin-top:18px;font-size:13px">'+t('常规黑客松首场免费;之后与 mini/企业一样按积分扣。1 积分 = $0.02,前 100 名注册送 100 积分。','Your first regular hackathon is free; after that everything runs on credits. 1 credit = $0.02, and the first 100 sign-ups get 100 free.')+'</p>'
       // ---- top-up packages ($ → credits) ----
       + '<h2 style="text-align:center;margin:26px 0 2px;font-size:20px">'+t('充值包','Top up')+'</h2>'
       + '<p class="guide-sub" style="text-align:center;margin-bottom:14px">'+t('1 积分 = $0.02','1 credit = $0.02')+'</p>'
@@ -5743,7 +6150,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(ghp){ history.replaceState(null,'','/start'); }
     app.innerHTML = '<div class="guide"><h1>'+t('我组织的黑客松','Hackathons I organize')+'</h1>'+ghNote
       + '<p class="muted">💳 '+t('积分余额','Credits')+' <b>'+bal+'</b> · '+t('普通 80 / 企业 300 / mini 50 积分一场','open 80 / secret 300 / mini 50 per event')+' · <a href="/rewards" onclick="go(\'/rewards\');return false" style="font-weight:600">🎁 '+t('赚更多积分 →','Earn more →')+'</a></p>'
-      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3>'+esc(h.name)+'</h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+h.url+'/manage"><button class="ghost" title="'+t('管理/编辑','Manage')+'">⚙️</button></a ><a href="'+h.url+'/poster"><button class="ghost" title="'+t('海报','Poster')+'">🎨</button></a ><a href="'+h.url+'/share"><button class="ghost" title="'+t('转发','Share')+'">🔗</button></a ><a href="'+h.url+'"><button class="ghost">'+t('进入 →','Open →')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
+      + (hs.length ? '<div class="guide-steps">'+hs.map(h=>'<div class="step"><div class="num" style="background:#0a0e0a">🏆</div><div style="flex:1"><h3><a href="'+eventAdminHref(h)+'" style="color:inherit;text-decoration:none">'+esc(h.name)+'</a></h3><p class="card-repo">'+esc(h.subdomain)+'.hack5.net</p></div><div class="row" style="gap:6px"><a href="'+eventAdminHref(h)+'"><button>'+t('管理后台','Admin')+'</button></a ><a href="'+eventPublicHref(h)+'"><button class="ghost">'+t('公开首页','Public page')+'</button></a ></div></div>').join('')+'</div>' : '<p class="muted">'+t('还没有黑客松,创建第一个 👇','No hackathons yet — create your first 👇')+'</p>')
       + '<div class="panel" style="margin-top:18px;max-width:520px"><h2>'+t('创建新黑客松','Create a hackathon')+'</h2>'
       + modeSel
       + (canCreate
@@ -5796,16 +6203,20 @@ const APP_HTML = String.raw`<!doctype html>
           const pw = r.adminPassword;
           const masked = pw.length>7 ? (pw.slice(0,-5)+'****'+pw.slice(-2)) : pw;
           window.__hpw = pw;
+          const dest = (location.hostname==='localhost'||location.hostname==='127.0.0.1')
+            ? ('/admin?tenant='+encodeURIComponent(r.subdomain))
+            : (r.url+'/admin');
           setMsg('hMsg', t('创建成功!','Created! ')
             + '<div style="margin-top:10px">'+t('站点','Site')+': <a href="'+r.url+'" target="_blank" rel="noopener">'+esc(r.url)+'</a ></div>'
             + '<div style="margin-top:8px">'+t('管理员密码','Admin password')+': <code id="pwMask">'+esc(masked)+'</code> <button class="ghost" id="pwCopy" style="padding:3px 10px;font-size:13px">📋 '+t('复制','Copy')+'</button></div>'
             + '<div class="muted" style="margin-top:6px;font-size:12px">⚠️ '+t('只显示这一次,请立即复制保存。','Shown only once — copy and save it now.')+'</div>'
+            + '<div style="margin-top:10px"><a href="'+dest+'"><button>'+t('进入管理后台','Open admin')+'</button></a ></div>'
             + '<div class="muted" style="margin-top:4px;font-size:12px" id="pwGo"></div>', false, true);
           const cp = document.getElementById('pwCopy');
           cp.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(window.__hpw); cp.textContent='✓ '+t('已复制','Copied'); }catch{ prompt(t('复制这个密码','Copy this password'), window.__hpw); } });
           ME_USER = await api('/api/platform/me'); renderNav();
           let n=30; const go=document.getElementById('pwGo');
-          const timer=setInterval(()=>{ n--; if(n<=0){ clearInterval(timer); location.href=r.url; } else if(go){ go.textContent=n+t(' 秒后自动进入你的黑客松站点…',' s — taking you to your hackathon site…'); } },1000);
+          const timer=setInterval(()=>{ n--; if(n<=0){ clearInterval(timer); location.href=dest; } else if(go){ go.textContent=n+t(' 秒后自动进入管理后台…',' s — taking you to the admin…'); } },1000);
         } catch(e){ if(e.data && e.data.upgrade){ setMsg('hMsg', e.message+' →', true); setTimeout(()=>go('/pricing'), 900); return; } setMsg('hMsg', e.message, true); $('#hCreate').disabled=false; }
       });
     } else {
@@ -5871,7 +6282,8 @@ const APP_HTML = String.raw`<!doctype html>
       + '<label>'+t('地图搜索词','Map query')+' <span class="muted">'+t('(留空则用地址)','(defaults to address)')+'</span></label><input id="fMap" maxlength="200" value="'+esc(tn.mapQuery||'')+'">'
       + '<label>'+t('日程','Agenda')+' <span class="muted">'+t('(每行一项:时间 | 内容)','(one per line: time | item)')+'</span></label><textarea id="fAgenda" rows="5" maxlength="2000" placeholder="'+t('Day 1 09:00 | 开幕\\nDay 1 10:00 | 开始开发\\nDay 2 14:00 | Demo\\nDay 2 16:00 | 颁奖','Day 1 09:00 | Kickoff\\nDay 2 14:00 | Demos')+'">'+esc(agendaText)+'</textarea>'
       + '<div class="row" style="margin-top:14px"><button id="fSave">'+t('保存','Save')+'</button><button class="ghost" onclick="go(\'/\')">'+t('返回','Back')+'</button><span id="fMsg" class="muted"></span></div>'
-      + '</div>';
+      + '</div>'
+      + regConfigPanel();
     const fMapBtn=$('#fMapBtn'); if(fMapBtn) fMapBtn.addEventListener('click', ()=>openMapPick($('#fLoc').value));
     $('#fSave').addEventListener('click', async ()=>{
       const sV=$('#fStart').value, eV=$('#fEnd').value;
@@ -5894,6 +6306,47 @@ const APP_HTML = String.raw`<!doctype html>
         CONFIG = await api('/api/config'); setMsg('fBannerMsg', t('Banner 已更新 ✓','Banner updated ✓'));
       }catch(e){ setMsg('fBannerMsg', e.message, true); }
     });
+    const rgCfgSave = $('#rgCfgSave');
+    if(rgCfgSave) rgCfgSave.addEventListener('click', async ()=>{
+      const lines = function(id){ return $('#'+id).value.split(/\n/).map(function(s){ return s.trim(); }).filter(Boolean); };
+      const body = {
+        tracks: lines('rgTracks'),
+        extras: {
+          r1: { label: $('#rgR1L').value.trim(), options: lines('rgR1O') },
+          r2: { label: $('#rgR2L').value.trim(), options: lines('rgR2O') },
+          i1: $('#rgI1').value.trim(),
+          i2: $('#rgI2').value.trim(),
+          t1: $('#rgT1').value.trim(),
+        },
+      };
+      rgCfgSave.disabled = true;
+      try{
+        await api('/api/tenant/registration-form',{method:'POST',body:body});
+        CONFIG = await api('/api/config');
+        setMsg('rgCfgMsg', t('已保存 ✓','Saved ✓'));
+      }catch(e){ setMsg('rgCfgMsg', e.message, true); }
+      finally{ rgCfgSave.disabled = false; }
+    });
+  }
+  function regConfigPanel(){
+    const reg = (CONFIG.tenant && CONFIG.tenant.registration) || {tracks:[], extras:{}};
+    const ex = reg.extras || {};
+    const opt = function(slot){ return ((slot && slot.options) || []).join('\n'); };
+    return '<div class="panel" style="max-width:640px;margin-top:16px">'
+      + '<h2 style="margin-top:0">'+t('报名设置','Registration')+'</h2>'
+      + '<p class="muted">'+t('赛道和下面五项补充问题只对这场生效。题目留空就不会出现在报名表上。','Tracks and the five extra questions apply to this event only. A blank question stays off the form.')+'</p>'
+      + '<label>'+t('赛道','Tracks')+' <span class="muted">'+t('(每行一个,最多 12 个)','(one per line, up to 12)')+'</span></label>'
+      + '<textarea id="rgTracks" rows="4" maxlength="600" placeholder="'+t('DeFi\\n公共品','DeFi\\nPublic goods')+'">'+esc((reg.tracks||[]).join('\n'))+'</textarea>'
+      + '<h3>'+t('补充信息','Extra questions')+'</h3>'
+      + '<label>'+t('单选一 题目','Choice 1, question')+'</label><input id="rgR1L" maxlength="40" value="'+esc((ex.r1&&ex.r1.label)||'')+'">'
+      + '<label>'+t('单选一 选项','Choice 1, options')+' <span class="muted">'+t('(每行一个,2 到 8 个)','(one per line, 2 to 8)')+'</span></label><textarea id="rgR1O" rows="3" maxlength="400">'+esc(opt(ex.r1))+'</textarea>'
+      + '<label>'+t('单选二 题目','Choice 2, question')+'</label><input id="rgR2L" maxlength="40" value="'+esc((ex.r2&&ex.r2.label)||'')+'">'
+      + '<label>'+t('单选二 选项','Choice 2, options')+'</label><textarea id="rgR2O" rows="3" maxlength="400">'+esc(opt(ex.r2))+'</textarea>'
+      + '<label>'+t('短填一','Short answer 1')+'</label><input id="rgI1" maxlength="40" value="'+esc(ex.i1||'')+'" placeholder="'+t('例如:学校或公司','e.g. school or company')+'">'
+      + '<label>'+t('短填二','Short answer 2')+'</label><input id="rgI2" maxlength="40" value="'+esc(ex.i2||'')+'" placeholder="'+t('例如:所在城市','e.g. city')+'">'
+      + '<label>'+t('长文本','Long answer')+'</label><input id="rgT1" maxlength="40" value="'+esc(ex.t1||'')+'" placeholder="'+t('例如:还有什么想告诉主办方','e.g. anything else for the organizer')+'">'
+      + '<div class="row" style="margin-top:14px"><button id="rgCfgSave">'+t('保存报名设置','Save registration')+'</button><span id="rgCfgMsg" class="muted"></span></div>'
+      + '</div>';
   }
 
   // ---------------- photo wall ----------------
@@ -6033,7 +6486,7 @@ const APP_HTML = String.raw`<!doctype html>
     return svg;
   }
   // Free preset poster backgrounds — selectable by everyone on both /poster and /share. (Paid tier =
-  // AI-custom via gpt-image-1, generated from the event description + info; the upsell link stays.)
+  // AI-custom via Workers AI flux-1-schnell, generated from the event description + info; the upsell link stays.)
   const POSTER_BGS=[['','无背景','None'],['/poster-bg/illustration.jpg','🖼 写实插画','Illustration'],['/poster-bg/cartoon.jpg','🎨 卡通漫画','Cartoon'],['/poster-bg/cyberpunk.jpg','🌃 赛博朋克','Cyberpunk'],['/poster-bg/birds.jpg','🕊 天空飞鸟','Sky birds']];
   // Custom-poster prompt examples — [chip label zh, chip label en, full prompt zh, full prompt en].
   // Clicking a chip autofills the textarea with the full prompt so organizers get a complete, editable start.
@@ -6223,36 +6676,260 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   // ---------------- participant registration ----------------
+  const REG_ROLES = [['design','设计师','Designer'],['frontend','前端','Frontend'],['backend','后端','Backend'],['contract','合约工程师','Contract engineer'],['research','研究员','Researcher']];
+  const REG_TEAMS = [['have','已有队伍','I have a team'],['looking','正在寻找团队','Looking for a team'],['recruiting','正在招募队友','Recruiting teammates']];
+  function regChoices(name, items){
+    const type = items===REG_ROLES ? 'checkbox' : 'radio';
+    return '<div class="row" style="gap:10px 16px;flex-wrap:wrap;margin:4px 0 8px">'+items.map(function(it){
+      return '<label style="font-weight:500;display:flex;gap:6px;align-items:center"><input type="'+type+'" name="'+name+'" value="'+esc(it[0])+'"> '+esc(t(it[1],it[2]))+'</label>';
+    }).join('')+'</div>';
+  }
+  function regChecked(name){
+    return [...document.querySelectorAll('input[name="'+name+'"]:checked')].map(function(el){ return el.value; });
+  }
+  function regOne(name){
+    const el = document.querySelector('input[name="'+name+'"]:checked');
+    return el ? el.value : '';
+  }
+  function regExtraHtml(){
+    const cfg = (CONFIG.tenant && CONFIG.tenant.registration) || {tracks:[], extras:{}};
+    const ex = cfg.extras || {};
+    let html = '';
+    const tracks = cfg.tracks || [];
+    if(tracks.length){
+      html += '<label>'+t('赛道','Track')+' *</label>'+regChoices('rgTrack', tracks.map(function(x){ return [x,x,x]; }));
+    }
+    html += '<label>'+t('这次想做什么','What do you want to build')+' *</label><textarea id="rgIdea" maxlength="500" placeholder="'+t('还没有具体想法也可以写「还在想」。','If you do not have one yet, say you are still thinking.')+'"></textarea>';
+    html += '<label>'+t('队伍','Team')+' <span class="muted">'+t('选填','optional')+'</span></label>'+regChoices('rgTeam', REG_TEAMS);
+    html += '<h3 style="margin:18px 0 6px">'+t('补充信息','More about you')+'</h3>';
+    html += '<p class="muted" style="margin-top:0">'+t('选填。学生、性别,以及主办方加的问题。','Optional: student, gender, and questions the organizer added.')+'</p>';
+    html += '<label>'+t('你是学生吗','Are you a student?')+'</label>'+regChoices('rgStudent', [['yes','是','Yes'],['no','不是','No']]);
+    html += '<label>'+t('性别','Gender')+'</label>'+regChoices('rgGender', [['female','女','Female'],['male','男','Male'],['unspecified','不愿透露','Prefer not to say']]);
+    function radioExtra(key, slot){
+      if(!slot || !slot.label || !(slot.options||[]).length) return '';
+      return '<label>'+esc(slot.label)+'</label>'+regChoices('rgX'+key, slot.options.map(function(o){ return [o,o,o]; }));
+    }
+    html += radioExtra('r1', ex.r1)+radioExtra('r2', ex.r2);
+    if(ex.i1) html += '<label>'+esc(ex.i1)+'</label><input id="rgXi1" maxlength="120">';
+    if(ex.i2) html += '<label>'+esc(ex.i2)+'</label><input id="rgXi2" maxlength="120">';
+    if(ex.t1) html += '<label>'+esc(ex.t1)+'</label><textarea id="rgXt1" maxlength="500"></textarea>';
+    return html;
+  }
+  function regProfileForm(){
+    return '<h3 style="margin:0 0 8px">'+t('个人信息','About you')+'</h3>'
+      + '<label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60">'
+      + '<label>'+t('昵称','Nickname')+' <span class="muted">'+t('选填','optional')+'</span></label><input id="rgNick" maxlength="40">'
+      + '<label>'+t('角色','Role')+' <span class="muted">'+t('可多选,方便组队筛选','pick any that fit — used to match teams')+'</span></label>'
+      + regChoices('rgRole', REG_ROLES)
+      + '<label>'+t('其他角色','Other role')+'</label><input id="rgRoleOther" maxlength="40" placeholder="'+t('上面没有的,自己写','Write one if none of the above fit')+'">'
+      + '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
+      + '<label>Telegram <span class="muted">'+t('选填','optional')+'</span></label><input id="rgTg" maxlength="64" placeholder="@name">'
+      + '<label>'+t('其他联系方式','Other contact')+'</label><input id="rgContactOther" maxlength="80" placeholder="'+t('微信 / 电话,愿意留再填','WeChat / phone, if you want')+'">'
+      + '<label>GitHub</label><input id="rgGh" maxlength="200" placeholder="https://github.com/you">'
+      + '<label>Twitter / X</label><input id="rgTw" maxlength="200" placeholder="https://x.com/you">'
+      + '<label>LinkedIn</label><input id="rgLi" maxlength="200" placeholder="https://www.linkedin.com/in/you">'
+      + '<label>'+t('其他链接','Other link')+'</label><input id="rgWeb" maxlength="200" placeholder="https://">'
+      + regExtraHtml();
+  }
+  function roleLine(p){
+    const bits = ((p&&p.roles)||[]).map(function(k){
+      const hit = REG_ROLES.find(function(r){ return r[0]===k; });
+      return hit ? t(hit[1],hit[2]) : k;
+    });
+    if(p&&p.roleOther) bits.push(p.roleOther);
+    return bits.join(' / ');
+  }
+  function teamLine(v){
+    const hit = REG_TEAMS.find(function(r){ return r[0]===v; });
+    return hit ? t(hit[1],hit[2]) : '';
+  }
+  function linkCell(url){
+    if(!url) return '';
+    const safe = esc(url);
+    if(/^https?:\/\//i.test(url)) return '<a href="'+safe+'" target="_blank" rel="noopener">'+safe+'</a>';
+    return safe;
+  }
+  let ROSTER = [];
+  let REG_CFG = {tracks:[], extras:{}};
+  let ROSTER_TAB = '';
+  function rosterReview(r){ return r && r.review==='pending' ? 'pending' : 'approved'; }
+  function paintRoster(){
+    const box = $('#rsTable'); if(!box) return;
+    const q = (($('#rsQ')&&$('#rsQ').value)||'').trim().toLowerCase();
+    const track = ($('#rsTrack')&&$('#rsTrack').value)||'';
+    const role = ($('#rsRole')&&$('#rsRole').value)||'';
+    const team = ($('#rsTeam')&&$('#rsTeam').value)||'';
+    const pendN = ROSTER.filter(function(r){ return rosterReview(r)==='pending'; }).length;
+    const setTab = function(id, text, on){ const el = $('#'+id); if(!el) return; el.textContent = text; el.className = on ? '' : 'ghost'; };
+    setTab('rsTabAll', t('全部','All')+' '+ROSTER.length, !ROSTER_TAB);
+    setTab('rsTabPending', t('待审核','Pending')+' '+pendN, ROSTER_TAB==='pending');
+    setTab('rsTabApproved', t('已通过','Approved')+' '+(ROSTER.length-pendN), ROSTER_TAB==='approved');
+    const rows = ROSTER.filter(function(r){
+      const p = r.profile||{};
+      if(ROSTER_TAB && rosterReview(r)!==ROSTER_TAB) return false;
+      if(track && p.track!==track) return false;
+      if(role && (p.roles||[]).indexOf(role)<0) return false;
+      if(team && p.team!==team) return false;
+      if(q){
+        const blob = [r.name, r.nickname, r.email, p.telegram, p.roleOther, p.idea, p.contactOther].join(' ').toLowerCase();
+        if(blob.indexOf(q)<0) return false;
+      }
+      return true;
+    });
+    const count = $('#rsCount');
+    if(count) count.textContent = rows.length+(rows.length===ROSTER.length?'':' / '+ROSTER.length);
+    const td = 'text-align:left;border-bottom:1px solid var(--line);padding:6px 8px;white-space:nowrap;vertical-align:top';
+    const ex = (REG_CFG && REG_CFG.extras) || {};
+    const extraCols = [];
+    if(ex.r1 && ex.r1.label) extraCols.push(['r1', ex.r1.label]);
+    if(ex.r2 && ex.r2.label) extraCols.push(['r2', ex.r2.label]);
+    if(ex.i1) extraCols.push(['i1', ex.i1]);
+    if(ex.i2) extraCols.push(['i2', ex.i2]);
+    if(ex.t1) extraCols.push(['t1', ex.t1]);
+    const head = ['姓名','昵称','角色','邮箱','Telegram','其他联系方式','GitHub','X','LinkedIn','其他链接','赛道','想做什么','队伍','学生','性别'].concat(extraCols.map(function(c){ return c[1]; })).concat(['时间','审核']);
+    const headEn = ['Name','Nickname','Role','Email','Telegram','Other contact','GitHub','X','LinkedIn','Other link','Track','Idea','Team','Student','Gender'].concat(extraCols.map(function(c){ return c[1]; })).concat(['When','Review']);
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
+      + head.map(function(h,i){ return '<th style="'+td+'">'+esc(t(h,headEn[i]))+'</th>'; }).join('')
+      + '</tr></thead><tbody>';
+    if(!rows.length){ html += '<tr><td colspan="'+head.length+'" class="muted" style="padding:8px">'+t('没有匹配的报名','No matching sign-ups')+'</td></tr>'; }
+    rows.forEach(function(r){
+      const p = r.profile||{};
+      const student = p.student==='yes'?t('是','Yes'):p.student==='no'?t('不是','No'):'';
+      const gender = p.gender==='female'?t('女','Female'):p.gender==='male'?t('男','Male'):p.gender==='unspecified'?t('不愿透露','Unspecified'):'';
+      const when = r.created_at ? new Date(r.created_at*1000).toLocaleString() : '';
+      const cells = [r.name, r.nickname, roleLine(p), r.email, p.telegram||'', p.contactOther||'', p.github||'', p.twitter||'', p.linkedin||'', p.website||'', p.track||'', p.idea||r.note||'', teamLine(p.team), student, gender].concat(extraCols.map(function(c){ return (p.extras&&p.extras[c[0]])||''; })).concat([when]);
+      const pending = rosterReview(r)==='pending';
+      const reviewBtn = '<button class="ghost" data-rev="'+esc(r.email)+'" data-next="'+(pending?'approved':'pending')+'" style="padding:2px 8px;font-size:12px">'+(pending?t('通过','Approve'):t('改回待审核','Mark pending'))+'</button>';
+      html += '<tr>'+cells.map(function(c,i){
+        const linked = (i>=6 && i<=9) ? linkCell(c) : esc(c);
+        const wrap = i===11 ? 'white-space:normal;min-width:180px;' : 'white-space:nowrap;';
+        return '<td style="'+td+';'+wrap+'">'+linked+'</td>';
+      }).join('')+'<td style="'+td+'">'+(pending?t('待审核','Pending'):t('已通过','Approved'))+' '+reviewBtn+'</td></tr>';
+    });
+    box.innerHTML = html+'</tbody></table>';
+    box.querySelectorAll('button[data-rev]').forEach(function(b){
+      b.addEventListener('click', async function(){
+        b.disabled = true;
+        try{
+          await api('/api/tenant/registrations/review',{method:'POST',body:{email:b.getAttribute('data-rev'), status:b.getAttribute('data-next')}});
+          const row = ROSTER.find(function(r){ return r.email===b.getAttribute('data-rev'); });
+          if(row) row.review = b.getAttribute('data-next');
+          paintRoster();
+        }catch(e){ b.disabled = false; alert(e.message); }
+      });
+    });
+  }
+  async function renderAdmin(){
+    if(ME.role!=='admin'){ if(bridgeOwnerSession()) return; goJudge(); return; }
+    ROSTER_TAB = '';
+    const tn = CONFIG.tenant || {};
+    const exportHref = '/api/tenant/registrations/export' + ((location.hostname==='localhost'||location.hostname==='127.0.0.1') && location.search.indexOf('tenant=')>=0 ? location.search : '');
+    const tools = [
+      ['/manage', t('首页设置','Homepage'), t('介绍、时间、地点、赛道和补充问题','Intro, dates, place, tracks and extra questions')],
+      ['/poster', t('海报','Poster'), t('生成活动海报','Make the event poster')],
+      ['/invites', t('邀请码','Invites'), t('发给参赛者的邀请码','Codes for participants')],
+      ['/judges', t('评委','Judges'), t('评委登录码','Judge login codes')],
+      ['/photos', t('照片墙','Photos'), t('上传现场照片','Upload photos')],
+      ['/share', t('转发','Share'), t('分享页和二维码','Share page and QR')],
+    ];
+    if(tn.mode==='mini') tools.push(['/usage', t('用量','Usage'), t('积分和构建用量','Credits and builds')]);
+    app.innerHTML = '<h1>'+t('管理后台','Admin')+'</h1>'
+      + '<p class="muted" style="margin-top:0">'+esc(tn.name||'')+'</p>'
+      + '<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:16px">'
+      + '<button class="ghost" onclick="go(\'/\')">'+t('公开首页','Public page')+'</button>'
+      + '<button class="ghost" id="admOther">'+t('管理其他比赛','My other events')+'</button>'
+      + '</div>'
+      + '<h2 style="margin-bottom:8px">'+t('报名','Sign-ups')+'</h2>'
+      + '<p class="muted" style="margin-top:0">'+t('新报名先进入待审核。点通过后出现在已通过。已经报过名的人默认算已通过。','New sign-ups start as pending. Approve moves them to the approved list. People who signed up earlier stay approved.')+'</p>'
+      + '<div class="row" id="rsTabs" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+      + '<button data-rstab="all" id="rsTabAll">'+t('全部','All')+'</button>'
+      + '<button class="ghost" data-rstab="pending" id="rsTabPending">'+t('待审核','Pending')+'</button>'
+      + '<button class="ghost" data-rstab="approved" id="rsTabApproved">'+t('已通过','Approved')+'</button>'
+      + '</div>'
+      + '<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center">'
+      + '<input id="rsQ" placeholder="'+t('搜索姓名、昵称、邮箱','Search name, nickname, email')+'" style="max-width:260px">'
+      + '<select id="rsTrack"><option value="">'+t('全部赛道','All tracks')+'</option></select>'
+      + '<select id="rsRole"><option value="">'+t('全部角色','All roles')+'</option>'+REG_ROLES.map(function(r){ return '<option value="'+r[0]+'">'+esc(t(r[1],r[2]))+'</option>'; }).join('')+'</select>'
+      + '<select id="rsTeam"><option value="">'+t('全部队伍状态','All team statuses')+'</option>'+REG_TEAMS.map(function(r){ return '<option value="'+r[0]+'">'+esc(t(r[1],r[2]))+'</option>'; }).join('')+'</select>'
+      + '<a href="'+exportHref+'"><button class="ghost">'+t('导出 CSV','Export CSV')+'</button></a>'
+      + '</div>'
+      + '<p id="rsCount" class="muted"></p>'
+      + '<div id="rsTable" style="overflow:auto"><p class="muted">'+t('加载中…','Loading…')+'</p></div>'
+      + '<h2 style="margin:22px 0 8px">'+t('其他管理','More admin')+'</h2>'
+      + '<div class="guide-steps">'+tools.map(function(it){
+          return '<div class="step" data-go="'+it[0]+'" style="cursor:pointer"><div class="num" style="background:#0a0e0a">›</div><div><h3>'+it[1]+'</h3><p>'+it[2]+'</p></div></div>';
+        }).join('')+'</div>';
+    const admOther = $('#admOther');
+    if(admOther) admOther.addEventListener('click', function(){ location.href = organizerListHref(); });
+    document.querySelectorAll('[data-rstab]').forEach(function(b){
+      b.addEventListener('click', function(){ ROSTER_TAB = b.getAttribute('data-rstab')==='all' ? '' : (b.getAttribute('data-rstab')||''); paintRoster(); });
+    });
+    document.querySelectorAll('[data-go]').forEach(function(el){
+      el.addEventListener('click', function(){ go(el.getAttribute('data-go')); });
+    });
+    ['rsQ','rsTrack','rsRole','rsTeam'].forEach(function(id){
+      const el = $('#'+id); if(el) el.addEventListener('input', paintRoster);
+    });
+    try{
+      const d = await api('/api/tenant/registrations');
+      ROSTER = d.registrations||[];
+      REG_CFG = d.registration || REG_CFG;
+      const tracks = ((d.registration&&d.registration.tracks)||[]).slice();
+      ROSTER.forEach(function(r){ const tr=r.profile&&r.profile.track; if(tr && tracks.indexOf(tr)<0) tracks.push(tr); });
+      const sel = $('#rsTrack');
+      if(sel) sel.innerHTML = '<option value="">'+t('全部赛道','All tracks')+'</option>'+tracks.map(function(tr){ return '<option value="'+esc(tr)+'">'+esc(tr)+'</option>'; }).join('');
+      paintRoster();
+    }catch(e){ $('#rsTable').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+  }
   async function renderRegister(){
     if(!CONFIG.tenant){ go('/'); return; }
-    let adminBlock = '';
-    if(ME.role==='admin'){
-      try{ const d=await api('/api/tenant/registrations'); adminBlock='<div class="panel" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;align-items:center"><b>'+t('已报名','Registered')+': '+d.count+'</b><a href="/api/tenant/registrations/export"><button class="ghost">'+t('导出 CSV','Export CSV')+'</button></a ></div></div>'; }catch(e){}
-    }
     const isMini = !!(CONFIG.tenant && CONFIG.tenant.mode==='mini');
+    const adminLink = ME.role==='admin' ? '<p style="margin-top:0"><a href="/admin" onclick="go(\'/admin\');return false"><b>'+t('管理后台','Admin')+' →</b></a></p>' : '';
     app.innerHTML = '<h1>'+t('报名参加','Register')+'</h1>'
       + '<p class="muted">'+esc((CONFIG.tenant&&CONFIG.tenant.name)||'')+'</p>'
-      + adminBlock
-      + '<div class="panel" style="max-width:460px"><div id="regForm">'
-      + (isMini ? '' : '<label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60">')
-      + '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
-      + (isMini ? '<p class="muted" style="margin:6px 0 0;font-size:13px">'+t('用户名将自动取自邮箱','Your display name is taken from your email')+'</p>' : '')
-      + '<label>'+t('想法 / 找队友(可选)','Idea / looking for a team (optional)')+'</label><textarea id="rgNote" maxlength="300"></textarea>'
+      + adminLink
+      + '<div class="panel" style="max-width:640px"><div id="regForm">'
+      + (isMini
+          ? '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
+            + '<p class="muted" style="margin:6px 0 0;font-size:13px">'+t('用户名将自动取自邮箱','Your display name is taken from your email')+'</p>'
+            + '<label>'+t('想法 / 找队友(可选)','Idea / looking for a team (optional)')+'</label><textarea id="rgNote" maxlength="300"></textarea>'
+          : regProfileForm())
       + (CONFIG.turnstileSiteKey ? '<div id="rgts" style="margin-top:12px"></div>' : '')
       + '<div class="row" style="margin-top:14px"><button id="rgBtn">'+t('提交报名','Register')+'</button></div>'
       + '<div id="rgMsg"></div></div></div>';
     let rgTs = null;
     if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ rgTs = window.turnstile.render('#rgts', {sitekey: CONFIG.turnstileSiteKey}); }catch(e){} });
     $('#rgBtn').addEventListener('click', async ()=>{
-      const nameEl=$('#rgName'); const name=nameEl?nameEl.value.trim():''; const email=$('#rgEmail').value.trim(), note=$('#rgNote').value.trim();
+      const nameEl=$('#rgName'); const name=nameEl?nameEl.value.trim():''; const email=$('#rgEmail').value.trim();
+      const note = isMini && $('#rgNote') ? $('#rgNote').value.trim() : '';
       if(!email||(!isMini&&!name)){ setMsg('rgMsg', isMini?t('请填写邮箱','Email required'):t('请填写姓名和邮箱','Name and email required'), true); return; }
+      let payload;
+      if(isMini){
+        payload = {name:name, email:email, note:note};
+      } else {
+        const idea = ($('#rgIdea').value||'').trim();
+        if(!idea){ setMsg('rgMsg', t('请填写这次想做什么','Say what you want to build'), true); return; }
+        const tracks = (CONFIG.tenant.registration && CONFIG.tenant.registration.tracks) || [];
+        const track = regOne('rgTrack');
+        if(tracks.length && !track){ setMsg('rgMsg', t('请选择赛道','Pick a track'), true); return; }
+        payload = {
+          name:name, email:email, nickname:($('#rgNick').value||'').trim(), idea:idea, track:track,
+          roles:regChecked('rgRole'), roleOther:($('#rgRoleOther').value||'').trim(),
+          telegram:($('#rgTg').value||'').trim(), contactOther:($('#rgContactOther').value||'').trim(),
+          github:($('#rgGh').value||'').trim(), twitter:($('#rgTw').value||'').trim(),
+          linkedin:($('#rgLi').value||'').trim(), website:($('#rgWeb').value||'').trim(),
+          student:regOne('rgStudent'), gender:regOne('rgGender'), team:regOne('rgTeam'),
+          extras:{ r1:regOne('rgXr1'), r2:regOne('rgXr2'), i1:($('#rgXi1')&&$('#rgXi1').value.trim())||'', i2:($('#rgXi2')&&$('#rgXi2').value.trim())||'', t1:($('#rgXt1')&&$('#rgXt1').value.trim())||'' },
+        };
+      }
       let turnstileToken;
       if(CONFIG.turnstileSiteKey){
         turnstileToken = (window.turnstile && rgTs!=null) ? window.turnstile.getResponse(rgTs) : '';
         if(!turnstileToken){ setMsg('rgMsg', t('请先完成人机验证','Please complete the check'), true); return; }
       }
+      payload.turnstileToken = turnstileToken;
       $('#rgBtn').disabled=true;
-      try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note,turnstileToken}});
+      try{ const r=await api('/api/tenant/register',{method:'POST',body:payload});
         const done = r.already ? t('你已经报名过了 ✓','You are already registered ✓') : t('报名成功!🎉','Registered! 🎉');
         // Email verification right here on the success screen — mini NEEDS it to unlock AI build (it spends
         // the organizer's pre-funded credits, so we must prove inbox ownership); all modes can verify to read
@@ -7143,7 +7820,8 @@ const APP_HTML = String.raw`<!doctype html>
 
   // ---------------- judge login ----------------
   function renderJudge(){
-    if(ME.role){ go(ME.role==='admin'?'/manage':'/leaderboard'); return; }
+    if(ME.role){ go(ME.role==='admin'?'/admin':'/leaderboard'); return; }
+    if(bridgeOwnerSession()) return;
     app.innerHTML = '<h1>'+t('评审入口','Judge login')+'</h1><div class="panel" style="max-width:440px">'
       + '<p>'+t('评委:输入主办方发给你的<b>专属登录码</b>(姓名由码决定)。管理员:输入管理口令。','Judges: enter your <b>personal login code</b> from the organizer (your name comes from the code). Admin: enter the admin passcode.')+'</p>'
       + '<label>'+t('登录码 / 口令','Login code / passcode')+' *</label><input id="jCode" placeholder="'+t('评委登录码,或管理口令','judge code, or admin passcode')+'">'
@@ -7157,7 +7835,7 @@ const APP_HTML = String.raw`<!doctype html>
         // client's gated flag was snapshotted pre-login — clear it so the router stops bouncing to
         // the access gate. Land admins on the management page, judges on the leaderboard.
         if(CONFIG.tenant) CONFIG.tenant.gated = false;
-        renderNav(); go(ME.role==='admin'?'/manage':'/');
+        renderNav(); go(ME.role==='admin'?'/admin':'/');
       } catch(e){ setMsg('jMsg', e.message, true); }
     });
   }
@@ -7418,7 +8096,12 @@ const APP_HTML = String.raw`<!doctype html>
   function maskEmail(e){ e=String(e==null?'':e); const at=e.indexOf('@'); if(at<1) return e; const l=e.slice(0,at), d=e.slice(at); return (l.length<=2 ? l[0]+'*' : l[0]+'***'+l[l.length-1])+d; }
   function setMsg(id,msg,err,ok){ const t=document.getElementById(id); if(!t)return; t.className='notice'+(err?' err':ok?' ok':''); t.innerHTML=msg; }
   async function api(path,opts={}){
-    const res = await fetch(path,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
+    let url = path;
+    const host = location.hostname;
+    if((host==='localhost'||host==='127.0.0.1') && location.search.indexOf('tenant=')>=0 && String(url).indexOf('tenant=')<0){
+      url += (String(url).indexOf('?')<0 ? '?' : '&') + location.search.replace(/^\?/, '');
+    }
+    const res = await fetch(url,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
     const data = await res.json().catch(()=>({}));
     if(!res.ok){ const err = new Error(data.error||(t('请求失败 ','Request failed ')+res.status)); err.status = res.status; err.data = data; throw err; }
     return data;
