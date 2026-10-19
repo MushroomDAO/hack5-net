@@ -4804,9 +4804,25 @@ const APP_HTML = String.raw`<!doctype html>
     p{color:var(--muted);line-height:1.6}
     label{display:block;font-size:13px;font-weight:700;margin:14px 0 6px}
     input,textarea,select{width:100%;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--input-bg);color:var(--ink);outline:none}
+    input[type=checkbox],input[type=radio]{width:auto;padding:0;accent-color:var(--brand)}
     textarea{min-height:84px;resize:vertical}
     input:focus,textarea:focus,select:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(91,75,230,.14)}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:var(--shadow)}
+    .reg-wrap{width:min(920px,100%);margin:0 auto}
+    .reg-wrap > h1,.reg-wrap > .reg-sub,.reg-wrap > .reg-admin{text-align:center}
+    .reg-sub{margin:0 0 18px}
+    .reg-panel{padding:28px 32px 32px}
+    .reg-sec{margin:26px 0 10px;font-size:17px}
+    .reg-sec:first-child{margin-top:0}
+    .reg-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:20px}
+    .reg-grid .span2{grid-column:1 / -1}
+    .reg-choices{display:flex;flex-wrap:wrap;gap:10px;margin:2px 0 8px}
+    .reg-choices label{display:inline-flex;align-items:center;gap:8px;flex:0 1 auto;min-width:min(100%,max-content);max-width:100%;margin:0;padding:9px 14px;border:1px solid var(--line);border-radius:999px;background:var(--ghost-bg);font-weight:560;font-size:14px;line-height:1.35;cursor:pointer}
+    .reg-choices label:hover{border-color:var(--brand)}
+    .reg-choices label:has(input:checked){border-color:var(--brand);background:var(--info-bg);color:var(--info-ink)}
+    .reg-choices input{margin:0;flex:0 0 auto}
+    .reg-actions{margin-top:22px}
+    @media(max-width:720px){.reg-grid{grid-template-columns:1fr}.reg-panel{padding:18px 16px}}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     .muted{color:var(--muted);font-size:13px}
     .notice{margin-top:14px;padding:11px 13px;border-radius:8px;background:var(--info-bg);color:var(--info-ink);word-break:break-word}
@@ -5013,7 +5029,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.6.27'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.28'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -6687,8 +6703,8 @@ const APP_HTML = String.raw`<!doctype html>
   const REG_TEAMS = [['have','已有队伍','I have a team'],['looking','正在寻找团队','Looking for a team'],['recruiting','正在招募队友','Recruiting teammates']];
   function regChoices(name, items){
     const type = items===REG_ROLES ? 'checkbox' : 'radio';
-    return '<div class="row" style="gap:10px 16px;flex-wrap:wrap;margin:4px 0 8px">'+items.map(function(it){
-      return '<label style="font-weight:500;display:flex;gap:6px;align-items:center"><input type="'+type+'" name="'+name+'" value="'+esc(it[0])+'"> '+esc(t(it[1],it[2]))+'</label>';
+    return '<div class="reg-choices">'+items.map(function(it){
+      return '<label><input type="'+type+'" name="'+name+'" value="'+esc(it[0])+'">'+esc(t(it[1],it[2]))+'</label>';
     }).join('')+'</div>';
   }
   function regChecked(name){
@@ -6708,7 +6724,7 @@ const APP_HTML = String.raw`<!doctype html>
     }
     html += '<label>'+t('这次想做什么','What do you want to build')+' *</label><textarea id="rgIdea" maxlength="500" placeholder="'+t('还没有具体想法也可以写「还在想」。','If you do not have one yet, say you are still thinking.')+'"></textarea>';
     html += '<label>'+t('队伍','Team')+' <span class="muted">'+t('选填','optional')+'</span></label>'+regChoices('rgTeam', REG_TEAMS);
-    html += '<h3 style="margin:18px 0 6px">'+t('补充信息','Extra note')+'</h3>';
+    html += '<h3 class="reg-sec">'+t('补充信息','Extra note')+'</h3>';
     html += '<label>'+t('补充信息','Extra note')+' *</label><textarea id="rgSupplement" maxlength="500" placeholder="'+t('按这场的要求补充。没有额外要求就写「无」。','Add what this event asked for. If there is nothing else, write “none”.')+'"></textarea>';
     html += '<p class="muted" style="margin-top:0">'+t('学生和性别选填。主办方写了题目的问题必须回答，没填不能提交。','Student and gender are optional. Questions the organizer titled are required.')+'</p>';
     html += '<label>'+t('你是学生吗','Are you a student?')+'</label>'+regChoices('rgStudent', [['yes','是','Yes'],['no','不是','No']]);
@@ -6724,19 +6740,21 @@ const APP_HTML = String.raw`<!doctype html>
     return html;
   }
   function regProfileForm(){
-    return '<h3 style="margin:0 0 8px">'+t('个人信息','About you')+'</h3>'
-      + '<label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60">'
-      + '<label>'+t('昵称','Nickname')+' <span class="muted">'+t('选填','optional')+'</span></label><input id="rgNick" maxlength="40">'
-      + '<label>'+t('角色','Role')+' <span class="muted">'+t('可多选,方便组队筛选','pick any that fit — used to match teams')+'</span></label>'
-      + regChoices('rgRole', REG_ROLES)
-      + '<label>'+t('其他角色','Other role')+'</label><input id="rgRoleOther" maxlength="40" placeholder="'+t('上面没有的,自己写','Write one if none of the above fit')+'">'
-      + '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
-      + '<label>Telegram <span class="muted">'+t('选填','optional')+'</span></label><input id="rgTg" maxlength="64" placeholder="@name">'
-      + '<label>'+t('其他联系方式','Other contact')+'</label><input id="rgContactOther" maxlength="80" placeholder="'+t('微信 / 电话,愿意留再填','WeChat / phone, if you want')+'">'
-      + '<label>GitHub</label><input id="rgGh" maxlength="200" placeholder="https://github.com/you">'
-      + '<label>Twitter / X</label><input id="rgTw" maxlength="200" placeholder="https://x.com/you">'
-      + '<label>LinkedIn</label><input id="rgLi" maxlength="200" placeholder="https://www.linkedin.com/in/you">'
-      + '<label>'+t('其他链接','Other link')+'</label><input id="rgWeb" maxlength="200" placeholder="https://">'
+    return '<h3 class="reg-sec">'+t('个人信息','About you')+'</h3>'
+      + '<div class="reg-grid">'
+      + '<div><label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60"></div>'
+      + '<div><label>'+t('昵称','Nickname')+' <span class="muted">'+t('选填','optional')+'</span></label><input id="rgNick" maxlength="40"></div>'
+      + '<div class="span2"><label>'+t('角色','Role')+' <span class="muted">'+t('可多选,方便组队筛选','pick any that fit — used to match teams')+'</span></label>'
+      + regChoices('rgRole', REG_ROLES)+'</div>'
+      + '<div class="span2"><label>'+t('其他角色','Other role')+'</label><input id="rgRoleOther" maxlength="40" placeholder="'+t('上面没有的,自己写','Write one if none of the above fit')+'"></div>'
+      + '<div><label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com"></div>'
+      + '<div><label>Telegram <span class="muted">'+t('选填','optional')+'</span></label><input id="rgTg" maxlength="64" placeholder="@name"></div>'
+      + '<div class="span2"><label>'+t('其他联系方式','Other contact')+'</label><input id="rgContactOther" maxlength="80" placeholder="'+t('微信 / 电话,愿意留再填','WeChat / phone, if you want')+'"></div>'
+      + '<div><label>GitHub</label><input id="rgGh" maxlength="200" placeholder="https://github.com/you"></div>'
+      + '<div><label>Twitter / X</label><input id="rgTw" maxlength="200" placeholder="https://x.com/you"></div>'
+      + '<div><label>LinkedIn</label><input id="rgLi" maxlength="200" placeholder="https://www.linkedin.com/in/you"></div>'
+      + '<div><label>'+t('其他链接','Other link')+'</label><input id="rgWeb" maxlength="200" placeholder="https://"></div>'
+      + '</div>'
       + regExtraHtml();
   }
   function roleLine(p){
@@ -6898,19 +6916,19 @@ const APP_HTML = String.raw`<!doctype html>
   async function renderRegister(){
     if(!CONFIG.tenant){ go('/'); return; }
     const isMini = !!(CONFIG.tenant && CONFIG.tenant.mode==='mini');
-    const adminLink = ME.role==='admin' ? '<p style="margin-top:0"><a href="/admin" onclick="go(\'/admin\');return false"><b>'+t('管理后台','Admin')+' →</b></a></p>' : '';
-    app.innerHTML = '<h1>'+t('报名参加','Register')+'</h1>'
-      + '<p class="muted">'+esc((CONFIG.tenant&&CONFIG.tenant.name)||'')+'</p>'
+    const adminLink = ME.role==='admin' ? '<p class="reg-admin" style="margin-top:0"><a href="/admin" onclick="go(\'/admin\');return false"><b>'+t('管理后台','Admin')+' →</b></a></p>' : '';
+    app.innerHTML = '<div class="reg-wrap"><h1>'+t('报名参加','Register')+'</h1>'
+      + '<p class="muted reg-sub">'+esc((CONFIG.tenant&&CONFIG.tenant.name)||'')+'</p>'
       + adminLink
-      + '<div class="panel" style="max-width:640px"><div id="regForm">'
+      + '<div class="panel reg-panel"><div id="regForm">'
       + (isMini
           ? '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
             + '<p class="muted" style="margin:6px 0 0;font-size:13px">'+t('用户名将自动取自邮箱','Your display name is taken from your email')+'</p>'
             + '<label>'+t('想法 / 找队友(可选)','Idea / looking for a team (optional)')+'</label><textarea id="rgNote" maxlength="300"></textarea>'
           : regProfileForm())
       + (CONFIG.turnstileSiteKey ? '<div id="rgts" style="margin-top:12px"></div>' : '')
-      + '<div class="row" style="margin-top:14px"><button id="rgBtn">'+t('提交报名','Register')+'</button></div>'
-      + '<div id="rgMsg"></div></div></div>';
+      + '<div class="reg-actions"><button id="rgBtn">'+t('提交报名','Register')+'</button></div>'
+      + '<div id="rgMsg"></div></div></div></div>';
     let rgTs = null;
     if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ rgTs = window.turnstile.render('#rgts', {sitekey: CONFIG.turnstileSiteKey}); }catch(e){} });
     $('#rgBtn').addEventListener('click', async ()=>{
