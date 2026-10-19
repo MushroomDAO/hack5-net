@@ -139,9 +139,23 @@ describe("POST /api/tenant/register profile", () => {
     const badTrack = await SELF.fetch(`${HOST}/api/tenant/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Ada", email: "ada@reg.test", idea: "做一笔公开的清算机器人", track: "Nope" }),
+      body: JSON.stringify({ name: "Ada", email: "ada@reg.test", idea: "做一笔公开的清算机器人", track: "Nope", supplement: "无" }),
     });
     expect(badTrack.status).toBe(400);
+
+    const noNote = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Ada", email: "ada@reg.test", idea: "做一笔公开的清算机器人", track: "DeFi" }),
+    });
+    expect(noNote.status).toBe(400);
+
+    const skipped = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Ada", email: "ada@reg.test", idea: "做一笔公开的清算机器人", track: "DeFi", supplement: "无" }),
+    });
+    expect(skipped.status).toBe(400);
 
     const ok = await SELF.fetch(`${HOST}/api/tenant/register`, {
       method: "POST",
@@ -158,6 +172,7 @@ describe("POST /api/tenant/register profile", () => {
         idea: "做一笔公开的清算机器人",
         team: "looking",
         track: "DeFi",
+        supplement: "无",
         student: "yes",
         gender: "female",
         extras: { r1: "需要", i1: "独立" },
@@ -179,6 +194,7 @@ describe("POST /api/tenant/register profile", () => {
         idea: "做一笔公开的清算机器人",
         team: "looking",
         track: "DeFi",
+        supplement: "需要通宵场地",
         student: "yes",
         gender: "female",
         extras: { r1: "需要", i1: "独立" },
@@ -188,10 +204,11 @@ describe("POST /api/tenant/register profile", () => {
     const row = await env.DB.prepare("SELECT nickname, note, profile FROM registrations WHERE email = ?").bind("ada@reg.test").first<{ nickname: string; note: string; profile: string }>();
     expect(row?.nickname).toBe("ada");
     expect(row?.note).toBe("做一笔公开的清算机器人");
-    const profile = JSON.parse(row?.profile ?? "{}") as { roles: string[]; track: string; team: string; extras: { r1: string; i1: string } };
+    const profile = JSON.parse(row?.profile ?? "{}") as { roles: string[]; track: string; team: string; supplement: string; extras: { r1: string; i1: string } };
     expect(profile.roles).toEqual(["frontend", "contract"]);
     expect(profile.track).toBe("DeFi");
     expect(profile.team).toBe("looking");
+    expect(profile.supplement).toBe("需要通宵场地");
     expect(profile.extras.r1).toBe("需要");
     expect(profile.extras.i1).toBe("独立");
 
@@ -220,7 +237,7 @@ describe("POST /api/tenant/register profile", () => {
     const res = await SELF.fetch(`${HOST}/api/tenant/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "贝", email: "bei@reg.test", idea: "还在想" }),
+      body: JSON.stringify({ name: "贝", email: "bei@reg.test", idea: "还在想", supplement: "无" }),
     });
     expect(res.status).toBe(200);
     const row = await env.DB.prepare("SELECT review_status FROM registrations WHERE email = ?").bind("bei@reg.test").first<{ review_status: string }>();

@@ -1674,6 +1674,7 @@ type RegProfile = {
   idea: string;
   team: string;
   track: string;
+  supplement: string;
   extras: Record<string, string>;
 };
 type RegisterBody = {
@@ -1694,6 +1695,7 @@ type RegisterBody = {
   idea?: string;
   team?: string;
   track?: string;
+  supplement?: string;
   extras?: unknown;
   turnstileToken?: string;
 };
@@ -1764,18 +1766,19 @@ function cleanExtras(cfg: RegConfig, raw: unknown): { extras: Record<string, str
     const slot = cfg.extras[key];
     if (!slot.label || slot.options.length < 2) continue;
     const v = clipStr(src[key], 40);
-    if (!v) continue;
-    if (!slot.options.includes(v)) return { error: "补充选项无效 / Invalid choice" };
+    if (!v || !slot.options.includes(v)) return { error: "请按主办方的要求填写补充问题 / Answer the organizer's question" };
     out[key] = v;
   }
   for (const key of ["i1", "i2"] as const) {
     if (!cfg.extras[key]) continue;
     const v = clipStr(src[key], 120);
-    if (v) out[key] = v;
+    if (!v) return { error: "请按主办方的要求填写补充问题 / Answer the organizer's question" };
+    out[key] = v;
   }
   if (cfg.extras.t1) {
     const v = clipStr(src.t1, 500);
-    if (v) out.t1 = v;
+    if (!v) return { error: "请按主办方的要求填写补充问题 / Answer the organizer's question" };
+    out.t1 = v;
   }
   return { extras: out };
 }
@@ -1796,6 +1799,8 @@ function buildProfile(body: RegisterBody, cfg: RegConfig): { error: string } | {
   if (typeof linkedin !== "string") return linkedin;
   const website = cleanLink(body.website);
   if (typeof website !== "string") return website;
+  const supplement = clipStr(body.supplement, 500);
+  if (!supplement) return { error: "请填写补充信息 / Add the extra note" };
   const student = clipStr(body.student, 8);
   if (student && !STUDENT_KEYS.has(student)) return { error: "学生选项无效 / Invalid student answer" };
   const gender = clipStr(body.gender, 16);
@@ -1827,6 +1832,7 @@ function buildProfile(body: RegisterBody, cfg: RegConfig): { error: string } | {
       idea,
       team,
       track,
+      supplement,
       extras: extrasResult.extras,
     },
   };
@@ -1987,7 +1993,7 @@ async function exportRegistrations(request: Request, env: Env, tid: string | nul
   )
     .bind(tid)
     .all<RegListRow>();
-  const lines = ["name,nickname,email,roles,role_other,telegram,contact_other,github,twitter,linkedin,website,track,idea,team,student,gender,extra_r1,extra_r2,extra_i1,extra_i2,extra_t1,registered_at,review_status"];
+  const lines = ["name,nickname,email,roles,role_other,telegram,contact_other,github,twitter,linkedin,website,track,idea,supplement,team,student,gender,extra_r1,extra_r2,extra_i1,extra_i2,extra_t1,registered_at,review_status"];
   for (const r of rows.results) {
     const p = parseProfile(r.profile);
     const ex = p?.extras ?? {};
@@ -2006,6 +2012,7 @@ async function exportRegistrations(request: Request, env: Env, tid: string | nul
         p?.website ?? "",
         p?.track ?? "",
         p?.idea ?? r.note ?? "",
+        p?.supplement ?? "",
         p?.team ?? "",
         p?.student ?? "",
         p?.gender ?? "",
@@ -5006,7 +5013,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.6.26'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.27'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -6332,9 +6339,9 @@ const APP_HTML = String.raw`<!doctype html>
     const reg = (CONFIG.tenant && CONFIG.tenant.registration) || {tracks:[], extras:{}};
     const ex = reg.extras || {};
     const opt = function(slot){ return ((slot && slot.options) || []).join('\n'); };
-    return '<div class="panel" style="max-width:640px;margin-top:16px">'
+    return '<div class="panel" id="registration" style="max-width:640px;margin-top:16px">'
       + '<h2 style="margin-top:0">'+t('报名设置','Registration')+'</h2>'
-      + '<p class="muted">'+t('赛道和下面五项补充问题只对这场生效。题目留空就不会出现在报名表上。','Tracks and the five extra questions apply to this event only. A blank question stays off the form.')+'</p>'
+      + '<p class="muted">'+t('赛道只对这场生效。每行写一个，最多 12 个。留空则报名表不显示赛道；写了之后选手必须选其中一个。下面的补充问题也是。题目留空就不会出现；写了题目，选手不答不能提交。','Tracks apply to this event only. One per line, up to 12. Leave them blank and the form hides Track; once you add any, a participant must pick one. Same for the questions below: a blank title stays off the form, and a titled question must be answered.')+'</p>'
       + '<label>'+t('赛道','Tracks')+' <span class="muted">'+t('(每行一个,最多 12 个)','(one per line, up to 12)')+'</span></label>'
       + '<textarea id="rgTracks" rows="4" maxlength="600" placeholder="'+t('DeFi\\n公共品','DeFi\\nPublic goods')+'">'+esc((reg.tracks||[]).join('\n'))+'</textarea>'
       + '<h3>'+t('补充信息','Extra questions')+'</h3>'
@@ -6701,18 +6708,19 @@ const APP_HTML = String.raw`<!doctype html>
     }
     html += '<label>'+t('这次想做什么','What do you want to build')+' *</label><textarea id="rgIdea" maxlength="500" placeholder="'+t('还没有具体想法也可以写「还在想」。','If you do not have one yet, say you are still thinking.')+'"></textarea>';
     html += '<label>'+t('队伍','Team')+' <span class="muted">'+t('选填','optional')+'</span></label>'+regChoices('rgTeam', REG_TEAMS);
-    html += '<h3 style="margin:18px 0 6px">'+t('补充信息','More about you')+'</h3>';
-    html += '<p class="muted" style="margin-top:0">'+t('选填。学生、性别,以及主办方加的问题。','Optional: student, gender, and questions the organizer added.')+'</p>';
+    html += '<h3 style="margin:18px 0 6px">'+t('补充信息','Extra note')+'</h3>';
+    html += '<label>'+t('补充信息','Extra note')+' *</label><textarea id="rgSupplement" maxlength="500" placeholder="'+t('按这场的要求补充。没有额外要求就写「无」。','Add what this event asked for. If there is nothing else, write “none”.')+'"></textarea>';
+    html += '<p class="muted" style="margin-top:0">'+t('学生和性别选填。主办方写了题目的问题必须回答，没填不能提交。','Student and gender are optional. Questions the organizer titled are required.')+'</p>';
     html += '<label>'+t('你是学生吗','Are you a student?')+'</label>'+regChoices('rgStudent', [['yes','是','Yes'],['no','不是','No']]);
     html += '<label>'+t('性别','Gender')+'</label>'+regChoices('rgGender', [['female','女','Female'],['male','男','Male'],['unspecified','不愿透露','Prefer not to say']]);
     function radioExtra(key, slot){
       if(!slot || !slot.label || !(slot.options||[]).length) return '';
-      return '<label>'+esc(slot.label)+'</label>'+regChoices('rgX'+key, slot.options.map(function(o){ return [o,o,o]; }));
+      return '<label>'+esc(slot.label)+' *</label>'+regChoices('rgX'+key, slot.options.map(function(o){ return [o,o,o]; }));
     }
     html += radioExtra('r1', ex.r1)+radioExtra('r2', ex.r2);
-    if(ex.i1) html += '<label>'+esc(ex.i1)+'</label><input id="rgXi1" maxlength="120">';
-    if(ex.i2) html += '<label>'+esc(ex.i2)+'</label><input id="rgXi2" maxlength="120">';
-    if(ex.t1) html += '<label>'+esc(ex.t1)+'</label><textarea id="rgXt1" maxlength="500"></textarea>';
+    if(ex.i1) html += '<label>'+esc(ex.i1)+' *</label><input id="rgXi1" maxlength="120">';
+    if(ex.i2) html += '<label>'+esc(ex.i2)+' *</label><input id="rgXi2" maxlength="120">';
+    if(ex.t1) html += '<label>'+esc(ex.t1)+' *</label><textarea id="rgXt1" maxlength="500"></textarea>';
     return html;
   }
   function regProfileForm(){
@@ -6771,7 +6779,7 @@ const APP_HTML = String.raw`<!doctype html>
       if(role && (p.roles||[]).indexOf(role)<0) return false;
       if(team && p.team!==team) return false;
       if(q){
-        const blob = [r.name, r.nickname, r.email, p.telegram, p.roleOther, p.idea, p.contactOther].join(' ').toLowerCase();
+        const blob = [r.name, r.nickname, r.email, p.telegram, p.roleOther, p.idea, p.supplement, p.contactOther].join(' ').toLowerCase();
         if(blob.indexOf(q)<0) return false;
       }
       return true;
@@ -6786,8 +6794,8 @@ const APP_HTML = String.raw`<!doctype html>
     if(ex.i1) extraCols.push(['i1', ex.i1]);
     if(ex.i2) extraCols.push(['i2', ex.i2]);
     if(ex.t1) extraCols.push(['t1', ex.t1]);
-    const head = ['姓名','昵称','角色','邮箱','Telegram','其他联系方式','GitHub','X','LinkedIn','其他链接','赛道','想做什么','队伍','学生','性别'].concat(extraCols.map(function(c){ return c[1]; })).concat(['时间','审核']);
-    const headEn = ['Name','Nickname','Role','Email','Telegram','Other contact','GitHub','X','LinkedIn','Other link','Track','Idea','Team','Student','Gender'].concat(extraCols.map(function(c){ return c[1]; })).concat(['When','Review']);
+    const head = ['姓名','昵称','角色','邮箱','Telegram','其他联系方式','GitHub','X','LinkedIn','其他链接','赛道','想做什么','补充信息','队伍','学生','性别'].concat(extraCols.map(function(c){ return c[1]; })).concat(['时间','审核']);
+    const headEn = ['Name','Nickname','Role','Email','Telegram','Other contact','GitHub','X','LinkedIn','Other link','Track','Idea','Extra note','Team','Student','Gender'].concat(extraCols.map(function(c){ return c[1]; })).concat(['When','Review']);
     let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
       + head.map(function(h,i){ return '<th style="'+td+'">'+esc(t(h,headEn[i]))+'</th>'; }).join('')
       + '</tr></thead><tbody>';
@@ -6797,12 +6805,12 @@ const APP_HTML = String.raw`<!doctype html>
       const student = p.student==='yes'?t('是','Yes'):p.student==='no'?t('不是','No'):'';
       const gender = p.gender==='female'?t('女','Female'):p.gender==='male'?t('男','Male'):p.gender==='unspecified'?t('不愿透露','Unspecified'):'';
       const when = r.created_at ? new Date(r.created_at*1000).toLocaleString() : '';
-      const cells = [r.name, r.nickname, roleLine(p), r.email, p.telegram||'', p.contactOther||'', p.github||'', p.twitter||'', p.linkedin||'', p.website||'', p.track||'', p.idea||r.note||'', teamLine(p.team), student, gender].concat(extraCols.map(function(c){ return (p.extras&&p.extras[c[0]])||''; })).concat([when]);
+      const cells = [r.name, r.nickname, roleLine(p), r.email, p.telegram||'', p.contactOther||'', p.github||'', p.twitter||'', p.linkedin||'', p.website||'', p.track||'', p.idea||r.note||'', p.supplement||'', teamLine(p.team), student, gender].concat(extraCols.map(function(c){ return (p.extras&&p.extras[c[0]])||''; })).concat([when]);
       const pending = rosterReview(r)==='pending';
       const reviewBtn = '<button class="ghost" data-rev="'+esc(r.email)+'" data-next="'+(pending?'approved':'pending')+'" style="padding:2px 8px;font-size:12px">'+(pending?t('通过','Approve'):t('改回待审核','Mark pending'))+'</button>';
       html += '<tr>'+cells.map(function(c,i){
         const linked = (i>=6 && i<=9) ? linkCell(c) : esc(c);
-        const wrap = i===11 ? 'white-space:normal;min-width:180px;' : 'white-space:nowrap;';
+        const wrap = (i===11 || i===12) ? 'white-space:normal;min-width:180px;' : 'white-space:nowrap;';
         return '<td style="'+td+';'+wrap+'">'+linked+'</td>';
       }).join('')+'<td style="'+td+'">'+(pending?t('待审核','Pending'):t('已通过','Approved'))+' '+reviewBtn+'</td></tr>';
     });
@@ -6825,7 +6833,8 @@ const APP_HTML = String.raw`<!doctype html>
     const tn = CONFIG.tenant || {};
     const exportHref = '/api/tenant/registrations/export' + ((location.hostname==='localhost'||location.hostname==='127.0.0.1') && location.search.indexOf('tenant=')>=0 ? location.search : '');
     const tools = [
-      ['/manage', t('首页设置','Homepage'), t('介绍、时间、地点、赛道和补充问题','Intro, dates, place, tracks and extra questions')],
+      ['/manage', t('报名设置','Registration'), t('自定义这场的赛道，以及必须回答的补充问题','Custom tracks and the required extra questions'), 'registration'],
+      ['/manage', t('首页设置','Homepage'), t('介绍、时间、地点和日程','Intro, dates, place and agenda')],
       ['/poster', t('海报','Poster'), t('生成活动海报','Make the event poster')],
       ['/invites', t('邀请码','Invites'), t('发给参赛者的邀请码','Codes for participants')],
       ['/judges', t('评委','Judges'), t('评委登录码','Judge login codes')],
@@ -6840,7 +6849,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<button class="ghost" id="admOther">'+t('管理其他比赛','My other events')+'</button>'
       + '</div>'
       + '<h2 style="margin-bottom:8px">'+t('报名','Sign-ups')+'</h2>'
-      + '<p class="muted" style="margin-top:0">'+t('新报名先进入待审核。点通过后出现在已通过。已经报过名的人默认算已通过。','New sign-ups start as pending. Approve moves them to the approved list. People who signed up earlier stay approved.')+'</p>'
+      + '<p class="muted" style="margin-top:0">'+t('新报名先进入待审核。点通过后出现在已通过。已经报过名的人默认算已通过。赛道在「报名设置」里按这场自定义。补充信息是选手必填的开放文本。','New sign-ups start as pending. Approve moves them to the approved list. People who signed up earlier stay approved. Tracks are set per event under Registration. Extra note is an open field the participant must fill.')+'</p>'
       + '<div class="row" id="rsTabs" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">'
       + '<button data-rstab="all" id="rsTabAll">'+t('全部','All')+'</button>'
       + '<button class="ghost" data-rstab="pending" id="rsTabPending">'+t('待审核','Pending')+'</button>'
@@ -6857,7 +6866,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div id="rsTable" style="overflow:auto"><p class="muted">'+t('加载中…','Loading…')+'</p></div>'
       + '<h2 style="margin:22px 0 8px">'+t('其他管理','More admin')+'</h2>'
       + '<div class="guide-steps">'+tools.map(function(it){
-          return '<div class="step" data-go="'+it[0]+'" style="cursor:pointer"><div class="num" style="background:#0a0e0a">›</div><div><h3>'+it[1]+'</h3><p>'+it[2]+'</p></div></div>';
+          return '<div class="step" data-go="'+it[0]+'"'+(it[3]?' data-hash="'+it[3]+'"':'')+' style="cursor:pointer"><div class="num" style="background:#0a0e0a">›</div><div><h3>'+it[1]+'</h3><p>'+it[2]+'</p></div></div>';
         }).join('')+'</div>';
     const admOther = $('#admOther');
     if(admOther) admOther.addEventListener('click', function(){ location.href = organizerListHref(); });
@@ -6865,7 +6874,12 @@ const APP_HTML = String.raw`<!doctype html>
       b.addEventListener('click', function(){ ROSTER_TAB = b.getAttribute('data-rstab')==='all' ? '' : (b.getAttribute('data-rstab')||''); paintRoster(); });
     });
     document.querySelectorAll('[data-go]').forEach(function(el){
-      el.addEventListener('click', function(){ go(el.getAttribute('data-go')); });
+      el.addEventListener('click', function(){
+        go(el.getAttribute('data-go'));
+        const hash = el.getAttribute('data-hash');
+        const node = hash ? document.getElementById(hash) : null;
+        if(node) node.scrollIntoView({block:'start'});
+      });
     });
     ['rsQ','rsTrack','rsRole','rsTeam'].forEach(function(id){
       const el = $('#'+id); if(el) el.addEventListener('input', paintRoster);
@@ -6909,11 +6923,19 @@ const APP_HTML = String.raw`<!doctype html>
       } else {
         const idea = ($('#rgIdea').value||'').trim();
         if(!idea){ setMsg('rgMsg', t('请填写这次想做什么','Say what you want to build'), true); return; }
+        const supplement = ($('#rgSupplement')&&$('#rgSupplement').value||'').trim();
+        if(!supplement){ setMsg('rgMsg', t('请填写补充信息','Add the extra note'), true); return; }
         const tracks = (CONFIG.tenant.registration && CONFIG.tenant.registration.tracks) || [];
         const track = regOne('rgTrack');
         if(tracks.length && !track){ setMsg('rgMsg', t('请选择赛道','Pick a track'), true); return; }
+        const exCfg = (CONFIG.tenant.registration && CONFIG.tenant.registration.extras) || {};
+        if(exCfg.r1 && exCfg.r1.label && !regOne('rgXr1')){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
+        if(exCfg.r2 && exCfg.r2.label && !regOne('rgXr2')){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
+        if(exCfg.i1 && !($('#rgXi1')&&$('#rgXi1').value.trim())){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
+        if(exCfg.i2 && !($('#rgXi2')&&$('#rgXi2').value.trim())){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
+        if(exCfg.t1 && !($('#rgXt1')&&$('#rgXt1').value.trim())){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
         payload = {
-          name:name, email:email, nickname:($('#rgNick').value||'').trim(), idea:idea, track:track,
+          name:name, email:email, nickname:($('#rgNick').value||'').trim(), idea:idea, track:track, supplement:supplement,
           roles:regChecked('rgRole'), roleOther:($('#rgRoleOther').value||'').trim(),
           telegram:($('#rgTg').value||'').trim(), contactOther:($('#rgContactOther').value||'').trim(),
           github:($('#rgGh').value||'').trim(), twitter:($('#rgTw').value||'').trim(),
