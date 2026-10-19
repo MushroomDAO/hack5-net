@@ -4801,13 +4801,14 @@ const APP_HTML = String.raw`<!doctype html>
     @media(max-width:720px){header{flex-wrap:wrap;row-gap:10px}header > nav{flex:1 0 100%;order:3}}
     nav .who{color:var(--muted);font-size:13px;margin-right:4px}
     #navAvatarSlot{flex:0 0 auto}
-    button.nav-avatar{width:36px;height:36px;padding:0;border-radius:50%;border:1px solid var(--line);background:var(--ghost-bg);display:grid;place-items:center;overflow:hidden;flex:0 0 auto}
-    button.nav-avatar:hover{border-color:var(--brand);background:var(--ghost-bg)}
-    button.nav-avatar svg{display:block;width:36px;height:36px}
+    .avatar-face{width:36px;height:36px;padding:0;border:0;border-radius:50%;overflow:hidden;background:transparent;display:block;line-height:0;flex:0 0 auto}
+    .avatar-face svg{display:block;width:100%;height:100%}
+    button.avatar-face{cursor:pointer}
+    button.avatar-face:hover{background:transparent;box-shadow:0 0 0 2px var(--brand)}
+    .avatar-lg{width:96px;height:96px}
     .acct-wrap{width:min(640px,100%);margin:0 auto}
     .acct-panel{padding:28px 28px 22px}
     .acct-hero{display:flex;justify-content:center;margin-bottom:8px}
-    .acct-hero svg{width:96px;height:96px;border-radius:50%;display:block}
     .acct-panel > h1,.acct-email{text-align:center}
     .acct-email{margin:0 0 16px}
     .acct-bal{display:flex;align-items:baseline;justify-content:center;gap:12px;margin:0 0 8px;padding:16px;border-radius:12px;background:var(--info-bg);color:var(--info-ink)}
@@ -5050,7 +5051,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.6.30'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.31'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -5469,7 +5470,7 @@ const APP_HTML = String.raw`<!doctype html>
     const local = String(email||'').split('@')[0] || '';
     return local.replace(/[._-]+/g,' ').replace(/\s+/g,' ').trim() || local;
   }
-  function avatarSvg(seed, size){
+  function avatarSvg(seed){
     let h = hashSeed(seed);
     function next(){
       h ^= h >>> 15; h = Math.imul(h, 2246822507) >>> 0;
@@ -5489,8 +5490,7 @@ const APP_HTML = String.raw`<!doctype html>
       }
     }
     if(!cells) cells = '<rect x="2" y="2" width="1" height="1"/>';
-    const n = size || 36;
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="'+n+'" height="'+n+'" viewBox="0 0 5 5" shape-rendering="crispEdges" aria-hidden="true"><rect width="5" height="5" fill="'+bg+'"/><g fill="'+fg+'">'+cells+'</g></svg>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 5 5" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><rect width="5" height="5" fill="'+bg+'"/><g fill="'+fg+'">'+cells+'</g></svg>';
   }
   function openAccount(){
     if(CONFIG && CONFIG.platform){ go('/account'); return; }
@@ -5502,7 +5502,7 @@ const APP_HTML = String.raw`<!doctype html>
     const slot = document.getElementById('navAvatarSlot');
     if(!slot) return;
     const label = (ME_USER && ME_USER.email) ? accountName(ME_USER.email) : t('我的账户','My account');
-    slot.innerHTML = '<button type="button" class="nav-avatar" id="navAvatar" title="'+esc(label)+'" aria-label="'+esc(t('我的账户','My account'))+'">'+avatarSvg(accountSeed(), 36)+'</button>';
+    slot.innerHTML = '<button type="button" class="avatar-face" id="navAvatar" title="'+esc(label)+'" aria-label="'+esc(t('我的账户','My account'))+'">'+avatarSvg(accountSeed())+'</button>';
     const btn = document.getElementById('navAvatar');
     if(btn) btn.addEventListener('click', openAccount);
   }
@@ -5911,10 +5911,11 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="pc-price"><b>¥12 · $1.6</b> <span class="muted">/ '+t('场','event')+'</span></div>'
       + '<button class="pc-btn" onclick="go(\'/pricing\')">'+t('看价格','See pricing')+'</button></div>'
       // 3) write your story
-      + '<div class="price-card"><div class="pc-ico">📝</div><h2>'+t('分享你的体会','Share your story')+'</h2>'
-      + '<div class="pc-tag">'+t('投稿','Write')+'</div>'
-      + '<p>'+t('写下你参与或举办黑客松的体会,介绍你如何用 Hack5 发起一场活动。优秀投稿会在 Mycelium Blog 发布。','Write about joining or hosting a hackathon and how you used Hack5 — the best posts get published on Mycelium Blog.')+'</p>'
-      + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('投稿到 Mycelium Blog →','Submit to Mycelium Blog →')+'</button></a></div>'
+      + '<div class="price-card"><div class="pc-ico">📝</div><h2>'+t('发帖介绍 Hack5','Post about Hack5')+'</h2>'
+      + '<div class="pc-tag">'+t('核对后发放积分','Credits after verification')+'</div>'
+      + '<p>'+t('发一条帖子介绍 Hack5,并写上约 100 字你的感受。在 X 上 @aastarCommunity,或把帖子发给 Telegram @jasonjiao。我们核对后发放积分。','Post an introduction to Hack5 plus about 100 characters on what you thought of it. Mention @aastarCommunity on X, or send the post to Telegram @jasonjiao. Credits are added after we verify it.')+'</p>'
+      + '<a href="https://x.com/intent/tweet?text=%40aastarCommunity%20" target="_blank" rel="noopener"><button type="button" class="pc-btn">'+t('去 X 发帖 →','Post on X →')+'</button></a>'
+      + '<a href="https://t.me/jasonjiao" target="_blank" rel="noopener"><button type="button" class="pc-btn ghost">'+t('Telegram @jasonjiao','Telegram @jasonjiao')+'</button></a></div>'
       // 4) subscribe blog
       + '<div class="price-card"><div class="pc-ico">📰</div><h2>'+t('订阅 Mycelium Blog','Subscribe to the Blog')+'</h2>'
       + '<div class="pc-tag">'+t('每月 +10 积分(需评论一次)','+10 credits / month (1 comment)')+'</div>'
@@ -5928,7 +5929,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="pc-price"><b>+1 '+t('积分/条','cr / comment')+'</b></div>'
       + '<a href="'+BLOG+'" target="_blank" rel="noopener"><button class="pc-btn">'+t('去评论 →','Go comment →')+'</button></a></div>'
       + '</div>'
-      + '<p class="muted" style="text-align:center;margin-top:16px;font-size:12px">'+t('订阅与评论积分为社区活动奖励,发放以 Mycelium 运营核对为准(自动发放即将上线)。1 积分 = $0.02。','Blog subscribe & comment rewards are community incentives credited after operator verification (auto-crediting coming soon). 1 credit = $0.02.')+'</p>'
+      + '<p class="muted" style="text-align:center;margin-top:16px;font-size:12px">'+t('发帖、订阅与评论积分都在核对后发放。1 积分 = $0.02。','Post, subscribe, and comment credits are added after verification. 1 credit = $0.02.')+'</p>'
       + '<div class="panel guide-cta" style="margin-top:22px"><h2>'+t('现在就发起你的黑客松','Launch your hackathon now')+'</h2>'
       + '<p style="color:rgba(255,255,255,.88)">'+t('你已有的积分足够开始。常规首场免费,mini 50 / 企业 300 一场。','Your credits are enough to start — first regular event free, mini 50 / enterprise 300 per event.')+'</p>'
       + '<a href="https://hack5.net/start"><button>🚀 '+t('去发起 →','Start now →')+'</button></a></div>'
@@ -6225,7 +6226,7 @@ const APP_HTML = String.raw`<!doctype html>
     renderNav();
     if(!ME_USER || !ME_USER.email){
       app.innerHTML = '<div class="acct-wrap"><div class="panel acct-panel">'
-        + '<div class="acct-hero">'+avatarSvg(accountSeed(), 96)+'</div>'
+        + '<div class="acct-hero"><span class="avatar-face avatar-lg">'+avatarSvg(accountSeed())+'</span></div>'
         + '<h1>'+t('我的账户','My account')+'</h1>'
         + '<p class="acct-email">'+t('登录后可以在这里看到你的名字、邮箱和积分，并管理组织资料。','Sign in to see your name, email, and credits, and to manage your organization.')+'</p>'
         + '<div class="acct-login">'
@@ -6265,7 +6266,7 @@ const APP_HTML = String.raw`<!doctype html>
     const gh = ME_USER.githubLogin ? esc(ME_USER.githubLogin) : t('未绑定','Not linked');
     const nEvents = (ME_USER.hackathons || []).length;
     app.innerHTML = '<div class="acct-wrap"><div class="panel acct-panel">'
-      + '<div class="acct-hero">'+avatarSvg(accountSeed(), 96)+'</div>'
+      + '<div class="acct-hero"><span class="avatar-face avatar-lg">'+avatarSvg(accountSeed())+'</span></div>'
       + '<h1>'+esc(name)+'</h1>'
       + '<p class="acct-email">'+esc(ME_USER.email)+'</p>'
       + '<div class="acct-bal"><span>'+t('积分余额','Credit balance')+'</span><b>'+credits+'</b></div>'
