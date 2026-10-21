@@ -268,6 +268,142 @@ describe("POST /api/tenant/register profile", () => {
     expect(body.registrations.find((r) => r.email === "bei@reg.test")?.review).toBe("approved");
   });
 
+  it("keeps today's form when the saved config has no field switches", async () => {
+    const res = await SELF.fetch(`${HOST}/api/tenant/registration-form`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: await userCookie(OWNER) },
+      body: JSON.stringify({ tracks: ["DeFi"], extras: {} }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      registration: { fields: Record<string, string>; teamNote: string; teamSolo: boolean };
+    };
+    expect(body.registration.fields.idea).toBe("required");
+    expect(body.registration.fields.supplement).toBe("required");
+    expect(body.registration.fields.gender).toBe("optional");
+    expect(body.registration.fields.team).toBe("optional");
+    expect(body.registration.teamNote).toBe("");
+    expect(body.registration.teamSolo).toBe(false);
+    expect(body.registration.fields.nickname).toBe("optional");
+  });
+
+  it("rejects a solo team until the organizer turns that option on", async () => {
+    stubResend();
+    const res = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "丙", email: "bing@reg.test", idea: "一个人做", supplement: "无", team: "solo" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("lets the organizer hide fields, require a team, and allow a solo team", async () => {
+    stubResend();
+    const cookie = await userCookie(OWNER);
+    const saved = await SELF.fetch(`${HOST}/api/tenant/registration-form`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        tracks: [],
+        fields: { gender: "off", student: "off", idea: "off", supplement: "optional", team: "required", links: "off", nickname: "required" },
+        teamNote: "可以单人成队，每队最多 4 人",
+        teamSolo: true,
+      }),
+    });
+    expect(saved.status).toBe(200);
+    const cfg = (await saved.json()) as { registration: { fields: Record<string, string>; teamNote: string; teamSolo: boolean } };
+    expect(cfg.registration.fields.gender).toBe("off");
+    expect(cfg.registration.fields.idea).toBe("off");
+    expect(cfg.registration.teamSolo).toBe(true);
+    expect(cfg.registration.teamNote).toBe("可以单人成队，每队最多 4 人");
+    expect(cfg.registration.fields.role).toBe("optional");
+
+    const missingTeam = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "甲", email: "jia@reg.test", nickname: "jia" }),
+    });
+    expect(missingTeam.status).toBe(400);
+
+    const missingNick = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "甲", email: "jia@reg.test", team: "solo" }),
+    });
+    expect(missingNick.status).toBe(400);
+
+    const ok = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "甲",
+        email: "jia@reg.test",
+        nickname: "jia",
+        team: "solo",
+        gender: "female",
+        student: "yes",
+        idea: "不该被留下",
+        twitter: "javascript:alert(1)",
+      }),
+    });
+    expect(ok.status).toBe(200);
+    const row = await env.DB.prepare("SELECT nickname, note, profile FROM registrations WHERE email = ?")
+      .bind("jia@reg.test")
+      .first<{ nickname: string; note: string | null; profile: string }>();
+    expect(row?.nickname).toBe("jia");
+    expect(row?.note).toBeNull();
+    const profile = JSON.parse(row?.profile ?? "{}") as { team: string; gender: string; student: string; idea: string; twitter: string; supplement: string };
+    expect(profile.team).toBe("solo");
+    expect(profile.gender).toBe("");
+    expect(profile.student).toBe("");
+    expect(profile.idea).toBe("");
+    expect(profile.twitter).toBe("");
+    expect(profile.supplement).toBe("");
+  });
+
+  it("requires a link and a gender only after the organizer says so", async () => {
+    stubResend();
+    const cookie = await userCookie(OWNER);
+    const saved = await SELF.fetch(`${HOST}/api/tenant/registration-form`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ fields: { links: "required", gender: "required", genderExtra: "nope" } }),
+    });
+    expect(saved.status).toBe(200);
+    const cfg = (await saved.json()) as { registration: { fields: Record<string, string> } };
+    expect(cfg.registration.fields.gender).toBe("required");
+    expect(cfg.registration.fields.idea).toBe("required");
+    expect("genderExtra" in cfg.registration.fields).toBe(false);
+
+    const bare = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "丁", email: "ding@reg.test", idea: "做工具", supplement: "无" }),
+    });
+    expect(bare.status).toBe(400);
+
+    const badGender = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "丁", email: "ding@reg.test", idea: "做工具", supplement: "无", gender: "nope", github: "https://github.com/ding" }),
+    });
+    expect(badGender.status).toBe(400);
+
+    const ok = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "丁",
+        email: "ding@reg.test",
+        idea: "做工具",
+        supplement: "无",
+        gender: "unspecified",
+        github: "https://github.com/ding",
+      }),
+    });
+    expect(ok.status).toBe(200);
+  });
+
   it("approves a mini sign-up immediately", async () => {
     stubResend();
     await env.DB.exec("DELETE FROM tenants");
