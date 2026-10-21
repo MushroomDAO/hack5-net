@@ -276,7 +276,14 @@ describe("POST /api/tenant/register profile", () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      registration: { fields: Record<string, string>; teamNote: string; teamSolo: boolean };
+      registration: {
+        fields: Record<string, string>;
+        teamNote: string;
+        teamSolo: boolean;
+        teamOptions: string[];
+        roleOptions: string[];
+        labels: Record<string, string>;
+      };
     };
     expect(body.registration.fields.idea).toBe("required");
     expect(body.registration.fields.supplement).toBe("required");
@@ -284,6 +291,9 @@ describe("POST /api/tenant/register profile", () => {
     expect(body.registration.fields.team).toBe("optional");
     expect(body.registration.teamNote).toBe("");
     expect(body.registration.teamSolo).toBe(false);
+    expect(body.registration.teamOptions).toEqual(["have", "looking", "recruiting"]);
+    expect(body.registration.roleOptions).toEqual([]);
+    expect(body.registration.labels.nickname).toBe("");
     expect(body.registration.fields.nickname).toBe("optional");
   });
 
@@ -311,10 +321,13 @@ describe("POST /api/tenant/register profile", () => {
       }),
     });
     expect(saved.status).toBe(200);
-    const cfg = (await saved.json()) as { registration: { fields: Record<string, string>; teamNote: string; teamSolo: boolean } };
+    const cfg = (await saved.json()) as {
+      registration: { fields: Record<string, string>; teamNote: string; teamSolo: boolean; teamOptions: string[] };
+    };
     expect(cfg.registration.fields.gender).toBe("off");
     expect(cfg.registration.fields.idea).toBe("off");
     expect(cfg.registration.teamSolo).toBe(true);
+    expect(cfg.registration.teamOptions).toEqual(["have", "looking", "recruiting", "solo"]);
     expect(cfg.registration.teamNote).toBe("可以单人成队，每队最多 4 人");
     expect(cfg.registration.fields.role).toBe("optional");
 
@@ -402,6 +415,112 @@ describe("POST /api/tenant/register profile", () => {
       }),
     });
     expect(ok.status).toBe(200);
+  });
+
+  it("keeps solo available when an older config only stored teamSolo", async () => {
+    stubResend();
+    await env.DB.prepare("UPDATE tenants SET reg_config = ? WHERE id = ?")
+      .bind(JSON.stringify({ teamSolo: true }), TID)
+      .run();
+    const res = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "戊", email: "wu@reg.test", idea: "一个人做", supplement: "无", team: "solo" }),
+    });
+    expect(res.status).toBe(200);
+    const cfg = await SELF.fetch(`${HOST}/api/config`);
+    const body = (await cfg.json()) as { tenant: { registration: { teamOptions: string[]; teamSolo: boolean } } };
+    expect(body.tenant.registration.teamOptions).toContain("solo");
+    expect(body.tenant.registration.teamSolo).toBe(true);
+  });
+
+  it("lets the organizer pick team choices, including no team", async () => {
+    stubResend();
+    const cookie = await userCookie(OWNER);
+    const saved = await SELF.fetch(`${HOST}/api/tenant/registration-form`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ teamOptions: ["have", "none", "have", "nope"], teamSolo: true }),
+    });
+    expect(saved.status).toBe(200);
+    const cfg = (await saved.json()) as { registration: { teamOptions: string[]; teamSolo: boolean } };
+    expect(cfg.registration.teamOptions).toEqual(["have", "none"]);
+    expect(cfg.registration.teamSolo).toBe(false);
+
+    const solo = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "己", email: "ji@reg.test", idea: "做工具", supplement: "无", team: "solo" }),
+    });
+    expect(solo.status).toBe(400);
+
+    const none = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "己", email: "ji@reg.test", idea: "做工具", supplement: "无", team: "none" }),
+    });
+    expect(none.status).toBe(200);
+    const row = await env.DB.prepare("SELECT profile FROM registrations WHERE email = ?").bind("ji@reg.test").first<{ profile: string }>();
+    expect(JSON.parse(row?.profile ?? "{}").team).toBe("none");
+  });
+
+  it("rejects an empty team list unless the team question is hidden", async () => {
+    const cookie = await userCookie(OWNER);
+    const shown = await SELF.fetch(`${HOST}/api/tenant/registration-form`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ fields: { team: "optional" }, teamOptions: [] }),
+    });
+    expect(shown.status).toBe(400);
+
+    const hidden = await SELF.fetch(`${HOST}/api/tenant/registration-form`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ fields: { team: "off" }, teamOptions: [] }),
+    });
+    expect(hidden.status).toBe(200);
+    const cfg = (await hidden.json()) as { registration: { teamOptions: string[]; fields: Record<string, string> } };
+    expect(cfg.registration.fields.team).toBe("off");
+    expect(cfg.registration.teamOptions).toEqual([]);
+  });
+
+  it("replaces the preset roles and keeps a custom title", async () => {
+    stubResend();
+    const cookie = await userCookie(OWNER);
+    const longIdea = "这".repeat(50);
+    const saved = await SELF.fetch(`${HOST}/api/tenant/registration-form`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        fields: { role: "required" },
+        roleOptions: ["产品", "设计", "产品", "运营"],
+        labels: { nickname: "花名", idea: longIdea, nope: "丢" },
+      }),
+    });
+    expect(saved.status).toBe(200);
+    const cfg = (await saved.json()) as {
+      registration: { roleOptions: string[]; labels: Record<string, string> };
+    };
+    expect(cfg.registration.roleOptions).toEqual(["产品", "设计", "运营"]);
+    expect(cfg.registration.labels.nickname).toBe("花名");
+    expect(cfg.registration.labels.idea).toBe("这".repeat(40));
+    expect("nope" in cfg.registration.labels).toBe(false);
+
+    const preset = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "庚", email: "geng@reg.test", idea: "做工具", supplement: "无", roles: ["frontend"] }),
+    });
+    expect(preset.status).toBe(400);
+
+    const custom = await SELF.fetch(`${HOST}/api/tenant/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "庚", email: "geng@reg.test", idea: "做工具", supplement: "无", roles: ["产品", "frontend"] }),
+    });
+    expect(custom.status).toBe(200);
+    const row = await env.DB.prepare("SELECT profile FROM registrations WHERE email = ?").bind("geng@reg.test").first<{ profile: string }>();
+    expect(JSON.parse(row?.profile ?? "{}").roles).toEqual(["产品"]);
   });
 
   it("approves a mini sign-up immediately", async () => {
