@@ -1658,9 +1658,32 @@ const ROLE_KEYS = new Set(["design", "frontend", "backend", "contract", "researc
 const TEAM_KEYS = new Set(["have", "looking", "recruiting"]);
 const GENDER_KEYS = new Set(["female", "male", "unspecified"]);
 const STUDENT_KEYS = new Set(["yes", "no"]);
+const FIELD_KEYS = ["nickname", "role", "telegram", "contact", "links", "idea", "team", "supplement", "student", "gender"] as const;
+type FieldKey = (typeof FIELD_KEYS)[number];
+type FieldMode = "off" | "optional" | "required";
+// Missing switches keep today's form. Name and email are not in this list: they stay required.
+const FIELD_DEFAULTS: Record<FieldKey, FieldMode> = {
+  nickname: "optional",
+  role: "optional",
+  telegram: "optional",
+  contact: "optional",
+  links: "optional",
+  idea: "required",
+  team: "optional",
+  supplement: "required",
+  student: "optional",
+  gender: "optional",
+};
 
 type ExtraSlot = { label: string; options: string[] };
-type RegConfig = { tracks: string[]; extras: { r1: ExtraSlot; r2: ExtraSlot; i1: string; i2: string; t1: string } };
+type RegFields = Record<FieldKey, FieldMode>;
+type RegConfig = {
+  tracks: string[];
+  extras: { r1: ExtraSlot; r2: ExtraSlot; i1: string; i2: string; t1: string };
+  fields: RegFields;
+  teamNote: string;
+  teamSolo: boolean;
+};
 type RegProfile = {
   roles: string[];
   roleOther: string;
@@ -1705,8 +1728,34 @@ function clipStr(v: unknown, n: number): string {
   return String(v ?? "").trim().slice(0, n);
 }
 
+function defaultFields(): RegFields {
+  return { ...FIELD_DEFAULTS };
+}
+
+function normalizeFields(raw: unknown): RegFields {
+  const src = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const out = defaultFields();
+  for (const key of FIELD_KEYS) {
+    const v = src[key];
+    if (v === "off" || v === "optional" || v === "required") out[key] = v;
+  }
+  return out;
+}
+
+function teamKeys(cfg: RegConfig): Set<string> {
+  const keys = new Set(TEAM_KEYS);
+  if (cfg.teamSolo) keys.add("solo");
+  return keys;
+}
+
 function emptyRegConfig(): RegConfig {
-  return { tracks: [], extras: { r1: { label: "", options: [] }, r2: { label: "", options: [] }, i1: "", i2: "", t1: "" } };
+  return {
+    tracks: [],
+    extras: { r1: { label: "", options: [] }, r2: { label: "", options: [] }, i1: "", i2: "", t1: "" },
+    fields: defaultFields(),
+    teamNote: "",
+    teamSolo: false,
+  };
 }
 
 function parseRegConfig(raw: string | null | undefined): RegConfig {
@@ -1721,7 +1770,13 @@ function parseRegConfig(raw: string | null | undefined): RegConfig {
 }
 
 function normalizeRegConfig(input: unknown): RegConfig | { error: string } {
-  const src = (input && typeof input === "object" ? input : {}) as { tracks?: unknown; extras?: unknown };
+  const src = (input && typeof input === "object" ? input : {}) as {
+    tracks?: unknown;
+    extras?: unknown;
+    fields?: unknown;
+    teamNote?: unknown;
+    teamSolo?: unknown;
+  };
   const tracks: string[] = [];
   if (Array.isArray(src.tracks)) {
     for (const item of src.tracks) {
@@ -1750,7 +1805,13 @@ function normalizeRegConfig(input: unknown): RegConfig | { error: string } {
   if ("error" in r1) return r1;
   const r2 = radio("r2");
   if ("error" in r2) return r2;
-  return { tracks, extras: { r1, r2, i1: clipStr(ex.i1, 40), i2: clipStr(ex.i2, 40), t1: clipStr(ex.t1, 40) } };
+  return {
+    tracks,
+    extras: { r1, r2, i1: clipStr(ex.i1, 40), i2: clipStr(ex.i2, 40), t1: clipStr(ex.t1, 40) },
+    fields: normalizeFields(src.fields),
+    teamNote: clipStr(src.teamNote, 200),
+    teamSolo: src.teamSolo === true,
+  };
 }
 
 function cleanLink(v: unknown): string | { error: string } {
@@ -1784,36 +1845,72 @@ function cleanExtras(cfg: RegConfig, raw: unknown): { extras: Record<string, str
   return { extras: out };
 }
 
+function takeText(mode: FieldMode, v: unknown, max: number, requiredError: string): string | { error: string } {
+  if (mode === "off") return "";
+  const s = clipStr(v, max);
+  if (mode === "required" && !s) return { error: requiredError };
+  return s;
+}
+
+function takeChoice(
+  mode: FieldMode,
+  v: unknown,
+  max: number,
+  allowed: Set<string>,
+  invalidError: string,
+  requiredError: string,
+): string | { error: string } {
+  if (mode === "off") return "";
+  const s = clipStr(v, max);
+  if (s && !allowed.has(s)) return { error: invalidError };
+  if (mode === "required" && !s) return { error: requiredError };
+  return s;
+}
+
 function buildProfile(body: RegisterBody, cfg: RegConfig): { error: string } | { nickname: string | null; idea: string; profile: RegProfile } {
-  const idea = clipStr(body.idea, 500);
-  if (!idea) return { error: "请填写这次想做什么 / Say what you want to build" };
-  const nickname = clipStr(body.nickname, 40) || null;
-  const roles = Array.isArray(body.roles)
-    ? [...new Set(body.roles.map((r) => clipStr(r, 20)).filter((r) => ROLE_KEYS.has(r)))]
-    : [];
-  const roleOther = clipStr(body.roleOther, 40);
-  const github = cleanLink(body.github);
+  const ask = (key: FieldKey) => cfg.fields[key];
+  const nicknameText = takeText(ask("nickname"), body.nickname, 40, "请填写昵称 / Nickname required");
+  if (typeof nicknameText !== "string") return nicknameText;
+  const nickname = nicknameText || null;
+  let roles: string[] = [];
+  let roleOther = "";
+  if (ask("role") !== "off") {
+    roles = Array.isArray(body.roles) ? [...new Set(body.roles.map((r) => clipStr(r, 20)).filter((r) => ROLE_KEYS.has(r)))] : [];
+    roleOther = clipStr(body.roleOther, 40);
+    if (ask("role") === "required" && roles.length === 0 && !roleOther) return { error: "请选择角色 / Pick a role" };
+  }
+  const linksOn = ask("links") !== "off";
+  const github = linksOn ? cleanLink(body.github) : "";
   if (typeof github !== "string") return github;
-  const twitter = cleanLink(body.twitter);
+  const twitter = linksOn ? cleanLink(body.twitter) : "";
   if (typeof twitter !== "string") return twitter;
-  const linkedin = cleanLink(body.linkedin);
+  const linkedin = linksOn ? cleanLink(body.linkedin) : "";
   if (typeof linkedin !== "string") return linkedin;
-  const website = cleanLink(body.website);
+  const website = linksOn ? cleanLink(body.website) : "";
   if (typeof website !== "string") return website;
-  const supplement = clipStr(body.supplement, 500);
-  if (!supplement) return { error: "请填写补充信息 / Add the extra note" };
-  const student = clipStr(body.student, 8);
-  if (student && !STUDENT_KEYS.has(student)) return { error: "学生选项无效 / Invalid student answer" };
-  const gender = clipStr(body.gender, 16);
-  if (gender && !GENDER_KEYS.has(gender)) return { error: "性别选项无效 / Invalid gender" };
-  const team = clipStr(body.team, 16);
-  if (team && !TEAM_KEYS.has(team)) return { error: "队伍选项无效 / Invalid team status" };
+  if (ask("links") === "required" && !github && !twitter && !linkedin && !website) {
+    return { error: "请至少留一个链接 / Add at least one link" };
+  }
+  const telegram = takeText(ask("telegram"), body.telegram, 64, "请填写 Telegram / Telegram required");
+  if (typeof telegram !== "string") return telegram;
+  const contactOther = takeText(ask("contact"), body.contactOther, 80, "请填写其他联系方式 / Other contact required");
+  if (typeof contactOther !== "string") return contactOther;
+  const idea = takeText(ask("idea"), body.idea, 500, "请填写这次想做什么 / Say what you want to build");
+  if (typeof idea !== "string") return idea;
+  const team = takeChoice(ask("team"), body.team, 16, teamKeys(cfg), "队伍选项无效 / Invalid team status", "请选择队伍状态 / Pick a team status");
+  if (typeof team !== "string") return team;
   let track = clipStr(body.track, 40);
   if (cfg.tracks.length) {
     if (!cfg.tracks.includes(track)) return { error: "请选择赛道 / Pick a track" };
   } else {
     track = "";
   }
+  const supplement = takeText(ask("supplement"), body.supplement, 500, "请填写补充信息 / Add the extra note");
+  if (typeof supplement !== "string") return supplement;
+  const student = takeChoice(ask("student"), body.student, 8, STUDENT_KEYS, "学生选项无效 / Invalid student answer", "请选择是否学生 / Say whether you are a student");
+  if (typeof student !== "string") return student;
+  const gender = takeChoice(ask("gender"), body.gender, 16, GENDER_KEYS, "性别选项无效 / Invalid gender", "请选择性别 / Pick a gender");
+  if (typeof gender !== "string") return gender;
   const extrasResult = cleanExtras(cfg, body.extras);
   if ("error" in extrasResult) return extrasResult;
   return {
@@ -1826,8 +1923,8 @@ function buildProfile(body: RegisterBody, cfg: RegConfig): { error: string } | {
       twitter,
       linkedin,
       website,
-      telegram: clipStr(body.telegram, 64),
-      contactOther: clipStr(body.contactOther, 80),
+      telegram,
+      contactOther,
       student,
       gender,
       idea,
@@ -1868,7 +1965,7 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
     const built = buildProfile(body ?? {}, parseRegConfig(tenant.reg_config));
     if ("error" in built) return json({ error: built.error }, 400);
     nickname = built.nickname;
-    note = built.idea;
+    note = built.idea || null;
     profileJson = JSON.stringify(built.profile);
   }
   if (!name) return json({ error: "请填写姓名 / Name required" }, 400);
@@ -5051,7 +5148,7 @@ const APP_HTML = String.raw`<!doctype html>
   const $ = (s, r=document) => r.querySelector(s);
   let CONFIG = null, ME = { role: null }, ME_USER = { email: null };
   // Platform sponsors (up to 4). Fill when a sponsor signs; shown in every hackathon footer.
-  const APP_VERSION = '0.6.32'; // shown in the footer; bump on release
+  const APP_VERSION = '0.6.33'; // shown in the footer; bump on release
   const SPONSORS = []; // e.g. { name:'Acme', url:'https://acme.com', logo:'https://…/logo.png' }
   // Our owned media matrix (for the /media sponsor pitch). Fill followers/handle/link with real data.
   const MEDIA = [
@@ -6518,6 +6615,11 @@ const APP_HTML = String.raw`<!doctype html>
     const rgCfgSave = $('#rgCfgSave');
     if(rgCfgSave) rgCfgSave.addEventListener('click', async ()=>{
       const lines = function(id){ return $('#'+id).value.split(/\n/).map(function(s){ return s.trim(); }).filter(Boolean); };
+      const modeOf = function(id, fallback){
+        const el = $('#'+id);
+        const v = el ? el.value : fallback;
+        return v==='off'||v==='optional'||v==='required' ? v : fallback;
+      };
       const body = {
         tracks: lines('rgTracks'),
         extras: {
@@ -6527,6 +6629,20 @@ const APP_HTML = String.raw`<!doctype html>
           i2: $('#rgI2').value.trim(),
           t1: $('#rgT1').value.trim(),
         },
+        fields: {
+          nickname: modeOf('rgFnickname','optional'),
+          role: modeOf('rgFrole','optional'),
+          telegram: modeOf('rgFtelegram','optional'),
+          contact: modeOf('rgFcontact','optional'),
+          links: modeOf('rgFlinks','optional'),
+          idea: modeOf('rgFidea','required'),
+          team: modeOf('rgFteam','optional'),
+          supplement: modeOf('rgFsupplement','required'),
+          student: modeOf('rgFstudent','optional'),
+          gender: modeOf('rgFgender','optional'),
+        },
+        teamNote: ($('#rgTeamNote')&&$('#rgTeamNote').value||'').trim(),
+        teamSolo: !!($('#rgTeamSolo')&&$('#rgTeamSolo').checked),
       };
       rgCfgSave.disabled = true;
       try{
@@ -6540,13 +6656,42 @@ const APP_HTML = String.raw`<!doctype html>
   function regConfigPanel(){
     const reg = (CONFIG.tenant && CONFIG.tenant.registration) || {tracks:[], extras:{}};
     const ex = reg.extras || {};
+    const fields = reg.fields || {};
     const opt = function(slot){ return ((slot && slot.options) || []).join('\n'); };
+    const modeSelect = function(id, current, fallback){
+      const v = current==='off'||current==='optional'||current==='required' ? current : fallback;
+      const opts = [['off','不显示','Hidden'],['optional','选填','Optional'],['required','必填','Required']];
+      return '<select id="'+id+'" style="width:148px;flex:0 0 148px">'
+        + opts.map(function(o){ return '<option value="'+o[0]+'"'+(o[0]===v?' selected':'')+'>'+esc(t(o[1],o[2]))+'</option>'; }).join('')
+        + '</select>';
+    };
+    const fieldRow = function(id, zh, en, fallback, hint){
+      return '<div style="display:flex;align-items:center;gap:12px;margin:8px 0"><div style="flex:1"><div>'+t(zh,en)+'</div>'
+        + (hint?'<div class="muted" style="font-size:12px;font-weight:500">'+hint+'</div>':'')
+        + '</div>'+modeSelect(id, fields[id.replace('rgF','')], fallback)+'</div>';
+    };
     return '<div class="panel" id="registration" style="max-width:640px;margin-top:16px">'
       + '<h2 style="margin-top:0">'+t('报名设置','Registration')+'</h2>'
+      + '<p class="muted">'+t('姓名和邮箱始终必填。其余每一项可以不显示、选填或必填。不显示的不会出现在报名表上，名单里也不再列出；已经收下的内容仍在导出的 CSV 里。','Name and email stay required. Every other item can be hidden, optional, or required. A hidden item leaves the form and the roster. Answers already collected stay in the CSV export.')+'</p>'
+      + '<h3>'+t('要填写的信息','What participants fill in')+'</h3>'
+      + fieldRow('rgFnickname','昵称','Nickname','optional')
+      + fieldRow('rgFrole','角色','Role','optional')
+      + fieldRow('rgFtelegram','Telegram','Telegram','optional')
+      + fieldRow('rgFcontact','其他联系方式','Other contact','optional')
+      + fieldRow('rgFlinks','链接','Links','optional', t('四个链接一起开关。必填表示至少留一个。','The four links switch together. Required means at least one.'))
+      + fieldRow('rgFidea','这次想做什么','What they want to build','required')
+      + fieldRow('rgFteam','队伍','Team','optional')
+      + fieldRow('rgFsupplement','补充信息','Extra note','required')
+      + fieldRow('rgFstudent','是否学生','Student','optional')
+      + fieldRow('rgFgender','性别','Gender','optional')
+      + '<label style="display:flex;align-items:center;gap:8px;font-weight:560"><input type="checkbox" id="rgTeamSolo"'+(reg.teamSolo?' checked':'')+'>'+t('增加「单人成队」。不勾选时仍是已有队伍、正在寻找、正在招募。','Add “Solo team”. Otherwise the choices stay: I have a team, looking, and recruiting.')+'</label>'
+      + '<label>'+t('队伍说明','Team note')+' <span class="muted">'+t('显示在队伍选项下面，留空则不显示','Shown under the team choices. Blank hides it.')+'</span></label>'
+      + '<textarea id="rgTeamNote" rows="2" maxlength="200" placeholder="'+t('例如：可以单人成队，每队最多 4 人','e.g. A solo entry counts as a team. 4 people max.')+'">'+esc(reg.teamNote||'')+'</textarea>'
+      + '<h3>'+t('赛道','Tracks')+'</h3>'
       + '<p class="muted">'+t('赛道只对这场生效。每行写一个，最多 12 个。留空则报名表不显示赛道；写了之后选手必须选其中一个。下面的补充问题也是。题目留空就不会出现；写了题目，选手不答不能提交。','Tracks apply to this event only. One per line, up to 12. Leave them blank and the form hides Track; once you add any, a participant must pick one. Same for the questions below: a blank title stays off the form, and a titled question must be answered.')+'</p>'
       + '<label>'+t('赛道','Tracks')+' <span class="muted">'+t('(每行一个,最多 12 个)','(one per line, up to 12)')+'</span></label>'
       + '<textarea id="rgTracks" rows="4" maxlength="600" placeholder="'+t('DeFi\\n公共品','DeFi\\nPublic goods')+'">'+esc((reg.tracks||[]).join('\n'))+'</textarea>'
-      + '<h3>'+t('补充信息','Extra questions')+'</h3>'
+      + '<h3>'+t('补充问题','Extra questions')+'</h3>'
       + '<label>'+t('单选一 题目','Choice 1, question')+'</label><input id="rgR1L" maxlength="40" value="'+esc((ex.r1&&ex.r1.label)||'')+'">'
       + '<label>'+t('单选一 选项','Choice 1, options')+' <span class="muted">'+t('(每行一个,2 到 8 个)','(one per line, 2 to 8)')+'</span></label><textarea id="rgR1O" rows="3" maxlength="400">'+esc(opt(ex.r1))+'</textarea>'
       + '<label>'+t('单选二 题目','Choice 2, question')+'</label><input id="rgR2L" maxlength="40" value="'+esc((ex.r2&&ex.r2.label)||'')+'">'
@@ -6887,6 +7032,25 @@ const APP_HTML = String.raw`<!doctype html>
   // ---------------- participant registration ----------------
   const REG_ROLES = [['design','设计师','Designer'],['frontend','前端','Frontend'],['backend','后端','Backend'],['contract','合约工程师','Contract engineer'],['research','研究员','Researcher']];
   const REG_TEAMS = [['have','已有队伍','I have a team'],['looking','正在寻找团队','Looking for a team'],['recruiting','正在招募队友','Recruiting teammates']];
+  const REG_SOLO = ['solo','单人成队','Solo team'];
+  const REG_FIELD_DEFAULTS = {nickname:'optional',role:'optional',telegram:'optional',contact:'optional',links:'optional',idea:'required',team:'optional',supplement:'required',student:'optional',gender:'optional'};
+  function regMode(cfg, key){
+    const fields = (cfg && cfg.fields) || {};
+    const v = fields[key];
+    return v==='off'||v==='optional'||v==='required' ? v : (REG_FIELD_DEFAULTS[key]||'optional');
+  }
+  function regFieldMode(key){
+    return regMode(CONFIG.tenant && CONFIG.tenant.registration, key);
+  }
+  function regMark(mode){
+    if(mode==='required') return ' *';
+    if(mode==='optional') return ' <span class="muted">'+t('选填','optional')+'</span>';
+    return '';
+  }
+  function regTeamItems(){
+    const reg = (CONFIG.tenant && CONFIG.tenant.registration) || {};
+    return reg.teamSolo ? REG_TEAMS.concat([REG_SOLO]) : REG_TEAMS;
+  }
   function regChoices(name, items){
     const type = items===REG_ROLES ? 'checkbox' : 'radio';
     return '<div class="reg-choices">'+items.map(function(it){
@@ -6908,40 +7072,65 @@ const APP_HTML = String.raw`<!doctype html>
     if(tracks.length){
       html += '<label>'+t('赛道','Track')+' *</label>'+regChoices('rgTrack', tracks.map(function(x){ return [x,x,x]; }));
     }
-    html += '<label>'+t('这次想做什么','What do you want to build')+' *</label><textarea id="rgIdea" maxlength="500" placeholder="'+t('还没有具体想法也可以写「还在想」。','If you do not have one yet, say you are still thinking.')+'"></textarea>';
-    html += '<label>'+t('队伍','Team')+' <span class="muted">'+t('选填','optional')+'</span></label>'+regChoices('rgTeam', REG_TEAMS);
-    html += '<h3 class="reg-sec">'+t('补充信息','Extra note')+'</h3>';
-    html += '<label>'+t('补充信息','Extra note')+' *</label><textarea id="rgSupplement" maxlength="500" placeholder="'+t('按这场的要求补充。没有额外要求就写「无」。','Add what this event asked for. If there is nothing else, write “none”.')+'"></textarea>';
-    html += '<p class="muted" style="margin-top:0">'+t('学生和性别选填。主办方写了题目的问题必须回答，没填不能提交。','Student and gender are optional. Questions the organizer titled are required.')+'</p>';
-    html += '<label>'+t('你是学生吗','Are you a student?')+'</label>'+regChoices('rgStudent', [['yes','是','Yes'],['no','不是','No']]);
-    html += '<label>'+t('性别','Gender')+'</label>'+regChoices('rgGender', [['female','女','Female'],['male','男','Male'],['unspecified','不愿透露','Prefer not to say']]);
+    if(regFieldMode('idea')!=='off'){
+      html += '<label>'+t('这次想做什么','What do you want to build')+regMark(regFieldMode('idea'))+'</label><textarea id="rgIdea" maxlength="500" placeholder="'+t('还没有具体想法也可以写「还在想」。','If you do not have one yet, say you are still thinking.')+'"></textarea>';
+    }
+    if(regFieldMode('team')!=='off'){
+      html += '<label>'+t('队伍','Team')+regMark(regFieldMode('team'))+'</label>'+regChoices('rgTeam', regTeamItems());
+      if(cfg.teamNote) html += '<p class="muted" style="margin-top:0;white-space:pre-wrap">'+esc(cfg.teamNote)+'</p>';
+    }
     function radioExtra(key, slot){
       if(!slot || !slot.label || !(slot.options||[]).length) return '';
       return '<label>'+esc(slot.label)+' *</label>'+regChoices('rgX'+key, slot.options.map(function(o){ return [o,o,o]; }));
     }
-    html += radioExtra('r1', ex.r1)+radioExtra('r2', ex.r2);
-    if(ex.i1) html += '<label>'+esc(ex.i1)+' *</label><input id="rgXi1" maxlength="120">';
-    if(ex.i2) html += '<label>'+esc(ex.i2)+' *</label><input id="rgXi2" maxlength="120">';
-    if(ex.t1) html += '<label>'+esc(ex.t1)+' *</label><textarea id="rgXt1" maxlength="500"></textarea>';
+    const extrasHtml = radioExtra('r1', ex.r1)+radioExtra('r2', ex.r2)
+      + (ex.i1 ? '<label>'+esc(ex.i1)+' *</label><input id="rgXi1" maxlength="120">' : '')
+      + (ex.i2 ? '<label>'+esc(ex.i2)+' *</label><input id="rgXi2" maxlength="120">' : '')
+      + (ex.t1 ? '<label>'+esc(ex.t1)+' *</label><textarea id="rgXt1" maxlength="500"></textarea>' : '');
+    const showNote = regFieldMode('supplement')!=='off' || regFieldMode('student')!=='off' || regFieldMode('gender')!=='off' || !!extrasHtml;
+    if(showNote) html += '<h3 class="reg-sec">'+t('补充信息','Extra note')+'</h3>';
+    if(regFieldMode('supplement')!=='off'){
+      html += '<label>'+t('补充信息','Extra note')+regMark(regFieldMode('supplement'))+'</label><textarea id="rgSupplement" maxlength="500" placeholder="'+t('按这场的要求补充。没有额外要求就写「无」。','Add what this event asked for. If there is nothing else, write “none”.')+'"></textarea>';
+    }
+    if(regFieldMode('student')!=='off'){
+      html += '<label>'+t('你是学生吗','Are you a student?')+regMark(regFieldMode('student'))+'</label>'+regChoices('rgStudent', [['yes','是','Yes'],['no','不是','No']]);
+    }
+    if(regFieldMode('gender')!=='off'){
+      html += '<label>'+t('性别','Gender')+regMark(regFieldMode('gender'))+'</label>'+regChoices('rgGender', [['female','女','Female'],['male','男','Male'],['unspecified','不愿透露','Prefer not to say']]);
+    }
+    html += extrasHtml;
     return html;
   }
   function regProfileForm(){
-    return '<h3 class="reg-sec">'+t('个人信息','About you')+'</h3>'
-      + '<div class="reg-grid">'
-      + '<div><label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60"></div>'
-      + '<div><label>'+t('昵称','Nickname')+' <span class="muted">'+t('选填','optional')+'</span></label><input id="rgNick" maxlength="40"></div>'
-      + '<div class="span2"><label>'+t('角色','Role')+' <span class="muted">'+t('可多选,方便组队筛选','pick any that fit — used to match teams')+'</span></label>'
-      + regChoices('rgRole', REG_ROLES)+'</div>'
-      + '<div class="span2"><label>'+t('其他角色','Other role')+'</label><input id="rgRoleOther" maxlength="40" placeholder="'+t('上面没有的,自己写','Write one if none of the above fit')+'"></div>'
-      + '<div><label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com"></div>'
-      + '<div><label>Telegram <span class="muted">'+t('选填','optional')+'</span></label><input id="rgTg" maxlength="64" placeholder="@name"></div>'
-      + '<div class="span2"><label>'+t('其他联系方式','Other contact')+'</label><input id="rgContactOther" maxlength="80" placeholder="'+t('微信 / 电话,愿意留再填','WeChat / phone, if you want')+'"></div>'
-      + '<div><label>GitHub</label><input id="rgGh" maxlength="200" placeholder="https://github.com/you"></div>'
-      + '<div><label>Twitter / X</label><input id="rgTw" maxlength="200" placeholder="https://x.com/you"></div>'
-      + '<div><label>LinkedIn</label><input id="rgLi" maxlength="200" placeholder="https://www.linkedin.com/in/you"></div>'
-      + '<div><label>'+t('其他链接','Other link')+'</label><input id="rgWeb" maxlength="200" placeholder="https://"></div>'
-      + '</div>'
-      + regExtraHtml();
+    let html = '<h3 class="reg-sec">'+t('个人信息','About you')+'</h3><div class="reg-grid">';
+    html += '<div><label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60"></div>';
+    if(regFieldMode('nickname')!=='off'){
+      html += '<div><label>'+t('昵称','Nickname')+regMark(regFieldMode('nickname'))+'</label><input id="rgNick" maxlength="40"></div>';
+    }
+    if(regFieldMode('role')!=='off'){
+      html += '<div class="span2"><label>'+t('角色','Role')+regMark(regFieldMode('role'))+' <span class="muted">'+t('可多选,方便组队筛选','pick any that fit — used to match teams')+'</span></label>'
+        + regChoices('rgRole', REG_ROLES)+'</div>'
+        + '<div class="span2"><label>'+t('其他角色','Other role')+'</label><input id="rgRoleOther" maxlength="40" placeholder="'+t('上面没有的,自己写','Write one if none of the above fit')+'"></div>';
+    }
+    html += '<div><label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com"></div>';
+    if(regFieldMode('telegram')!=='off'){
+      html += '<div><label>Telegram'+regMark(regFieldMode('telegram'))+'</label><input id="rgTg" maxlength="64" placeholder="@name"></div>';
+    }
+    if(regFieldMode('contact')!=='off'){
+      html += '<div class="span2"><label>'+t('其他联系方式','Other contact')+regMark(regFieldMode('contact'))+'</label><input id="rgContactOther" maxlength="80" placeholder="'+t('微信 / 电话,愿意留再填','WeChat / phone, if you want')+'"></div>';
+    }
+    if(regFieldMode('links')!=='off'){
+      html += '<div class="span2"><label>'+t('链接','Links')+regMark(regFieldMode('links'))+'</label><p class="muted" style="margin:0 0 8px">'
+        + (regFieldMode('links')==='required'
+          ? t('GitHub、X、LinkedIn 或其他主页，至少留一个。','GitHub, X, LinkedIn, or another page. Leave at least one.')
+          : t('GitHub、X、LinkedIn 或其他主页，愿意留再填。','GitHub, X, LinkedIn, or another page. Only if you want.'))
+        + '</p></div>'
+        + '<div><label>GitHub</label><input id="rgGh" maxlength="200" placeholder="https://github.com/you"></div>'
+        + '<div><label>Twitter / X</label><input id="rgTw" maxlength="200" placeholder="https://x.com/you"></div>'
+        + '<div><label>LinkedIn</label><input id="rgLi" maxlength="200" placeholder="https://www.linkedin.com/in/you"></div>'
+        + '<div><label>'+t('其他链接','Other link')+'</label><input id="rgWeb" maxlength="200" placeholder="https://"></div>';
+    }
+    return html + '</div>' + regExtraHtml();
   }
   function roleLine(p){
     const bits = ((p&&p.roles)||[]).map(function(k){
@@ -6952,7 +7141,7 @@ const APP_HTML = String.raw`<!doctype html>
     return bits.join(' / ');
   }
   function teamLine(v){
-    const hit = REG_TEAMS.find(function(r){ return r[0]===v; });
+    const hit = REG_TEAMS.concat([REG_SOLO]).find(function(r){ return r[0]===v; });
     return hit ? t(hit[1],hit[2]) : '';
   }
   function linkCell(url){
@@ -6998,24 +7187,46 @@ const APP_HTML = String.raw`<!doctype html>
     if(ex.i1) extraCols.push(['i1', ex.i1]);
     if(ex.i2) extraCols.push(['i2', ex.i2]);
     if(ex.t1) extraCols.push(['t1', ex.t1]);
-    const head = ['姓名','昵称','角色','邮箱','Telegram','其他联系方式','GitHub','X','LinkedIn','其他链接','赛道','想做什么','补充信息','队伍','学生','性别'].concat(extraCols.map(function(c){ return c[1]; })).concat(['时间','审核']);
-    const headEn = ['Name','Nickname','Role','Email','Telegram','Other contact','GitHub','X','LinkedIn','Other link','Track','Idea','Extra note','Team','Student','Gender'].concat(extraCols.map(function(c){ return c[1]; })).concat(['When','Review']);
+    const on = function(key){ return regMode(REG_CFG, key)!=='off'; };
+    const cols = [{zh:'姓名',en:'Name',get:function(r){ return r.name||''; }}];
+    if(on('nickname')) cols.push({zh:'昵称',en:'Nickname',get:function(r){ return r.nickname||''; }});
+    if(on('role')) cols.push({zh:'角色',en:'Role',get:function(r){ return roleLine(r.profile||{}); }});
+    cols.push({zh:'邮箱',en:'Email',get:function(r){ return r.email||''; }});
+    if(on('telegram')) cols.push({zh:'Telegram',en:'Telegram',get:function(r){ return (r.profile&&r.profile.telegram)||''; }});
+    if(on('contact')) cols.push({zh:'其他联系方式',en:'Other contact',get:function(r){ return (r.profile&&r.profile.contactOther)||''; }});
+    if(on('links')){
+      cols.push({zh:'GitHub',en:'GitHub',link:true,get:function(r){ return (r.profile&&r.profile.github)||''; }});
+      cols.push({zh:'X',en:'X',link:true,get:function(r){ return (r.profile&&r.profile.twitter)||''; }});
+      cols.push({zh:'LinkedIn',en:'LinkedIn',link:true,get:function(r){ return (r.profile&&r.profile.linkedin)||''; }});
+      cols.push({zh:'其他链接',en:'Other link',link:true,get:function(r){ return (r.profile&&r.profile.website)||''; }});
+    }
+    cols.push({zh:'赛道',en:'Track',get:function(r){ return (r.profile&&r.profile.track)||''; }});
+    if(on('idea')) cols.push({zh:'想做什么',en:'Idea',wrap:true,get:function(r){ const p=r.profile||{}; return p.idea||r.note||''; }});
+    if(on('supplement')) cols.push({zh:'补充信息',en:'Extra note',wrap:true,get:function(r){ return (r.profile&&r.profile.supplement)||''; }});
+    if(on('team')) cols.push({zh:'队伍',en:'Team',get:function(r){ return teamLine(r.profile&&r.profile.team); }});
+    if(on('student')) cols.push({zh:'学生',en:'Student',get:function(r){
+      const s=r.profile&&r.profile.student;
+      return s==='yes'?t('是','Yes'):s==='no'?t('不是','No'):'';
+    }});
+    if(on('gender')) cols.push({zh:'性别',en:'Gender',get:function(r){
+      const g=r.profile&&r.profile.gender;
+      return g==='female'?t('女','Female'):g==='male'?t('男','Male'):g==='unspecified'?t('不愿透露','Unspecified'):'';
+    }});
+    extraCols.forEach(function(c){
+      cols.push({zh:c[1],en:c[1],wrap:true,get:function(r){ return (r.profile&&r.profile.extras&&r.profile.extras[c[0]])||''; }});
+    });
+    cols.push({zh:'时间',en:'When',get:function(r){ return r.created_at ? new Date(r.created_at*1000).toLocaleString() : ''; }});
     let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
-      + head.map(function(h,i){ return '<th style="'+td+'">'+esc(t(h,headEn[i]))+'</th>'; }).join('')
-      + '</tr></thead><tbody>';
-    if(!rows.length){ html += '<tr><td colspan="'+head.length+'" class="muted" style="padding:8px">'+t('没有匹配的报名','No matching sign-ups')+'</td></tr>'; }
+      + cols.map(function(c){ return '<th style="'+td+'">'+esc(t(c.zh,c.en))+'</th>'; }).join('')
+      + '<th style="'+td+'">'+esc(t('审核','Review'))+'</th></tr></thead><tbody>';
+    if(!rows.length){ html += '<tr><td colspan="'+(cols.length+1)+'" class="muted" style="padding:8px">'+t('没有匹配的报名','No matching sign-ups')+'</td></tr>'; }
     rows.forEach(function(r){
-      const p = r.profile||{};
-      const student = p.student==='yes'?t('是','Yes'):p.student==='no'?t('不是','No'):'';
-      const gender = p.gender==='female'?t('女','Female'):p.gender==='male'?t('男','Male'):p.gender==='unspecified'?t('不愿透露','Unspecified'):'';
-      const when = r.created_at ? new Date(r.created_at*1000).toLocaleString() : '';
-      const cells = [r.name, r.nickname, roleLine(p), r.email, p.telegram||'', p.contactOther||'', p.github||'', p.twitter||'', p.linkedin||'', p.website||'', p.track||'', p.idea||r.note||'', p.supplement||'', teamLine(p.team), student, gender].concat(extraCols.map(function(c){ return (p.extras&&p.extras[c[0]])||''; })).concat([when]);
       const pending = rosterReview(r)==='pending';
       const reviewBtn = '<button class="ghost" data-rev="'+esc(r.email)+'" data-next="'+(pending?'approved':'pending')+'" style="padding:2px 8px;font-size:12px">'+(pending?t('通过','Approve'):t('改回待审核','Mark pending'))+'</button>';
-      html += '<tr>'+cells.map(function(c,i){
-        const linked = (i>=6 && i<=9) ? linkCell(c) : esc(c);
-        const wrap = (i===11 || i===12) ? 'white-space:normal;min-width:180px;' : 'white-space:nowrap;';
-        return '<td style="'+td+';'+wrap+'">'+linked+'</td>';
+      html += '<tr>'+cols.map(function(c){
+        const raw = c.get(r);
+        const wrap = c.wrap ? 'white-space:normal;min-width:180px;' : 'white-space:nowrap;';
+        return '<td style="'+td+';'+wrap+'">'+(c.link?linkCell(raw):esc(raw))+'</td>';
       }).join('')+'<td style="'+td+'">'+(pending?t('待审核','Pending'):t('已通过','Approved'))+' '+reviewBtn+'</td></tr>';
     });
     box.innerHTML = html+'</tbody></table>';
@@ -7037,7 +7248,7 @@ const APP_HTML = String.raw`<!doctype html>
     const tn = CONFIG.tenant || {};
     const exportHref = '/api/tenant/registrations/export' + ((location.hostname==='localhost'||location.hostname==='127.0.0.1') && location.search.indexOf('tenant=')>=0 ? location.search : '');
     const tools = [
-      ['/manage', t('报名设置','Registration'), t('自定义这场的赛道，以及必须回答的补充问题','Custom tracks and the required extra questions'), 'registration'],
+      ['/manage', t('报名设置','Registration'), t('决定报名要填哪些信息，以及赛道和补充问题','Choose what the form asks, plus tracks and extra questions'), 'registration'],
       ['/manage', t('首页设置','Homepage'), t('介绍、时间、地点和日程','Intro, dates, place and agenda')],
       ['/poster', t('海报','Poster'), t('生成活动海报','Make the event poster')],
       ['/invites', t('邀请码','Invites'), t('发给参赛者的邀请码','Codes for participants')],
@@ -7053,7 +7264,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<button class="ghost" id="admOther">'+t('管理其他比赛','My other events')+'</button>'
       + '</div>'
       + '<h2 style="margin-bottom:8px">'+t('报名','Sign-ups')+'</h2>'
-      + '<p class="muted" style="margin-top:0">'+t('新报名先进入待审核。点通过后出现在已通过。已经报过名的人默认算已通过。赛道在「报名设置」里按这场自定义。补充信息是选手必填的开放文本。','New sign-ups start as pending. Approve moves them to the approved list. People who signed up earlier stay approved. Tracks are set per event under Registration. Extra note is an open field the participant must fill.')+'</p>'
+      + '<p class="muted" style="margin-top:0">'+t('新报名先进入待审核。点通过后出现在已通过。已经报过名的人默认算已通过。报名要填哪些信息，在「报名设置」里按这场决定。','New sign-ups start as pending. Approve moves them to the approved list. People who signed up earlier stay approved. What the form asks is set per event under Registration.')+'</p>'
       + '<div class="row" id="rsTabs" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">'
       + '<button data-rstab="all" id="rsTabAll">'+t('全部','All')+'</button>'
       + '<button class="ghost" data-rstab="pending" id="rsTabPending">'+t('待审核','Pending')+'</button>'
@@ -7063,7 +7274,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<input id="rsQ" placeholder="'+t('搜索姓名、昵称、邮箱','Search name, nickname, email')+'" style="max-width:260px">'
       + '<select id="rsTrack"><option value="">'+t('全部赛道','All tracks')+'</option></select>'
       + '<select id="rsRole"><option value="">'+t('全部角色','All roles')+'</option>'+REG_ROLES.map(function(r){ return '<option value="'+r[0]+'">'+esc(t(r[1],r[2]))+'</option>'; }).join('')+'</select>'
-      + '<select id="rsTeam"><option value="">'+t('全部队伍状态','All team statuses')+'</option>'+REG_TEAMS.map(function(r){ return '<option value="'+r[0]+'">'+esc(t(r[1],r[2]))+'</option>'; }).join('')+'</select>'
+      + '<select id="rsTeam"><option value="">'+t('全部队伍状态','All team statuses')+'</option>'+REG_TEAMS.concat([REG_SOLO]).map(function(r){ return '<option value="'+r[0]+'">'+esc(t(r[1],r[2]))+'</option>'; }).join('')+'</select>'
       + '<a href="'+exportHref+'"><button class="ghost">'+t('导出 CSV','Export CSV')+'</button></a>'
       + '</div>'
       + '<p id="rsCount" class="muted"></p>'
@@ -7092,6 +7303,8 @@ const APP_HTML = String.raw`<!doctype html>
       const d = await api('/api/tenant/registrations');
       ROSTER = d.registrations||[];
       REG_CFG = d.registration || REG_CFG;
+      const roleSel = $('#rsRole'); if(roleSel) roleSel.style.display = regMode(REG_CFG,'role')==='off' ? 'none' : '';
+      const teamSel = $('#rsTeam'); if(teamSel) teamSel.style.display = regMode(REG_CFG,'team')==='off' ? 'none' : '';
       const tracks = ((d.registration&&d.registration.tracks)||[]).slice();
       ROSTER.forEach(function(r){ const tr=r.profile&&r.profile.track; if(tr && tracks.indexOf(tr)<0) tracks.push(tr); });
       const sel = $('#rsTrack');
@@ -7125,13 +7338,38 @@ const APP_HTML = String.raw`<!doctype html>
       if(isMini){
         payload = {name:name, email:email, note:note};
       } else {
-        const idea = ($('#rgIdea').value||'').trim();
-        if(!idea){ setMsg('rgMsg', t('请填写这次想做什么','Say what you want to build'), true); return; }
-        const supplement = ($('#rgSupplement')&&$('#rgSupplement').value||'').trim();
-        if(!supplement){ setMsg('rgMsg', t('请填写补充信息','Add the extra note'), true); return; }
+        const read = function(id){ const el=$('#'+id); return el ? el.value.trim() : ''; };
+        const miss = function(mode, value, zh, en){
+          if(mode==='required' && !value){ setMsg('rgMsg', t(zh, en), true); return true; }
+          return false;
+        };
+        const nickname = regFieldMode('nickname')==='off' ? '' : read('rgNick');
+        if(miss(regFieldMode('nickname'), nickname, '请填写昵称','Nickname required')) return;
+        const roles = regFieldMode('role')==='off' ? [] : regChecked('rgRole');
+        const roleOther = regFieldMode('role')==='off' ? '' : read('rgRoleOther');
+        if(regFieldMode('role')==='required' && !roles.length && !roleOther){ setMsg('rgMsg', t('请选择角色','Pick a role'), true); return; }
+        const telegram = regFieldMode('telegram')==='off' ? '' : read('rgTg');
+        if(miss(regFieldMode('telegram'), telegram, '请填写 Telegram','Telegram required')) return;
+        const contactOther = regFieldMode('contact')==='off' ? '' : read('rgContactOther');
+        if(miss(regFieldMode('contact'), contactOther, '请填写其他联系方式','Other contact required')) return;
+        const github = regFieldMode('links')==='off' ? '' : read('rgGh');
+        const twitter = regFieldMode('links')==='off' ? '' : read('rgTw');
+        const linkedin = regFieldMode('links')==='off' ? '' : read('rgLi');
+        const website = regFieldMode('links')==='off' ? '' : read('rgWeb');
+        if(regFieldMode('links')==='required' && !github && !twitter && !linkedin && !website){ setMsg('rgMsg', t('请至少留一个链接','Add at least one link'), true); return; }
+        const idea = regFieldMode('idea')==='off' ? '' : read('rgIdea');
+        if(miss(regFieldMode('idea'), idea, '请填写这次想做什么','Say what you want to build')) return;
+        const team = regFieldMode('team')==='off' ? '' : regOne('rgTeam');
+        if(miss(regFieldMode('team'), team, '请选择队伍状态','Pick a team status')) return;
         const tracks = (CONFIG.tenant.registration && CONFIG.tenant.registration.tracks) || [];
         const track = regOne('rgTrack');
         if(tracks.length && !track){ setMsg('rgMsg', t('请选择赛道','Pick a track'), true); return; }
+        const supplement = regFieldMode('supplement')==='off' ? '' : read('rgSupplement');
+        if(miss(regFieldMode('supplement'), supplement, '请填写补充信息','Add the extra note')) return;
+        const student = regFieldMode('student')==='off' ? '' : regOne('rgStudent');
+        if(miss(regFieldMode('student'), student, '请选择是否学生','Say whether you are a student')) return;
+        const gender = regFieldMode('gender')==='off' ? '' : regOne('rgGender');
+        if(miss(regFieldMode('gender'), gender, '请选择性别','Pick a gender')) return;
         const exCfg = (CONFIG.tenant.registration && CONFIG.tenant.registration.extras) || {};
         if(exCfg.r1 && exCfg.r1.label && !regOne('rgXr1')){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
         if(exCfg.r2 && exCfg.r2.label && !regOne('rgXr2')){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
@@ -7139,12 +7377,11 @@ const APP_HTML = String.raw`<!doctype html>
         if(exCfg.i2 && !($('#rgXi2')&&$('#rgXi2').value.trim())){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
         if(exCfg.t1 && !($('#rgXt1')&&$('#rgXt1').value.trim())){ setMsg('rgMsg', t('请按主办方的要求填写补充问题','Answer the organizer\'s question'), true); return; }
         payload = {
-          name:name, email:email, nickname:($('#rgNick').value||'').trim(), idea:idea, track:track, supplement:supplement,
-          roles:regChecked('rgRole'), roleOther:($('#rgRoleOther').value||'').trim(),
-          telegram:($('#rgTg').value||'').trim(), contactOther:($('#rgContactOther').value||'').trim(),
-          github:($('#rgGh').value||'').trim(), twitter:($('#rgTw').value||'').trim(),
-          linkedin:($('#rgLi').value||'').trim(), website:($('#rgWeb').value||'').trim(),
-          student:regOne('rgStudent'), gender:regOne('rgGender'), team:regOne('rgTeam'),
+          name:name, email:email, nickname:nickname, idea:idea, track:track, supplement:supplement,
+          roles:roles, roleOther:roleOther,
+          telegram:telegram, contactOther:contactOther,
+          github:github, twitter:twitter, linkedin:linkedin, website:website,
+          student:student, gender:gender, team:team,
           extras:{ r1:regOne('rgXr1'), r2:regOne('rgXr2'), i1:($('#rgXi1')&&$('#rgXi1').value.trim())||'', i2:($('#rgXi2')&&$('#rgXi2').value.trim())||'', t1:($('#rgXt1')&&$('#rgXt1').value.trim())||'' },
         };
       }
